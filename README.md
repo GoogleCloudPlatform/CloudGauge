@@ -276,13 +276,25 @@ gcloud storage buckets add-iam-policy-binding gs://${BUCKET_NAME} --member="serv
 
 ### **Method 1: Deploy from Source (Recommended)** 
 
-### **Step 1: Fork the GitHub Repository** 
+### **Step 1: Fork the Repository and Sync the Beta Branch**
 
-First, you need your own copy of the code.
+First, you need your own copy of the CloudGauge code. The easiest way to get the beta branch is to fork the repository and then use GitHub's built-in sync feature.
 
-1. Navigate to the [CloudGauge GitHub repository](https://github.com/GoogleCloudPlatform/CloudGauge/).  
-2. Click the **Fork** button in the top-right corner of the page.  
-3. Choose your GitHub account as the destination for the fork. This will create a copy of the repository under your account (e.g., `https://github.com/your-username/CloudGauge`).
+1. **Fork the Repository**:  
+   * Navigate to the [CloudGauge GitHub repository](https://github.com/GoogleCloudPlatform/CloudGauge).  
+   * Click the **Fork** button in the top-right corner.  
+   * Choose your GitHub account as the destination. This creates a copy of the repository under your account (e.g., https://github.com/your-username/CloudGauge), which will initially only contain the main branch.  
+2. **Create a beta Branch on Your Fork**:  
+   * On your forked repository's main page, click the branch selector dropdown that says **"main"**.  
+   * In the text box, simply type beta.  
+   * Click the option that says **"Create branch: beta from 'main'"**. This creates a new branch named beta in your fork that is currently identical to main.  
+3. **Sync the Branch from the Original Repository**:  
+   * After creating the branch, you will see a new message on your beta branch page: "This branch is out-of-date with the base branch."  
+   * GitHub has detected that a branch named beta also exists on the original GoogleCloudPlatform/CloudGauge repository, and it provides a simple way to update yours.  
+   * Click the **"Sync fork"** button. A dropdown will appear.  
+   * Click **"Update branch"** to pull in all the latest code from the original beta branch.
+
+After the sync is complete, your forked beta branch will be an exact match of the original, scalable version. You can now proceed with the deployment steps, ensuring you have the beta branch selected in your Cloud Run configuration.
 
 ---
 
@@ -298,7 +310,7 @@ Now, let's create the initial Cloud Run service and connect it to your new repos
    * Select your GitHub username or organization.  
    * In the "Repository access" section, choose either **All repositories** or **Only select repositories**. If you choose the latter, make sure you select your forked `CloudGauge` repository.  
    * Click **Install** or **Save**.  
-6. Back in the Cloud Console, select your newly connected forked repository and branch (`main`), then click **Next**.  
+6. **Crucially, for the "Branch" dropdown, select beta instead of main.** This ensures you are deploying the scalable beta version of the tool. Click **Next**.  
 7. In the **Build Settings** section:  
    * **Build Type**: Select `Dockerfile`.  
    * **Source location**: Keep the default `/Dockerfile`.  
@@ -308,7 +320,7 @@ Now, let's create the initial Cloud Run service and connect it to your new repos
    * **Region**: Choose a region, for example, `asia-south1`.  
 9. Expand the "Container(s), Volumes, Networking, Security" section.  
    * Go to the **Identity & Security** tab and select the service account you previously created (e.g., `cloudgauge-sa@...`).  
-   * Go to the **General** tab and set the **Request Timeout** to `3600` seconds.  
+   * Go to the **Containers** tab and set the **Resources Memory** to 2GiB and **Request Timeout** to `3600` seconds.  
    * Go to the **Variables & Secrets** tab and add the following **Environment Variables**. Replace the example values with your own.  
      * `PROJECT_ID`: Your GCP Project ID (e.g., `my-gcp-project`)  
      * `TASK_QUEUE`: `cloudgauge-scan-queue`  
@@ -355,7 +367,8 @@ This method gives you manual control over the build and deploy steps.
 1. **Clone this repository**:
 ```
 git clone https://github.com/GoogleCloudPlatform/CloudGauge
-cd cloudgauge
+cd CloudGauge
+git checkout beta
 ```
 2. **Set Environment Variables**:  
    * (You should already have `PROJECT_ID` and `SA_EMAIL` from the common setup)
@@ -380,7 +393,7 @@ gcloud run deploy ${SERVICE_NAME} \
   --allow-unauthenticated \
   --platform managed \
   --timeout=3600 \
-  --memory=1Gi \
+  --memory=2Gi \
   --set-env-vars=PROJECT_ID=${PROJECT_ID},TASK_QUEUE=${QUEUE_NAME},RESULTS_BUCKET=${BUCKET_NAME},SERVICE_ACCOUNT_EMAIL=${SA_EMAIL},LOCATION=${REGION}
 ```
 4. **Grant Invoker & Viewer Permission**:  
@@ -399,14 +412,42 @@ gcloud run services add-iam-policy-binding ${SERVICE_NAME} \
 
 Your service is now fully deployed and configured\!
 
-## **How to Use** 
 
-1. Navigate to your service's URL (`${SERVICE_URL}`).  
-2. Select your Scope from Dropdown menu : Organization, Folder or Project
-3. Select the resource from the Dropdown
-4. Click "Start Scan".  
-5. You will be redirected to a status page. Wait for the scan to complete (this can take 5-15 minutes depending on org size).  
-6. Once finished, links to the **Interactive HTML Report** and **Download CSV Report** will appear.
+## **How to Use**
+
+Using CloudGauge is a simple, three-step process that involves selecting your scan scope, running the analysis, and then generating the final report.
+
+#### **1\. Select Your Scan Scope**
+
+First, navigate to the Cloud Run application's URL. You will be presented with a simple UI to start your scan.
+
+1. **Select Scan Scope:** Choose whether you want to scan an entire **Organization**, a specific **Folder**, or a single **Project**.  
+2. **Select Resource:** Based on your scope, a dropdown will populate with the corresponding resources you have access to. Select the specific resource you wish to analyze.  
+3. **Start Scan:** Click the **"Start Scan"** button to begin the process.
+
+#### **2\. Scan in Progress (Fan-Out Phase)**
+
+Once initiated, you will be redirected to a status page. In this beta version, the architecture is designed for scale:
+
+* **Dispatcher:** A dispatcher task quickly identifies all projects within your selected scope.  
+* **Parallel Processing:** It then creates a separate, parallel task for **each project**. This allows hundreds or thousands of projects to be scanned simultaneously, dramatically speeding up the process for large organizations.  
+* **Status Tracking:** The status page will show the overall progress as each project scan is completed.
+
+#### **3\. Generate Final Report (Aggregation Phase)**
+
+Because the project scans are running as independent, parallel tasks, there is a final aggregation step once they are all complete.
+
+* When all project scans have finished, the status page will update with a **"Generate Final Report"** button.  
+* Click this button to trigger the final worker. This task gathers all the intermediate results from the parallel scans and compiles them into the final HTML and CSV reports.
+
+#### **4\. View Your Report**
+
+Once the aggregation is complete, the page will update one last time, presenting you with two options:
+
+* **View Interactive Report:** A detailed, interactive HTML report with compliance scores, collapsible findings, and AI-powered summaries and remediation suggestions.  
+* **Download CSV:** A comprehensive CSV file containing all the raw data from the scan for offline analysis or integration with other tools.
+
+
 
 ## **Troubleshooting**
 
