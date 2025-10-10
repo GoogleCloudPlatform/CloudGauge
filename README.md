@@ -298,7 +298,7 @@ After the sync is complete, your forked beta branch will be an exact match of th
 
 ---
 
-### **Step 2: Create the Cloud Run Service ** 
+### **Step 2: Create the Cloud Run Service** 
 
 Now, let's create the initial Cloud Run service and connect it to your new repository.
 
