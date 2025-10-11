@@ -22,4 +22,4 @@ COPY . .
 # Step 6: Define the command to run your application
 # Use Gunicorn as a production-grade WSGI server, not Flask's built-in server.
 # It will listen on the port defined by the PORT environment variable, which Cloud Run sets automatically.
-ENTRYPOINT ["gunicorn", "--bind", "0.0.0.0:8080", "--workers", "1", "--threads", "8", "--timeout", "0", "cloudgauge_beta_v1:app"]
+ENTRYPOINT ["gunicorn", "--bind", "0.0.0.0:8080", "--workers", "1", "--threads", "8", "--timeout", "0", "cloudgauge_beta_v25:app"]
