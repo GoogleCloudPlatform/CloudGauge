@@ -14,7 +14,7 @@ Python/Flaskで構築され、Google Cloud Run上にサーバーレスアプリ�
 
 ## **目次**
 * [機能](#機能)
-* [Architecture](#architecture)
+* [Architecture](#アーキテクチャ)
 * [デプロイ手順](#デプロイ手順)
   * [共通の前提条件（すべての方法で必須）](#共通の前提条件すべての方法で必須)
   * [方法 1: ソースからデプロイ（推奨）](#方法-1-ソースからデプロイ推奨)
@@ -63,7 +63,7 @@ CloudGaugeは、Google Cloud Architecture Frameworkを基に、Organization内�
 * **クォータ使用率**: 使用率が80%を超えているリージョンのコンピューティングクォータを特定。
 * **放置されたプロジェクト**: 使用率の低いプロジェクトを検出。
 
-## **Architecture**
+## **アーキテクチャ**
 
 このアプリケーションは、綿密で、スケーラブルかつ非同期な「fire-and-forget」パターンを採用しています。これにより、即座に応答を受け取る一方で、負荷の高い作業（数分かかる場合があります）を**バックグラウンドで実行**することができます。
 
@@ -130,16 +130,16 @@ graph LR
     end
 ```
 
-## **Deployment Instructions** 
+## **デプロイ手順** 
 
-Follow the **Common Prerequisites** first, then choose **Method 1** or **Method 2** to deploy.
+まず**共通の前提条件**に従い、その後に**方法 1** または **方法 2** のどちらかに従いデプロイしてください。
 
-### **Common Prerequisites (Required for all methods)** 
+### **共通の前提条件（すべての方法で必須）** 
 
-1. **Enable APIs**:  
-   * A Google Cloud Project with billing enabled.  
-   * [gcloud CLI](https://cloud.google.com/sdk/install) installed and authenticated (`gcloud auth login`).  
-   * Run the following command to enable all necessary APIs:
+1. **APIの有効化**:
+   * 課金が有効になっているGoogle Cloudプロジェクト。
+   * [gcloud CLI](https://cloud.google.com/sdk/install) )がインストールされ、認証されていること（`gcloud auth login`）。
+   * 以下のコマンドを実行して、必要なすべてのAPIを有効にします:
 
    ```
    gcloud services enable \
@@ -164,8 +164,8 @@ Follow the **Common Prerequisites** first, then choose **Method 1** or **Method 
    ```
    
 
-2. **Create Service Account & Grant Permissions**:  
-   * This SA will be used by the Cloud Run service to scan the organization and create tasks.
+2. **サービスアカウントの作成と権限の付与**:
+* このサービスアカウント（SA）は、Cloud Runサービスが組織をスキャンし、タスクを作成するために使用されます。
 ```
    # Set your Organization ID
    export ORG_ID="<your-org-id>"
@@ -234,7 +234,7 @@ Follow the **Common Prerequisites** first, then choose **Method 1** or **Method 
 
    gcloud iam service-accounts add-iam-policy-binding ${SA_EMAIL} --member="serviceAccount:${SA_EMAIL}"  --role="roles/iam.serviceAccountUser"
 ```
-3. **Create GCS Bucket**:
+3. **GCSバケットの作成**:
 ```
 export BUCKET_NAME="cloudgauge-reports-${PROJECT_ID}"
 
@@ -246,62 +246,66 @@ gcloud storage buckets add-iam-policy-binding gs://${BUCKET_NAME} --member="serv
 
 ### 
 
-### **Method 1: Deploy from Source (Recommended)** 
+### **方法 1: ソースからデプロイ（推奨）**
 
-### **Step 1: Fork the GitHub Repository** 
+### **ステップ 1: GitHubリポジトリをフォークする**
 
-First, you need your own copy of the code.
+まず、ソースコードのコピーを作成します。
 
 1. Navigate to the [CloudGauge GitHub repository](https://github.com/GoogleCloudPlatform/CloudGauge/).  
 2. Click the **Fork** button in the top-right corner of the page.  
 3. Choose your GitHub account as the destination for the fork. This will create a copy of the repository under your account (e.g., `https://github.com/your-username/CloudGauge`).
 
+1. [CloudGauge GitHubリポジトリ](https://github.com/GoogleCloudPlatform/CloudGauge/)にアクセス。
+2. ページ右上の **Fork** ボタンをクリック。
+3. フォーク先として自分のGitHubアカウントを選択。これにより、自分のアカウント下にリポジトリのコピーが作成されます（例: `https://github.com/your-username/CloudGauge`）。
+
+
 ---
 
-### **Step 2: Create the Cloud Run Service** 
+### **ステップ 2: Cloud Runサービスを作成する**
 
-Now, let's create the initial Cloud Run service and connect it to your new repository.
+次に、Cloud Runサービスを作成し、新しいリポジトリに接続します。
 
-1. In the Google Cloud Console, go to the **Cloud Run** page.  
-2. Click **Create Service**.  
-3. Select **Continuously deploy new revisions from a source repository** and click **Set up with Cloud Build**.  
-4. A new panel will appear. In the "Source" section, under "Repository", click **Manage connected repositories**.  
-5. A new window will pop up, prompting you to **install the Google Cloud Build app** on GitHub.  
-   * Select your GitHub username or organization.  
-   * In the "Repository access" section, choose either **All repositories** or **Only select repositories**. If you choose the latter, make sure you select your forked `CloudGauge` repository.  
-   * Click **Install** or **Save**.  
-6. Back in the Cloud Console, select your newly connected forked repository and branch (`main`), then click **Next**.  
-7. In the **Build Settings** section:  
-   * **Build Type**: Select `Dockerfile`.  
-   * **Source location**: Keep the default `/Dockerfile`.  
-   * Click **Save**.  
-8. Configure the service details:  
-   * **Service name**: Give it a name like `cloudgauge-service`.  
-   * **Region**: Choose a region, for example, `asia-south1`.  
-9. Expand the "Container(s), Volumes, Networking, Security" section.  
-   * Go to the **Identity & Security** tab and select the service account you previously created (e.g., `cloudgauge-sa@...`).  
-   * Go to the **General** tab and set the **Request Timeout** to `3600` seconds.  
-   * Go to the **Variables & Secrets** tab and add the following **Environment Variables**. Replace the example values with your own.  
-     * `PROJECT_ID`: Your GCP Project ID (e.g., `my-gcp-project`)  
+1. Google Cloudコンソールで、**Cloud Run**ページを開く。
+2. **サービスの作成**をクリック。
+3. **Continuously deploy new revisions from a source repository** を選択し、**Set up with Cloud Build**をクリック。
+4. 新しいパネルが表示された後、"Repository"の下にある"Source" セクションの**Manage connected repositories**をクリック。  
+5. 新しいウィンドウが開き、GitHubに**Google Cloud Buildアプリをインストール**するように求められます。
+    * GitHubのユーザー名または組織を選択します。
+    * 「Repository access」セクションで、**All repositories**（すべてのリポジトリ）または**Only select repositories**（選択したリポジトリのみ）のいずれかを選択します。後者を選択した場合は、フォークした`CloudGauge`リポジトリを必ず選択してください。
+    * **Install**（インストール）または**Save**（保存）をクリックします。
+6. Cloudコンソールに戻り、新しく接続したフォーク済みリポジトリとブランチ（`main`）を選択して、**次へ（Next)**をクリック。
+7. **Build Settings** にて以下を設定:
+   * **Build Type**: `Dockerfile`を選択 
+   * **Source location**: デフォルトの`/Dockerfile`  
+   * **Save**をクリック  
+9. サービスの詳細を設定します:
+   * **Service name**: 例`cloudgauge-service`.  
+   * **Region**: リージョンを選択
+10. "Container(s), Volumes, Networking, Security"セクションを展開
+   * **Identity & Security**タブにて、共通の前提条件のステップ２で作成したサービスアカウントを選択
+   * **General**タブにて**Request Timeout**を`3600`秒に設定  
+   * **Variables & Secrets**タブにて以下の**Environment Variables**を設定
+     * `PROJECT_ID`: ご自身のGCP Project ID (例：`my-gcp-project`)  
      * `TASK_QUEUE`: `cloudgauge-scan-queue`  
-     * `RESULTS_BUCKET`: The name of your GCS bucket (e.g., `cloudgauge-reports-my-gcp-project`)  
-     * `SERVICE_ACCOUNT_EMAIL`: The full email of your service account  
-     * `LOCATION`: The region you selected (e.g., `asia-south1`)  
-10. Click **Create**. The service will start building and deploying.
+     * `RESULTS_BUCKET`: ご自身のGCSバケット名 (例： `cloudgauge-reports-my-gcp-project`)  
+     * `SERVICE_ACCOUNT_EMAIL`:サービスアカウントに紐づくemailアドレス
+     * `LOCATION`: ステップ9で選択したリージョン (e.g., `asia-south1`)  
+11. **Create**をクリック　ー ビルドとデプロイプロセスが開始します。
 
 ---
 
-### **Step 3: Grant Required IAM Roles** 
+### **ステップ 3: 必要なIAMロールを付与する**
+サービスアカウントにはCloud Runサービスに対して以下の権限付与が必要です。これの権限付与により、全ての権限が厳密にスコープ化されます（セキュリティのベストプラクティスが遵守されます）。
 
-To function correctly, the service account needs two key permissions granted directly on the Cloud Run service itself. This ensures all permissions are tightly scoped and follow security best practices.
+**Cloud Run 起動元 (roles/run.invoker)**: このロールは、Cloud TasksサービスがCloudGaugeサービスを安全にトリガーしてスキャンを開始できるようにするために必要です。この権限は、デプロイしたばかりの新しいCloud Runサービスに対して付与されます。
 
-**Cloud Run Invoker (roles/run.invoker)**: This role is required to allow the Cloud Tasks service to securely trigger your CloudGauge service to start a scan. This permission is granted specifically on the new Cloud Run service you just deployed.
+**Cloud Run 閲覧者 (roles/run.viewer)**: このロールにより、サービスは起動時に自身のパブリックURLを自動的に検出できます。この機能により、サービスを手動で自身のURLで更新する必要がなくなり、シングルステップでのデプロイが可能になります。この権限はサービスレベルで付与されます。
 
-**Cloud Run Viewer (roles/run.viewer)**: This role allows the service to automatically discover its own public URL when it starts up. This feature enables a single-step deployment, removing the need to manually update the service with its own URL. This permission is granted at the service level.
+上記２つのロールを**サービスレベル**で付与することで、サービスアカウントがアクセスする必要のある特定のリソースに対してのみ、**最小限の権限**を持つよう設定可能となります。
 
-By granting both roles at the **service level**, you ensure the service account only has the minimum permissions required on the specific resource it needs to access.
-
-Open the **Cloud Shell** or your local terminal with `gCloud` installed and run the following commands, replacing the placeholders with your values.
+**Cloud Shell**または`gcloud`がインストールされたローカルターミナルを開き、プレースホルダーをご実際の値に置き換えて以下のコマンドを実行。
 
 ```
 # Store your service account email in a variable for convenience  
@@ -316,21 +320,23 @@ gcloud run services add-iam-policy-binding ${SERVICE_NAME} --member="serviceAcco
 gcloud run services add-iam-policy-binding ${SERVICE_NAME} --member="serviceAccount:${SA_EMAIL}" --role="roles/run.viewer" --region=${REGION}
 
 ```
+以上でCloudGaugeの準備が整いました。URLにお進みいただければアプリケーションを利用開始できる状態となっています。
+
 With these permissions set, your CloudGauge instance is fully deployed and ready to use. You can now proceed to the application's URL to start your first scan.
 
 ---
 
-### **Method 2: Manual Build & Deploy via gcloud** 
+### **方法 2: gcloudを使用した手動ビルド＆デプロイ** 
 
-This method gives you manual control over the build and deploy steps.
+この方法は、ビルドとデプロイの手順を手動で制御する方法となります。
 
-1. **Clone this repository**:
+1. **本リポジトリをクローンする:**:
 ```
 git clone https://github.com/GoogleCloudPlatform/CloudGauge
 cd cloudgauge
 ```
-2. **Set Environment Variables**:  
-   * (You should already have `PROJECT_ID` and `SA_EMAIL` from the common setup)
+2. **環境変数を設定する**:  
+   * （共通のセットアップで設定したPROJECT_IDとSA_EMAILと置き換えてください）
 ```
      export REGION="asia-south1" # Or your preferred region  
      export SERVICE_NAME="cloudgauge-service"  
@@ -338,8 +344,8 @@ cd cloudgauge
      export QUEUE_NAME="cloudgauge-scan-queue"
 ```   
 
-3. **Build and Deploy Service **:
-   * This command builds the container and deploys it.
+3. **サービスをビルドしてデプロイする**:
+   * このコマンドはコンテナをビルドし、デプロイします。
 ```
 # Build the container image using Cloud Build  
 gcloud builds submit . --tag "gcr.io/${PROJECT_ID}/${SERVICE_NAME}" --region=${REGION}
@@ -355,8 +361,8 @@ gcloud run deploy ${SERVICE_NAME} \
   --memory=1Gi \
   --set-env-vars=PROJECT_ID=${PROJECT_ID},TASK_QUEUE=${QUEUE_NAME},RESULTS_BUCKET=${BUCKET_NAME},SERVICE_ACCOUNT_EMAIL=${SA_EMAIL},LOCATION=${REGION}
 ```
-4. **Grant Invoker & Viewer Permission**:  
-   * Now that the service exists, give its SA permission to invoke it.
+4. **Invoker & Viewer権限を付与する:**:  
+   * 立ち上げたサービスのSAに、呼び出し権限を付与します。
 ```
 gcloud run services add-iam-policy-binding ${SERVICE_NAME} \
   --member="serviceAccount:${SA_EMAIL}" \
@@ -369,7 +375,7 @@ gcloud run services add-iam-policy-binding ${SERVICE_NAME} \
   --region=${REGION}
 ```
 
-Your service is now fully deployed and configured\!
+以上でサービスのデプロイと設定は完了となります
 
 ## **How to Use** 
 
