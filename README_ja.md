@@ -22,7 +22,7 @@ Python/Flaskで構築され、Google Cloud Run上にサーバーレスアプリ�
 * [使い方](#使い方)
 * [トラブルシューティング](#トラブルシューティング)
 * [クリーンアップスクリプト](#クリーンアップスクリプト)
-* [ライセンスとサポート](#ライセンスとサポート)
+* [License & Support](#license--support)
 
 ## **機能**
 
@@ -248,7 +248,7 @@ gcloud storage buckets add-iam-policy-binding gs://${BUCKET_NAME} --member="serv
 
 ### **方法 1: ソースからデプロイ（推奨）**
 
-### **ステップ 1: GitHubリポジトリをフォークする**
+### **ステップ 1: GitHubリポジトリをフォーク**
 
 まず、ソースコードのコピーを作成します。
 
@@ -263,7 +263,7 @@ gcloud storage buckets add-iam-policy-binding gs://${BUCKET_NAME} --member="serv
 
 ---
 
-### **ステップ 2: Cloud Runサービスを作成する**
+### **ステップ 2: Cloud Runサービスを作成**
 
 次に、Cloud Runサービスを作成し、新しいリポジトリに接続します。
 
@@ -275,15 +275,15 @@ gcloud storage buckets add-iam-policy-binding gs://${BUCKET_NAME} --member="serv
     * GitHubのユーザー名または組織を選択します。
     * 「Repository access」セクションで、**All repositories**（すべてのリポジトリ）または**Only select repositories**（選択したリポジトリのみ）のいずれかを選択します。後者を選択した場合は、フォークした`CloudGauge`リポジトリを必ず選択してください。
     * **Install**（インストール）または**Save**（保存）をクリックします。
-6. Cloudコンソールに戻り、新しく接続したフォーク済みリポジトリとブランチ（`main`）を選択して、**次へ（Next)**をクリック。
+6. Cloudコンソールに戻り、新しく接続したフォーク済みリポジトリとブランチ（`main`）を選択して、**Next**をクリック。
 7. **Build Settings** にて以下を設定:
    * **Build Type**: `Dockerfile`を選択 
    * **Source location**: デフォルトの`/Dockerfile`  
    * **Save**をクリック  
-9. サービスの詳細を設定します:
+8. サービスの詳細を設定します:
    * **Service name**: 例`cloudgauge-service`.  
    * **Region**: リージョンを選択
-10. "Container(s), Volumes, Networking, Security"セクションを展開
+9. "Container(s), Volumes, Networking, Security"セクションを展開
    * **Identity & Security**タブにて、共通の前提条件のステップ２で作成したサービスアカウントを選択
    * **General**タブにて**Request Timeout**を`3600`秒に設定  
    * **Variables & Secrets**タブにて以下の**Environment Variables**を設定
@@ -292,11 +292,11 @@ gcloud storage buckets add-iam-policy-binding gs://${BUCKET_NAME} --member="serv
      * `RESULTS_BUCKET`: ご自身のGCSバケット名 (例： `cloudgauge-reports-my-gcp-project`)  
      * `SERVICE_ACCOUNT_EMAIL`:サービスアカウントに紐づくemailアドレス
      * `LOCATION`: ステップ9で選択したリージョン (e.g., `asia-south1`)  
-11. **Create**をクリック　ー ビルドとデプロイプロセスが開始します。
+10. **Create**をクリック　ー ビルドとデプロイプロセスが開始します。
 
 ---
 
-### **ステップ 3: 必要なIAMロールを付与する**
+### **ステップ 3: 必要なIAMロールを付与**
 サービスアカウントにはCloud Runサービスに対して以下の権限付与が必要です。これの権限付与により、全ての権限が厳密にスコープ化されます（セキュリティのベストプラクティスが遵守されます）。
 
 **Cloud Run 起動元 (roles/run.invoker)**: このロールは、Cloud TasksサービスがCloudGaugeサービスを安全にトリガーしてスキャンを開始できるようにするために必要です。この権限は、デプロイしたばかりの新しいCloud Runサービスに対して付与されます。
@@ -330,7 +330,7 @@ With these permissions set, your CloudGauge instance is fully deployed and ready
 
 この方法は、ビルドとデプロイの手順を手動で制御する方法となります。
 
-1. **本リポジトリをクローンする:**:
+1. **本リポジトリをクローン:**:
 ```
 git clone https://github.com/GoogleCloudPlatform/CloudGauge
 cd cloudgauge
@@ -344,7 +344,7 @@ cd cloudgauge
      export QUEUE_NAME="cloudgauge-scan-queue"
 ```   
 
-3. **サービスをビルドしてデプロイする**:
+3. **サービスをビルドしてデプロイ**:
    * このコマンドはコンテナをビルドし、デプロイします。
 ```
 # Build the container image using Cloud Build  
@@ -361,7 +361,7 @@ gcloud run deploy ${SERVICE_NAME} \
   --memory=1Gi \
   --set-env-vars=PROJECT_ID=${PROJECT_ID},TASK_QUEUE=${QUEUE_NAME},RESULTS_BUCKET=${BUCKET_NAME},SERVICE_ACCOUNT_EMAIL=${SA_EMAIL},LOCATION=${REGION}
 ```
-4. **Invoker & Viewer権限を付与する:**:  
+4. **Invoker & Viewer権限を付与:**:  
    * 立ち上げたサービスのSAに、呼び出し権限を付与します。
 ```
 gcloud run services add-iam-policy-binding ${SERVICE_NAME} \
@@ -377,47 +377,46 @@ gcloud run services add-iam-policy-binding ${SERVICE_NAME} \
 
 以上でサービスのデプロイと設定は完了となります
 
-## **How to Use** 
+## **使い方**
 
-1. Navigate to your service's URL (`${SERVICE_URL}`).  
-2. Select your Scope from Dropdown menu : Organization, Folder or Project
-3. Select the resource from the Dropdown
-4. Click "Start Scan".  
-5. You will be redirected to a status page. Wait for the scan to complete (this can take 5-15 minutes depending on org size).  
-6. Once finished, links to the **Interactive HTML Report** and **Download CSV Report** will appear.
+1. サービスのURL（`${SERVICE_URL}`）にアクセス。
+2. ドロップダウンメニューからスコープ（Scope）を選択: 組織（Organization）、フォルダ（Folder）、またはプロジェクト（Project）。
+3. ドロップダウンからリソースを選択。
+4. 「Start Scan」（スキャン開始）をクリック。
+5. ステータスページにリダイレクトされるので、スキャンが完了するまで待機（組織の規模によっては5〜15分かかる場合があります）。
+6. 完了すると、**Interactive HTML Report** と **Download CSV Report**へのリンクが表示されます。
 
-## **Troubleshooting**
+## **トラブルシューティング**
 
-If the status page is stuck for a long time, the background worker is likely failing.
+ステータスページが長時間停止したまま動かない場合は、バックグラウンドワーカーが失敗している可能性があるので、以下の方法でトラブルシュートを試みます。
 
-### **Step 1: Check the Cloud Run Logs**
+### **ステップ 1: Cloud Runのログを確認**
 
-1. Go to the **Cloud Run** page in the Google Cloud Console.  
-2. Click on your service (`cloudgauge-service`).  
-3. Go to the **LOGS** tab.  
-4. Look for log entries for requests made to the `/run-scan` URL.  
-5. If you see logs for `/run-scan`, look for any errors in red.
+1. Google Cloudコンソールで**Cloud Run**ページに移動。
+2. サービス（`cloudgauge-service`）をクリック。
+3. **ログ**タブに移動。
+4. `/run-scan` URLへのリクエストに関するログエントリを探す。
+5. `/run-scan`のログが見つかったら、赤色のエラーがないか確認。
 
-### **Step 2: Check the Cloud Tasks Logs**
+### **ステップ 2: Cloud Tasksのログを確認**
 
-1. Go to the **Cloud Tasks** page in the Google Cloud Console.  
-2. Click on your queue (`cloudgauge-scan-queue`).  
-3. Go to the **LOGS** tab.  
-4. Look at the status of the task attempts. If you see a `PERMISSION_DENIED` (HTTP 403\) error, it means you missed the **"Grant Invoker Permission"** step.
+1. Google Cloudコンソールで**Cloud Tasks**ページに移動。
+2. キュー（`cloudgauge-scan-queue`）をクリック。
+3. **ログ**タブに移動。
+4. タスク試行のステータスを確認（`PERMISSION_DENIED` (HTTP 403) エラーが表示されている場合は、**起動元（Invoker）権限の付与**の手順を見落としていることを意味します）。
 
-### **Step 3: Resolve Common Errors**
+### **ステップ 3: 一般的なエラーの解決**
 
-#### **Memory Limit Exceeded**
+#### **メモリ制限超過 (Memory Limit Exceeded)**
 
-* **Error Message**: You might see an error in the Cloud Run logs that says: “`Memory limit of 512 MiB exceeded …”`  
-* **Cause**: The scan process is using more memory than the default amount allocated to the Cloud Run service.  
-* **Solution**: You need to increase the memory allocated to your service.  
-  * **Via Console**:  
-    1. Click **"Edit & Deploy New Revision"** on your Cloud Run service page.  
-    2. Under the "General" tab, find **"Memory allocation"** and increase it (e.g., to `2 GiB`).  
-    3. Click **Deploy**.  
-  * **Via gcloud CLI**:
-
+* **エラーメッセージ**: Cloud Runのログに「`Memory limit of 512 MiB exceeded …`」のようなエラーが表示される場合があります。
+* **原因**: スキャンプロセスが、Cloud Runサービスに割り当てられているデフォルトのメモリ量を超えて使用しているため。
+* **解決策**: サービスに割り当てるメモリを増やす必要があります。
+    * **コンソール経由**:
+        1. Cloud Runサービスページで**新しいリビジョンの編集とデプロイ**をクリックします。
+        2. 「全般」タブで**メモリ割り当て**を見つけ、増やします（例: `2 GiB`へ）。
+        3. **デプロイ**をクリックします。
+    * **gcloud CLI経由**:
 ```
 gcloud run services update cloudgauge-service \
   --memory=2Gi \
@@ -426,34 +425,34 @@ gcloud run services update cloudgauge-service \
     
 ---
 
-#### **Permission Denied on Google Cloud APIs**
+#### **Google Cloud APIでのアクセス拒否 (Permission Denied on Google Cloud APIs)**
 
-* **Error Message**: The logs show a `PERMISSION_DENIED` error related to a specific Google Cloud service, such as `storage.googleapis.com` or `iam.googleapis.com`.  
-* **Cause**: The service account (`cloudgauge-sa@...`) is missing an IAM role needed to access a specific API.  
-* **Solution**: The error message will usually state which permission is missing. Go back to the **"Common Prerequisites"** section of the deployment instructions and verify that all `gcloud ... add-iam-policy-binding` commands were run successfully against the correct service account. You may need to re-run the command for the missing role.
-
----
-
-#### **Container Failed to Start**
-
-* **Error Message**: The Cloud Run revision is not becoming healthy, and the logs show an error right at startup, such as `ModuleNotFoundError` in Python or an error about a missing environment variable.  
-* **Cause**: This typically happens for one of two reasons:  
-  1. An environment variable was not set correctly.  
-  2. There is a bug in the application code or a missing dependency in `requirements.txt`.  
-* **Solution**:  
-  1. Check the **LOGS** tab for the specific error message that occurs when the container tries to start.  
-  2. If the error is related to a variable, click **"Edit & Deploy New Revision,"** go to the **"Variables & Secrets"** tab, and ensure all required variables (`PROJECT_ID`, `WORKER_URL`, etc.) are present and have the correct values.  
-  3. If it is a code error, you will need to fix the source code and deploy a new revision.
+* **エラーメッセージ**: ログに、`storage.googleapis.com`や`iam.googleapis.com`などの特定のGoogle Cloudサービスに関連する`PERMISSION_DENIED`エラーが表示される場合があります。
+* **原因**: サービスアカウント（`cloudgauge-sa@...`）に、特定のAPIにアクセスするために必要なIAMロールが不足しているため。
+* **解決策**: 通常、エラーメッセージに不足している権限が記載されます。デプロイ手順の**共通の前提条件**セクションに戻り、すべての`gcloud ... add-iam-policy-binding`コマンドが正しいサービスアカウントに対して実行されているか確認してください。不足しているロールについて、コマンドを再実行する必要があります。
 
 ---
 
-#### **Request Timeout**
+#### **コンテナの起動失敗 (Container Failed to Start)**
 
-* **Error Message**: The logs show an HTTP `504` status code or a message like "The request has been terminated because it has reached its deadline."  
-* **Cause**: The scan is taking longer to complete than the configured request timeout on the Cloud Run service.  
-* **Solution**: The deployment instructions recommend a timeout of `3600` seconds (1 hour). Verify this was set correctly.  
-  * **Via Console**: Go to **"Edit & Deploy New Revision"** and check the **"Request timeout"** value under the "General" tab.  
-  * **Via gcloud CLI**: You can update the service with the correct timeout using:
+* **エラーメッセージ**: Cloud Runリビジョンが正常な状態にならず、ログに起動直後のエラー（Pythonの`ModuleNotFoundError`や環境変数の欠落に関するエラーなど）が表示される場合があります。
+* **原因**: これは通常、以下の2つの理由のいずれかで発生します。
+    1. 環境変数が正しく設定されていない。
+    2. アプリケーションコードにバグがあるか、`requirements.txt`に依存関係が欠落している。
+* **解決策**:
+    1. **ログ**タブで、コンテナが起動しようとしたときに発生する特定のエラーメッセージを確認。
+    2. エラーが変数に関連している場合は、**Edit & Deploy New Revision**　をクリックし、 **Variables & Secrets**タブに移動して、必要なすべての変数（`PROJECT_ID`、`WORKER_URL`など）が存在し、正しい値が設定されていることを確認。
+    3. コードエラーの場合は、ソースコードを修正して新しいリビジョンをデプロイする必要があります。
+
+---
+
+#### **リクエストタイムアウト (Request Timeout)**
+
+* **エラーメッセージ**: ログにHTTP `504`ステータスコード、または「The request has been terminated because it has reached its deadline.（リクエストが期限に達したため終了しました。）」のようなメッセージが表示されます。
+* **原因**: スキャンの完了までに、Cloud Runサービスで設定されたリクエストタイムアウトよりも長い時間がかかっています。
+* **解決策**: デプロイ手順では、タイムアウトを`3600`秒（1時間）にすることを推奨しています。以下のいずれかの方法をご利用ください。
+    * **コンソール経由**: **"Edit & Deploy New Revision"** で、"General"タブの**Request timeout** の値を確認します。
+    * **gcloud CLI経由**: 以下を使用して、正しいタイムアウトでサービスを更新できます。
 
 ```
 gcloud run services update cloudgauge-service \
@@ -462,62 +461,59 @@ gcloud run services update cloudgauge-service \
 ```
 ---
 
-#### **Builds Fail in a VPC Service Controls Environment**
+#### **VPC Service Controls環境でのビルド失敗**
 
-* **Symptom:** When running a Cloud Build, the process fails during steps that require fetching external packages (e.g., `pip install`, `apt-get update`, or `npm install`). You may see timeout errors or messages related to network connectivity and egress being blocked.  
-* **Cause:** By default, Cloud Build runs on workers in a Google-managed project that is outside your organization's VPC Service Controls (VPC SC) perimeter. Your perimeter is correctly blocking egress traffic from these external workers, preventing them from accessing public repositories to download dependencies.  
-* **Solution:** Use **Cloud Build private pools**. This provisions dedicated build workers that run *inside* your own VPC network, making all build traffic internal and compliant with your security perimeter.  
-    
-  **1\. Create a Private Pool in Your VPC:** First, create a private worker pool connected to your VPC network. This ensures all build steps are executed within your perimeter.
+
+* **症状**: Cloud Buildを実行すると、外部パッケージの取得が必要なステップ（例: `pip install`、`apt-get update`、`npm install`）でプロセスが失敗します。タイムアウトエラーや、ネットワーク接続や下り（egress）がブロックされていることに関連するメッセージが表示される場合があります。
+* **原因**: デフォルトでは、Cloud Buildは組織のVPC Service Controls (VPC SC) 境界の外にあるGoogle管理プロジェクトのワーカー上で実行されます。境界がこれらの外部ワーカーからの下りトラフィックを正しくブロックしているため、依存関係をダウンロードするためのパブリックリポジトリへのアクセスが妨げられています。
+* **解決策**: **Cloud Buildプライベートプール**を使用します。これにより、独自のVPCネットワーク*内部*で実行される専用のビルドワーカーがプロビジョニングされ、すべてのビルドトラフィックが内部的なものとなり、セキュリティ境界に準拠するようになります。
+  **1. VPC内にプライベートプールを作成する**: まず、VPCネットワークに接続されたプライベートワーカープールを作成します。これにより、すべてのビルドステップが境界内で実行さるようになります。
+  
 ```
 gcloud builds worker-pools create [POOL_NAME] \
     --project=[PROJECT_ID] \
     --region=[REGION] \
     --peered-network=projects/[PROJECT_ID]/global/networks/[VPC_NETWORK]
 ```
-  *Replace `[POOL_NAME]`, `[PROJECT_ID]`, `[REGION]`, and `[VPC_NETWORK]` with your specific values.*  
+  * `[POOL_NAME]`, `[PROJECT_ID]`, `[REGION]`, and `[VPC_NETWORK]` を実際の値に置き換えてください。*  
 
-  
+  **2. プライベートプール用の安全な下り（Egress）ルートを構成**
+
+  VPC SC境界内のプライベートプールは、デフォルトではパブリックパッケージリポジトリにアクセスできません。インターネットへのルートを提供する必要があります。
+
+  **注:** **Cloud NATはこのユースケースでは機能しません** プライベートプールは、Googleが管理する別のVPCに存在し、そのVPCはお客様のVPCとピアリングされています。Cloud NATは、VPCピアリング接続を越えてサービスを提供することはできませんのでご注意ください。
+
+  推奨される解決策は、**専用のCompute Engine VMを安全なNATゲートウェイとして使用する**ことです。
+
+  1. **NATゲートウェイVMを作成する**: VPC内に小さなCompute Engine VMをプロビジョニングします。このVMには外部IPアドレスが必要であり、ネットワークアドレス変換（マスカレード）を実行するように構成する必要があります。スタートアップスクリプトを使用してIP転送を有効にし、必要なiptablesルールを設定できます。
+  2. **カスタムルートを作成する**: プライベートプールのIP範囲からのトラフィックをNATゲートウェイVMに向けるカスタムルートを作成する必要があります。これにより、ビルドワーカーのトラフィックのみが外部アクセス用にルーティングされ、他のリソースには影響が及びません。
+  3. **ファイアウォールルールを構成する**: 以下のVPCファイアウォールルールを作成します。
+      * プライベートプールのIP範囲からNATゲートウェイVMへの**ingress**トラフィックを許可する。
+      * NATゲートウェイVMからインターネット（0.0.0.0/0）への**egress**トラフィックを許可する。
+   
+ **3. プライベートプールを使用してビルドを実行**: `gcloud builds submit`コマンドを変更して、新しく作成したプライベートプールを指定する`--worker-pool`フラグを含めます。
     
-  **2\. Configure a Secure Egress Route for the Private Pool**
-
-A private pool inside a VPC SC perimeter cannot access public package repositories by default. You need to provide a route to the internet.
-
-**Note:** **Cloud NAT will not work for this use case.** Private pools reside in a separate, Google-managed VPC peered to yours. Cloud NAT does not provide service across a VPC peering connection.
-
-The recommended solution is to use a **dedicated Compute Engine VM as a secure NAT Gateway**.
-
-1. **Create a NAT Gateway VM:** Provision a small Compute Engine VM within your VPC. This VM should have an external IP address and be configured to perform network address translation (masquerading). You can use a startup script to enable IP forwarding and set the necessary iptables rules.  
-2. **Create Custom Routes:** You must create custom routes to direct traffic from your private pool's IP range to the NAT gateway VM. This ensures only the build workers' traffic is routed for external access, leaving other resources unaffected.  
-3. **Configure Firewall Rules:** Create VPC firewall rules to:  
-   * Allow **ingress** traffic from the private pool's IP range to the NAT gateway VM.  
-   * Allow **egress** traffic from the NAT gateway VM to the internet (0.0.0.0/0).
-    
-  **3\. Run Your Build Using the Private Pool:** Modify your `gcloud builds submit` command to include the `--worker-pool` flag, pointing it to your newly created private pool.
-
 ```
 gcloud builds submit . \
   --tag "gcr.io/[PROJECT_ID]/[SERVICE_NAME]" \
   --region=[REGION] \
   --worker-pool=projects/[PROJECT_ID]/locations/[REGION]/workerPools/[POOL_NAME]
 ```
-
-This command now directs Cloud Build to use a worker from your internal pool. The worker's traffic is routed through your secure NAT Gateway VM, allowing it to fetch external dependencies while remaining fully compliant with your VPC SC perimeter.
+このコマンドにより、Cloud Buildは内部プールからのワーカーを使用するようになります。ワーカーのトラフィックは安全なNATゲートウェイVMを経由してルーティングされるため、VPC SC境界に完全に準拠したまま外部の依存関係を取得できます。
 
 ---
 
-### **Forcing Image Storage to a Specific Region**
+### **イメージストレージを特定のリージョンに制限**
 
-**Symptom:** You need to store your container images in a specific Google Cloud region (e.g., asia-south1 for organization policy resource location constraints), but by default, gcr.io hosts images in multi-regional locations (us, eu, asia) and does not offer specific regional control.
+**症状**: コンテナイメージを特定のGoogle Cloudリージョン（例: 組織のポリシーのリソースロケーション制約のためにasia-south1）に保存する必要があるが、デフォルトではgcr.ioはマルチリージョンのロケーション（us、eu、asia）でイメージをホストしており、特定のリージョン制御を提供していない。
 
-**Cause:** Google Container Registry (gcr.io) is a multi-regional service. To gain fine-grained control over the storage location of your images, you should use **Artifact Registry**, which is Google Cloud's recommended service for managing container images and language packages.
+**原因**: Google Container Registry (gcr.io) はマルチリージョンサービスです。イメージの保存場所をきめ細かく制御するには、コンテナイメージと言語パッケージを管理するためのGoogle Cloudの推奨サービスである**Artifact Registry**を使用する必要があります。
 
-**Solution:** Create a Docker repository in Artifact Registry in your desired region and update your build commands to point to the new regional endpoint.
+**解決策**: Artifact Registryで希望するリージョンにDockerリポジトリを作成し、ビルドコマンドを更新して新しいリージョナルエンドポイントを指すようにします。
 
+**ステップ 1: リージョナルArtifact Registryリポジトリを作成**
 
-**Step 1: Create a Regional Artifact Registry Repository**
-
-First, create a new Docker-format repository in your chosen region. This example uses asia-south1 (Mumbai).
+まず、選択したリージョンに新しいDocker形式のリポジトリを作成します。この例ではasia-south1（ムンバイ）を使用します。
 
 ```
 gcloud artifacts repositories create cloudgauge-repo \ 
@@ -526,48 +522,46 @@ gcloud artifacts repositories create cloudgauge-repo \
     --description="CloudGauge Docker repository in Mumbai"
 ```
 
-*You only need to run this command once to set up the repository.*
 
+**ステップ 2: ビルドおよびプッシュコマンドを更新**
 
-**Step 2: Update Your Build and Push Commands**
+次に、ビルドおよびプッシュコマンドのイメージパスを、gcr.io/...から新しいArtifact Registryパスに変更する必要があります： \[REGION\]-docker.pkg.dev/\[PROJECT\_ID\]/\[REPO\_NAME\]/\[IMAGE\_NAME\].
 
-Next, you must change the image path in your build and push commands from gcr.io/... to the new Artifact Registry path. The new format is \[REGION\]-docker.pkg.dev/\[PROJECT\_ID\]/\[REPO\_NAME\]/\[IMAGE\_NAME\].
+#### **オプション A: Cloud Buildを使用する場合**
 
-#### **Option A: Using Cloud Build**
-
-If you're using Cloud Build, update the \--tag flag in your gcloud builds submit command:
+Cloud Buildを使用している場合は、gcloud builds submitコマンドの--tagフラグを更新します。
 
 ```
 gcloud builds submit . --tag "asia-south1-docker.pkg.dev/[PROJECT_ID]/cloudgauge-repo/[SERVICE_NAME]"
 ```
 
-#### **Option B: Pushing a Local Image**
+#### **オプション B: ローカルイメージをプッシュする場合**
 
-If you are building your image locally, update your docker tag and docker push commands:
+イメージをローカルでビルドしている場合は、docker tagおよびdocker pushコマンドを更新します。
 
-\# 1\. Build the image 
+\# 1\.イメージをビルドする
 ```
 docker build -t cloudgauge-image .
 ```
-\# 2\. Tag the image for your new Artifact Registry repo 
+\# 2\. 新しいArtifact Registryリポジトリ用にイメージにタグを付ける
 ```
 docker tag cloudgauge-image asia-south1-docker.pkg.dev/[PROJECT_ID]/cloudgauge-repo/cloudgauge-image
 ```
-\# 3\. Push the image  
+\# 3\. イメージをプッシュする
 ```
 docker push asia-south1-docker.pkg.dev/[PROJECT_ID]/cloudgauge-repo/cloudgauge-image
 ```
-By following these steps, you can ensure your container images are stored and managed in the specific Google Cloud region that meets your requirements.
+これらの手順により、要件を満たす特定のGoogle Cloudリージョンでコンテナイメージが保存および管理されるようになります。
 
 ---
 
-## **Cleanup Script**
+## **クリーンアップスクリプト**
 
-This gCloud script will remove all the resources created by the tool. 
+以下のgCloudスクリプトは、ツールによって作成されたすべてのリソースを削除します。
 
-### **Configure Your Variables**
+### **変数を設定**
 
-Before running the script, replace the placeholder values in the first few lines with the ones you used during deployment.
+以下のスクリプト内のプレースホルダー値をデプロイ時に使用した実際の値に置き換えてください。
 
 ```
 #!/bin/bash
@@ -630,22 +624,20 @@ echo "✅ Cleanup complete!"
 ```
 ---
 
-### **Step-by-Step Explanation**
+### **削除スクリプトの解説**
 
-Here's a breakdown of what each command in the script does:
-
-1. **Delete Cloud Run Service**: `gcloud run services delete`  
-   * This removes the main web application itself, stopping it from running and incurring costs.  
-2. **Delete Cloud Tasks Queue**: `gcloud tasks queues delete`  
-   * Your script automatically creates a Cloud Tasks queue named `cloudgauge-scan-queue`. This command deletes that queue.  
-3. **Delete GCS Bucket**: `gsutil -m rm -r`  
-   * This command deletes the `cloudgauge-reports-...` bucket and all the HTML/CSV reports stored inside it. The `-m` flag helps it run faster if there are many report files.  
-4. **Delete Container Image**: `gcloud container images delete`  
-   * When you deployed the service, Cloud Build created a container image and stored it in Google Container Registry (GCR). This command deletes that stored image to keep your registry clean.  
-5. **Remove IAM Bindings**: `gcloud ... remove-iam-policy-binding`  
-   * This is a critical step. Before deleting the service account, you should remove all the permissions (roles) you granted it at both the **Organization** and **Project** levels. This prevents "ghost" principals from showing up in your IAM policies.  
-6. **Delete Service Account**: `gcloud iam service-accounts delete`  
-   * This is the final step. After removing its permissions, you can safely delete the `cloudgauge-sa` service account itself.
+1. **Cloud Runサービスの削除**: `gcloud run services delete`  
+   * これにより、メインのWebアプリケーション自体が削除され、実行が停止してコストが発生しなくなります。
+2. **Cloud Tasksキューの削除**: `gcloud tasks queues delete`
+   * 自動的に作成されたcloudgauge-scan-queueという名前のCloud Tasksキューを削除します。
+3. **GCSバケットの削除**: `gsutil -m rm -r`  
+   *　cloudgauge-reports-...バケットと、その中に保存されているすべてのHTML/CSVレポートを削除します。-mフラグは、多数のレポートファイルがある場合に高速に実行します。
+4. **コンテナイメージの削除**: `gcloud container images delete`  
+   * サービスをデプロイ時にCloud Buildはコンテナイメージを作成し、Google Container Registry (GCR) に保存したものを削除します。
+5. **IAMバインディングの削除**: `gcloud ... remove-iam-policy-binding`  
+   *　サービスアカウントを削除する前に、組織レベルとプロジェクトレベルの両方で付与したすべての権限（ロール）を削除する必要があります。これにより、ゴーストプリンシパルがIAMポリシーに表示されるのを防止します。
+6. **サービスアカウントの削除**: `gcloud iam service-accounts delete`  
+   * 権限を削除した後、`cloudgauge-sa`サービスアカウントを安全に削除します。
 
 
 ## **License & Support** 
