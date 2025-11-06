@@ -1,5 +1,14 @@
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
+<table>
+	<thead>
+    	<tr>
+      		<th style="text-align:center">English</th>
+      		<th style="text-align:center"><a href="README_ja.md">日本語</a></th>
+    	</tr>
+  	</thead>
+</table>
+
 # **CloudGauge**
 
 **Note:** This is not an officially supported Google product. This project is not eligible for the [Google Open Source Software Vulnerability Rewards Program](https://bughunters.google.com/open-source-security).
