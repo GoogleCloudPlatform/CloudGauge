@@ -2,82 +2,81 @@
 
 # **CloudGauge**
 
-**Note:** This is not an officially supported Google product. This project is not eligible for the [Google Open Source Software Vulnerability Rewards Program](https://bughunters.google.com/open-source-security).
+注: 本ツールはGoogleが公式にサポートする製品ではありません。このプロジェクトは [Google Open Source Software Vulnerability Rewards Program](https://bughunters.google.com/open-source-security)の対象外です。
 
-CloudGauge is a web application designed to run a comprehensive set of compliance, security, cost optimization, and best-practice checks against a Google Cloud Organization.
+CloudGaugeは、Google Cloudの組織（Organization）に対して、コンプライアンス、セキュリティ、コスト最適化、およびベストプラクティスの包括的なチェックを実行するように設計されたWebアプリケーションです。
 
-It is built with Python/Flask and deployed as a serverless application on **Google Cloud Run**. The application leverages **Cloud Tasks** to run scans asynchronously, ensuring that even very large organizations can be scanned without browser timeouts.
+Python/Flaskで構築され、Google Cloud Run上にサーバーレスアプリケーションとしてデプロイされます。このアプリケーションはCloud Tasksを活用してスキャンを非同期で実行するため、非常に大規模な組織であっても、ブラウザのタイムアウトを発生させることなくスキャン可能です。
 
-Final results are delivered as an interactive **HTML report** and a **CSV file** stored in a Google Cloud Storage bucket. The reports also feature **Gemini-powered** executive summaries and `gCloud` remediation suggestions.
+最終的な結果は、Google Cloud Storageバケットに保存されるインタラクティブなHTMLレポートおよびCSVファイルとして表示されます。レポートには、Geminiを活用したエグゼクティブサマリーや、gcloudコマンドによる修正案の提案も機能に含まれています。
 
 ![CloudGauge Report Demo](./assets/cloudgauge.gif)
 
-## **Table of Contents**
-
-* [Features](#features)
+## **目次**
+* [機能](#機能)
 * [Architecture](#architecture)
-* [Deployment Instructions](#deployment-instructions)
-  * [Common Prerequisites (Required for all methods)](#common-prerequisites-required-for-all-methods)
-  * [Method 1: Deploy from Source (Recommended)](#method-1-deploy-from-source-recommended)
-  * [Method 2: Manual Build & Deploy via gcloud](#method-2-manual-build--deploy-via-gcloud)
-* [How to Use](#how-to-use)
-* [Troubleshooting](#troubleshooting)
-* [Cleanup Script](#cleanup-script)
-* [License & Support](#license--support)
+* [デプロイ手順](#デプロイ手順)
+  * [共通の前提条件（すべての方法で必須）](#共通の前提条件すべての方法で必須)
+  * [方法 1: ソースからデプロイ（推奨）](#方法-1-ソースからデプロイ推奨)
+  * [方法 2: gcloudを使用した手動ビルド＆デプロイ](#方法-2-gcloudを使用した手動ビルドデプロイ)
+* [使い方](#使い方)
+* [トラブルシューティング](#トラブルシューティング)
+* [クリーンアップスクリプト](#クリーンアップスクリプト)
+* [ライセンスとサポート](#ライセンスとサポート)
 
-## **Features**
+## **機能**
 
-CloudGauge scans your organization across several key domains, modeled after the Google Cloud Architecture Framework.
+CloudGaugeは、Google Cloud Architecture Frameworkを基に、Organization内のプロジェクトを以下の主要項目を対象にスキャンする仕様です。
 
 ### **Security & Identity**
 
-* **Organization Policies**: Checks boolean policies against a list of best practices.
-* **Organization IAM**: Scans for public principals (`allUsers`, `allAuthenticatedUsers`) and primitive roles (`owner`, `orgAdmin`) at the org level.
-* **Project IAM**: Scans all projects for the use of primitive `roles/owner` and `roles/editor`.
-* **Security Command Center**: Verifies that SCC Premium is enabled.
-* **SA Key Rotation**: Finds user-managed service account keys older than 90 days.
-* **Public GCS Buckets**: Detects GCS buckets that are publicly accessible.
-* **Open Firewall Rules**: Scans all VPCs for firewall rules open to the internet (`0.0.0.0/0`).
+* **組織ポリシー**: ベストプラクティスのリストと照合して、ブール型ポリシーをチェック。
+* **組織IAM**: 組織レベルでのパブリックプリンシパル（`allUsers`, `allAuthenticatedUsers`）および基本ロール（`owner`, `orgAdmin`）をスキャン。
+* **プロジェクトIAM**: すべてのプロジェクトをスキャンし、基本ロールの`roles/owner`と`roles/editor`が使用されていないかの確認。
+* **Security Command Center**: SCC Premiumが有効になっていることを検証。
+* **SAキーのローテーション**: 90日以上経過したユーザー管理のサービスアカウントキーを検出。
+* **公開GCSバケット**: インターネットに公開されているGCSバケットを検出。
+* **オープンなファイアウォールルール**: すべてのVPCをスキャンし、インターネットに開放されているファイアウォールルール（`0.0.0.0/0`）を検出。
 
 ### **Cost Optimization**
 
-* **Idle Resources**: Finds idle Cloud SQL instances, VMs, persistent disks, and unassociated IP addresses.
-* **Rightsizing**: Identifies overprovisioned VMs and underutilized reservations.
-* **Cost Insights**: Provides an on-demand, detailed scan for CPU/memory usage, idle images, and more.
+* **アイドル状態のリソース**: アイドル状態のCloud SQLインスタンス、VM、Persistent Disc、および関連付けられていないIPアドレスを検出。
+* **ライトサイジング（適正化）**: 過剰に供与されたVMや、使用率の低いReservationsを特定。
+* **コストインサイト**: CPU/メモリ使用率、アイドル状態のイメージなどを詳細にスキャン。
 
 ### **Reliability & Resilience**
 
-* **Essential Contacts**: Ensures contacts are configured for `SECURITY`, `TECHNICAL`, and `LEGAL` categories.
-* **Service Health**: Verifies that the Personalized Service Health API is enabled.
-* **Cloud SQL Resilience**: Checks for High Availability (HA) configuration, automated backups, and Point-in-Time Recovery (PITR).
-* **GCS Versioning**: Finds buckets without object versioning enabled.
-* **GKE Hygiene**: Checks for clusters not on a release channel and node pools with auto-upgrade disabled.
-* **Resilience Assets**: Identifies zonal MIGs (recommends regional) and single-region disk snapshots.
+* **必須連絡先**: `SECURITY`（セキュリティ）、`TECHNICAL`（技術）、`LEGAL`（法務）カテゴリの連絡先が設定されていることを確認。
+* **サービスヘルス**: Personalized Service Health （PSH）APIが有効になっていることを検証。
+* **Cloud SQLのレジリエンス**: 高可用性（HA）構成、自動バックアップ、ポイントインタイムリカバリ（PITR）をチェック。
+* **GCSのバージョニング**: オブジェクトのバージョニングが有効になっていないバケットを検出。
+* **GKEの衛生管理**: リリースチャンネルを使用していないクラスタや、自動アップグレードが無効になっているノードプールをチェック。
+* **耐久性の検証**: ゾーンMIG（リージョンMIGを推奨）および単一リージョンのディスクスナップショットを特定。
 
 ### **Operational Excellence & Observability**
 
-* **Audit Logging**: Checks for an organization-level log sink.
-* **OS Config Coverage**: Identifies running VMs (excluding GKE/Dataproc) that are not reporting to the OS Config service.
-* **Monitoring Coverage**: Scans for projects missing key alert policies (e.g., Quota, Cloud SQL, GKE).
-* **Network Analyzer**: Ingests and normalizes insights for VPC, GKE, and PSA IP address utilization.
-* **Standalone VMs**: Finds VMs not managed by a Managed Instance Group (MIG).
-* **Quota Utilization**: Identifies any regional compute quotas exceeding 80% utilization.
-* **Unattended Projects**: Flags projects with low utilization.
+* **監査ログ**: 組織レベルのログシンク（Log Sink）を確認。
+* **OS Configの適用状況**: OS Configサービスの対象外となっている実行中のVM（GKE/Dataprocを除く）を特定。
+* **モニタリングの適用状況**: 重要なアラートポリシー（例: クォータ、Cloud SQL、GKEなど）が抜け落ちているプロジェクトをスキャン。
+* **ネットワークアナライザ**: VPC、GKE、およびPSA（Private Service Access）のIPアドレス使用率に関するインサイトを取り込み、標準化。
+* **スタンドアロンVM**: マネージドインスタンスグループ（MIG）によって管理されていないVMを検出。
+* **クォータ使用率**: 使用率が80%を超えているリージョンのコンピューティングクォータを特定。
+* **放置されたプロジェクト**: 使用率の低いプロジェクトを検出。
 
-##  **Architecture**
+## **Architecture**
 
-The application follows a robust, scalable, and asynchronous "fire-and-forget" pattern. This ensures the user gets an immediate response while the heavy work (which can take many minutes) is done in the background.
+このアプリケーションは、綿密で、スケーラブルかつ非同期な「fire-and-forget」パターンを採用しています。これにより、即座に応答を受け取る一方で、負荷の高い作業（数分かかる場合があります）を**バックグラウンドで実行**することができます。
 
-1.  **UI Trigger**: A user navigates to the Cloud Run URL and submits an Organization ID.
-2.  **Task Creation**: The `/scan` endpoint creates a **Cloud Task** with the scan details and redirects the user to a status page.
-3.  **Background Worker**: Cloud Tasks securely invokes the `/run-scan` endpoint in the background.
-4.  **Parallel Processing**: The worker executes dozens of checks, running project-level scans in parallel using a thread pool.
-5.  **Report Storage**: The worker generates the HTML/CSV reports and uploads them to Google Cloud Storage.
-6.  **Status Polling**: The user's status page polls an API endpoint until the report files are found in GCS, at which point it displays the download links.
+1. **UIトリガー**: ユーザーがCloud RunのURLにアクセスし、組織ID（Organization ID）を送信します。
+2. **タスク作成**: `/scan`エンドポイントがスキャン詳細を含む**Cloud Task**を作成し、ユーザーをステータスページにリダイレクトします。
+3. **バックグラウンドワーカー**: Cloud Tasksがバックグラウンドで`/run-scan`エンドポイントを安全に呼び出します。
+4. **並列処理**: ワーカーはスレッドプールを使用してプロジェクトレベルのスキャンを並行して実行し、数十のチェック処理を行います。
+5. **レポート保存**: ワーカーはHTML/CSVレポートを生成し、Google Cloud Storageにアップロードします。
+6. **ステータスポーリング**: ユーザーのステータスページは、レポートファイルがGCSで見つかるまでAPIエンドポイントをポーリングし、見つかった時点でダウンロードリンクを表示します。
 
 ### **Architecture Diagram**
 
-The diagram below illustrates the asynchronous "fire-and-forget" pattern.
+下図は非同期な "fire-and-forget" パターンを可視化したものになります。
 
 ```mermaid
 graph LR
