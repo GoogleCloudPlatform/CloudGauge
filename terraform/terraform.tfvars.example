@@ -1,0 +1,12 @@
+project_id = "YOUR_PROJECT_ID"
+org_id     = "YOUR_ORG_ID"
+gcp_region = "us-central1"
+
+# GitHub Repository Connection
+# Format: projects/PROJECT_ID/locations/REGION/connections/CONNECTION_ID/repositories/REPO_ID
+github_repository_connection = "projects/YOUR_PROJECT_ID/locations/us-central1/connections/YOUR_CONNECTION_ID/repositories/YOUR_REPO_ID"
+github_branch                = "^main$"
+
+# Optional: Override defaults
+# service_name = "cloudgauge-service"
+# sa_name      = "cloudgauge-sa"

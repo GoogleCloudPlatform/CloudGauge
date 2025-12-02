@@ -24,7 +24,9 @@ import sys
 import re
 import vertexai
 import time
+import threading
 import random
+import glob
 from datetime import datetime, timezone, timedelta
 from vertexai.generative_models import GenerativeModel
 from flask import Flask, Response, request, render_template_string, redirect, url_for, jsonify
@@ -58,14 +60,46 @@ SCOPES = ['https://www.googleapis.com/auth/cloud-platform']
 PROJECT_ID = os.environ.get('PROJECT_ID')
 LOCATION = os.environ.get('LOCATION')
 TASK_QUEUE = os.environ.get('TASK_QUEUE')
-WORKER_URL = os.environ.get('WORKER_URL')
 RESULTS_BUCKET = os.environ.get('RESULTS_BUCKET')
 SA_EMAIL = os.environ.get('SERVICE_ACCOUNT_EMAIL')
+
+def _get_self_url():
+    """
+    (NEW) Dynamically discovers the public URL of the Cloud Run service itself.
+    This avoids the need to manually set WORKER_URL during deployment.
+    """
+    # Cloud Run automatically injects the K_SERVICE environment variable
+    service_name = os.environ.get('K_SERVICE')
+    if not service_name:
+        raise RuntimeError("K_SERVICE environment variable not found. Cannot auto-discover URL. Please set WORKER_URL manually.")
+
+    print(f"🚀 Auto-discovering URL for service: {service_name}...")
+    try:
+        credentials, _ = google_auth_default(scopes=SCOPES)
+        # Use the Cloud Run Admin API
+        run_service = google_api_build('run', 'v1', credentials=credentials)
+        
+        service_path = f"projects/{PROJECT_ID}/locations/{LOCATION}/services/{service_name}"
+        
+        request = run_service.projects().locations().services().get(name=service_path)
+        response = request.execute()
+        
+        url = response.get('status', {}).get('url')
+        if not url:
+            raise RuntimeError(f"Could not find URL in API response for service {service_name}.")
+        
+        print(f"✅ Auto-discovered WORKER_URL: {url}")
+        return url
+    except Exception as e:
+        logging.critical(f"FATAL: Could not discover WORKER_URL via API. Ensure the 'Cloud Run Admin API' is enabled. Error: {e}")
+        raise
+    
+WORKER_URL = _get_self_url()
 
 # ---Add a startup check for essential environment variables ---
 def check_environment_variables():
     """Checks for required environment variables at startup."""
-    required_vars = ['PROJECT_ID', 'LOCATION', 'TASK_QUEUE', 'WORKER_URL', 'RESULTS_BUCKET', 'SERVICE_ACCOUNT_EMAIL']
+    required_vars = ['PROJECT_ID', 'LOCATION', 'TASK_QUEUE', 'RESULTS_BUCKET', 'SERVICE_ACCOUNT_EMAIL']
     missing_vars = [var for var in required_vars if not os.environ.get(var)]
     if missing_vars:
         error_message = f"FATAL: Missing required environment variables: {', '.join(missing_vars)}"
@@ -116,6 +150,112 @@ if PROJECT_ID and TASK_QUEUE:
     create_task_queue_if_not_exists()
 else:
     print("⚠️ PROJECT_ID or TASK_QUEUE environment variables not set. Skipping queue creation.")
+
+# --- Helper Functions for Streaming Architecture ---
+def _write_finding_to_gcs(job_id, check_name, finding_data):
+    """Uploads a single finding record as a JSON object to GCS."""
+    try:
+        bucket = storage_client.bucket(RESULTS_BUCKET)
+        # Use a unique name for each finding to prevent overwrites
+        blob_name = f"intermediate/{job_id}/{check_name}_{uuid.uuid4()}.json"
+        blob = bucket.blob(blob_name)
+        blob.upload_from_string(
+            json.dumps(finding_data),
+            content_type='application/json'
+        )
+    except Exception as e:
+        logging.error(f"Failed to write finding to GCS for {check_name}: {e}")
+
+def _read_all_findings_from_gcs(job_id):
+    """Reads all temporary finding files for a job and groups them by category."""
+    category_map = {
+        # Security & Identity
+        "Critical Org-Level Roles": "Security & Identity", "Public Org-Level Access": "Security & Identity",
+        "Organization IAM Policy": "Security & Identity", "Security Command Center Status": "Security & Identity",
+        "Project IAM Hygiene": "Security & Identity", "Service Account Key Rotation": "Security & Identity",
+        "Public GCS Buckets": "Security & Identity", "Open Firewall Rules": "Security & Identity",
+        "Primitive Roles (Owner or Editor)": "Security & Identity",
+
+        # Cost Optimization
+        "Idle Cloud SQL Instances": "Cost Optimization", "Low Utilization VMs": "Cost Optimization",
+        "VM Rightsizing": "Cost Optimization", "Unassociated IPs": "Cost Optimization",
+        "Idle Load Balancers": "Cost Optimization", "Idle Persistent Disks": "Cost Optimization",
+        "Underutilized Reservations": "Cost Optimization", "Idle Reservations": "Cost Optimization",
+
+        # Reliability & Resilience
+        "Cloud Storage Versioning": "Reliability & Resilience", "GKE Hygiene": "Reliability & Resilience",
+        "Essential Contacts": "Reliability & Resilience", "Personalized Service Health": "Reliability & Resilience",
+        "Cloud SQL High Availability": "Reliability & Resilience", "Cloud SQL Automated Backups": "Reliability & Resilience",
+        "Cloud SQL Backup Retention": "Reliability & Resilience", "Cloud SQL PITR": "Reliability & Resilience",
+        "MIG Resilience (Zonal)": "Reliability & Resilience", "Disk Snapshot Resilience": "Reliability & Resilience",
+
+        # Operational Excellence & Observability
+        "Organization Log Sink": "Operational Excellence & Observability",
+        "OS Config Agent Coverage": "Operational Excellence & Observability", "Monitoring Alert Coverage": "Operational Excellence & Observability",
+        "Standalone VMs (Not in MIGs)": "Operational Excellence & Observability",
+        "VPC IP Address Utilization": "Operational Excellence & Observability", "VPC Connectivity": "Operational Excellence & Observability",
+        "Load Balancer Health": "Operational Excellence & Observability", "GKE IP Address Utilization": "Operational Excellence & Observability",
+        "GKE Connectivity": "Operational Excellence & Observability", "GKE Service Account": "Operational Excellence & Observability",
+        "Dynamic Route Health": "Operational Excellence & Observability", "Cloud SQL Connectivity": "Operational Excellence & Observability",
+        "VPC Firewall Complexity (>150 Rules)": "Operational Excellence & Observability",
+        "Recent Changes (Org & Project)": "Operational Excellence & Observability", "Unattended Projects": "Operational Excellence & Observability",
+        "Quota Utilization (>80%)": "Operational Excellence & Observability"
+    }
+    categorized_results = {cat: [] for cat in set(category_map.values())}
+    
+    try:
+        bucket = storage_client.bucket(RESULTS_BUCKET)
+        prefix = f"intermediate/{job_id}/"
+        blobs = bucket.list_blobs(prefix=prefix)
+
+        for blob in blobs:
+            # Skip the org policy files
+            if "best_practices.json" in blob.name or "current_policies.json" in blob.name:
+                continue
+            
+            try:
+                data_string = blob.download_as_text()
+                data = json.loads(data_string)
+                # The check name is stored inside the JSON object itself
+                check_name = data.get("Check")
+                category = category_map.get(check_name)
+                if category:
+                    categorized_results[category].append(data)
+            except Exception as e:
+                logging.error(f"Failed to read and process GCS finding {blob.name}: {e}")
+    except Exception as e:
+        logging.error(f"Failed to list findings from GCS for job {job_id}: {e}")
+        
+    return categorized_results
+
+def _write_org_policies_to_gcs(job_id, best_practices, current_policies):
+    """Writes the raw org policy data to JSON files in GCS."""
+    try:
+        bucket = storage_client.bucket(RESULTS_BUCKET)
+        
+        bp_blob = bucket.blob(f"intermediate/{job_id}/best_practices.json")
+        bp_blob.upload_from_string(json.dumps(best_practices), content_type='application/json')
+        
+        cp_blob = bucket.blob(f"intermediate/{job_id}/current_policies.json")
+        cp_blob.upload_from_string(json.dumps(current_policies), content_type='application/json')
+    except Exception as e:
+        logging.error(f"Failed to write org policy files to GCS: {e}")
+
+def _read_org_policies_from_gcs(job_id):
+    """Reads the raw org policy data from GCS files."""
+    try:
+        bucket = storage_client.bucket(RESULTS_BUCKET)
+        
+        bp_blob = bucket.blob(f"intermediate/{job_id}/best_practices.json")
+        best_practices = json.loads(bp_blob.download_as_text())
+        
+        cp_blob = bucket.blob(f"intermediate/{job_id}/current_policies.json")
+        current_policies = json.loads(cp_blob.download_as_text())
+        
+        return (best_practices, current_policies)
+    except Exception as e:
+        logging.error(f"Failed to read org policy files from GCS: {e}")
+        return (None, None)
 
 # --- Core Data Fetching and Analysis Functions ---
 
@@ -203,40 +343,95 @@ def get_best_practices_from_gcs(public_url):
     except Exception as e:
         return f"Error downloading or parsing CSV: {e}"
     
-def get_organization_policies(org_id):
+def get_effective_org_policies(scope, scope_id):
     """
-    Fetches all organization policies for a given Google Cloud organization.
+    Calculates the effective organization policies for a resource by manually
+    traversing its ancestry and merging policies. This avoids the low daily
+    quota of the Cloud Asset Policy Analyzer API.
 
     Args:
-        org_id (str): The ID of the organization (e.g., "123456789012").
+        scope (str): The scope ('organization', 'folder', 'project').
+        scope_id (str): The ID of the resource.
 
     Returns:
-        dict: A dictionary of current organization policies, keyed by policy ID.
+        dict: A dictionary of effective organization policies, keyed by policy ID.
         str: An error message if fetching fails.
     """
-    print(f"🔍 Fetching policies for org: {org_id}...")
+    print(f"🔍 Calculating effective policies for {scope} '{scope_id}' by traversing hierarchy...")
     try:
         credentials, _ = google_auth_default(scopes=SCOPES)
-        service = google_api_build('cloudresourcemanager', 'v1', credentials=credentials)
-        current_policies, request = {}, service.organizations().listOrgPolicies(resource=f'organizations/{org_id}', body={})
-        while request:
-            response = request.execute()
-            for policy in response.get('policies', []):
-                if full_path := policy.get('constraint'):
-                    current_policies[full_path.split('/')[-1]] = policy
-            request = service.organizations().listOrgPolicies_next(previous_request=request, previous_response=response)
-        return current_policies
+        # Main client remains v1 for compatibility with listOrgPolicies
+        crm_service = google_api_build('cloudresourcemanager', 'v1', credentials=credentials)
+
+        # --- START OF MODIFICATION ---
+        # Initialize a separate v3 client specifically to bypass the v1 'get' bug for folder
+        crm_v3_service = google_api_build('cloudresourcemanager', 'v3', credentials=credentials)
+        # --- END OF MODIFICATION ---
+
+        def list_policies_for_resource(resource_str):
+            """Helper to fetch and format policies for a given resource string."""
+            policies = {}
+            try:
+                api_call = lambda: crm_service.organizations().listOrgPolicies(resource=resource_str, body={}).execute() if resource_str.startswith('organizations/') else \
+                                 crm_service.folders().listOrgPolicies(resource=resource_str, body={}).execute() if resource_str.startswith('folders/') else \
+                                 crm_service.projects().listOrgPolicies(resource=resource_str, body={}).execute()
+                response = _call_api_with_backoff(api_call, context_message=f"listOrgPolicies for {resource_str}")
+                for policy in response.get('policies', []):
+                    if full_path := policy.get('constraint'):
+                        policies[full_path.split('/')[-1]] = policy
+            except Exception as e:
+                logging.warning(f"Could not list policies for {resource_str}: {e}")
+            return policies
+
+        effective_policies = {}
+        resource_hierarchy = []
+
+        if scope == 'organization':
+            resource_hierarchy.append(f"organizations/{scope_id}")
+        elif scope == 'project':
+            ancestry = crm_service.projects().getAncestry(projectId=scope_id, body={}).execute()
+            for ancestor in ancestry.get('ancestor', []):
+                resource_hierarchy.append(f"{ancestor['resourceId']['type']}s/{ancestor['resourceId']['id']}")
+            resource_hierarchy.append(f"projects/{scope_id}")
+        elif scope == 'folder':
+            ancestors = []
+            curr_folder = f"folders/{scope_id}"
+            while curr_folder:
+                ancestors.append(curr_folder)
+                # --- THIS IS CHANGE FOR FOLDER FIX ---
+                # Use the new v3 client for the 'get' call, which does not have the bug
+                folder_details = crm_v3_service.folders().get(name=curr_folder).execute()
+                # --- END OF CHANGE ---
+                parent = folder_details.get('parent')
+                if parent and parent.startswith('organizations/'):
+                    ancestors.append(parent)
+                    break
+                curr_folder = parent
+            resource_hierarchy = list(reversed(ancestors))
+
+        if not resource_hierarchy:
+            return f"Could not determine hierarchy for {scope} {scope_id}"
+
+        print(f"   -> Traversing hierarchy: {' -> '.join(resource_hierarchy)}")
+        for resource_str in resource_hierarchy:
+            policies_at_level = list_policies_for_resource(resource_str)
+            effective_policies.update(policies_at_level)
+
+        print(f"✅ Successfully calculated {len(effective_policies)} effective policies.")
+        return effective_policies
+
     except Exception as e:
-        return f"Error fetching org policies: {e}"
-
-
+        traceback.print_exc()
+        return f"A critical error occurred in get_effective_org_policies: {e}"
+    
 def list_projects_for_scope(scope, scope_id):
     """
-    Retrieves a list of all ACTIVE projects within a given scope (org, folder, or project).
+    Retrieves a list of all ACTIVE projects within a given scope (org, folder, or project)
+    using the recursive Cloud Asset Inventory API for complete coverage.
     """
-    print(f"📋 Listing projects for {scope} '{scope_id}'...")
-    
-    # If the scope is just a single project, return it directly.
+    print(f"📋 Listing projects for {scope} '{scope_id}' using Cloud Asset Inventory...")
+
+    # The single-project case remains the fastest method for that specific scope.
     if scope == 'project':
         try:
             credentials, _ = google_auth_default(scopes=SCOPES)
@@ -244,7 +439,8 @@ def list_projects_for_scope(scope, scope_id):
             project = service.projects().get(projectId=scope_id).execute()
             if project.get('lifecycleState') == 'ACTIVE':
                 print(f"✅ Found 1 ACTIVE project.")
-                return [project]
+                # Return in the same format as the Asset API for consistency
+                return [{'projectId': project['projectId'], 'displayName': project.get('name', project['projectId'])}]
             else:
                 print("⚠️ Project is not ACTIVE.")
                 return []
@@ -252,30 +448,45 @@ def list_projects_for_scope(scope, scope_id):
             print(f"❌ Error fetching single project: {e}")
             return []
 
-    # For orgs and folders, use the list method with a filter.
-    parent_map = {
-        'organization': f'parent.type:organization parent.id:{scope_id}',
-        'folder': f'parent.type:folder parent.id:{scope_id}'
-    }
-    filter_str = parent_map.get(scope)
-    if not filter_str:
-        print(f"❌ Invalid scope '{scope}' provided.")
-        return []
-
+    # --- NEW RECURSIVE LOGIC USING CLOUD ASSET API ---
     try:
-        credentials, _ = google_auth_default(scopes=SCOPES)
-        service = google_api_build('cloudresourcemanager', 'v1', credentials=credentials)
-        projects, request = [], service.projects().list(filter=filter_str)
-        while request:
-            response = request.execute()
-            projects.extend(response.get('projects', []))
-            request = service.projects().list_next(previous_request=request, previous_response=response)
+        asset_client = asset_v1.AssetServiceClient()
+
+        # Define the parent scope for the asset search
+        parent_scope_map = {
+            'organization': f'organizations/{scope_id}',
+            'folder': f'folders/{scope_id}'
+        }
+        asset_search_scope = parent_scope_map.get(scope)
+        if not asset_search_scope:
+            print(f"❌ Invalid scope '{scope}' provided for asset search.")
+            return []
+
+        # Perform a single, recursive search for all projects
+        response = asset_client.search_all_resources(
+            request={
+                "scope": asset_search_scope,
+                "asset_types": ["cloudresourcemanager.googleapis.com/Project"],
+                "query": "state:ACTIVE", # Filter for active projects at the API level
+            }
+        )
+
+        # Process the results into the expected format
+        all_projects = []
+        for resource in response:
+            # The project ID is part of the full resource name
+            project_id = resource.name.split('/')[-1]
+            all_projects.append({
+                'projectId': project_id,
+                'displayName': resource.display_name
+            })
         
-        active_projects = [p for p in projects if p.get('lifecycleState') == 'ACTIVE']
-        print(f"✅ Found {len(active_projects)} ACTIVE projects.")
-        return active_projects
+        print(f"✅ Found {len(all_projects)} ACTIVE projects recursively.")
+        return all_projects
+
     except Exception as e:
-        print(f"❌ Error listing projects for scope {scope}: {e}")
+        logging.error(f"❌ Critical error listing projects with Cloud Asset API: {e}")
+        traceback.print_exc()
         return []
     
 def get_active_compute_locations(all_projects):
@@ -412,10 +623,48 @@ def list_resources():
         traceback.print_exc()
         return jsonify({"error": f"Failed to list resources: {e}"}), 500
 
+# --- Helper function for backoff ---
+
+def _call_api_with_backoff(api_call_func, context_message="API call"):
+    """
+    Wraps a Google Cloud API list call with exponential backoff to handle 429 rate limit errors.
+
+    Args:
+        api_call_func: A lambda or function that executes the actual API call
+                       (e.g., lambda: client.list_recommendations(parent=parent)).
+
+    Returns:
+        The results of the API call, or an empty list if all retries fail.
+    """
+    max_retries = 5
+    initial_delay = 1.5  # seconds
+    backoff_factor = 2
+
+    for attempt in range(max_retries):
+        try:
+            # Execute the provided API call function
+            return api_call_func()
+        except core_exceptions.ResourceExhausted as e:
+            # This is the specific exception for 429 errors from google-api-core
+            if attempt < max_retries - 1:
+                # Calculate wait time with exponential backoff and random jitter
+                delay = (initial_delay * (backoff_factor ** attempt)) + random.uniform(0, 1)
+                logging.warning(
+                    f"Rate limit hit (429) for for {context_message}. Retrying in {delay:.2f} seconds... (Attempt {attempt + 1}/{max_retries})"
+                )
+                time.sleep(delay)
+            else:
+                logging.error(f"API rate limit exceeded for {context_message} after {max_retries} attempts. Error: {e}")
+                return [] # Return empty list after final failure
+        except Exception as e:
+            # For any other error, don't retry, just log it and move on.
+            logging.error(f"An unexpected API error occurred for {context_message}: {e}")
+            return []
+    return [] # Should not be reached, but as a fallback
 
 # --- Security & Identity Checks ---
 
-def check_org_iam_policy(org_id):
+def check_org_iam_policy(org_id, job_id):
     """
     Checks the organization-level IAM policy for critical and public role bindings.
 
@@ -425,31 +674,48 @@ def check_org_iam_policy(org_id):
     Returns:
         list: A list of finding dictionaries.
     """
-    print("🕵️  Checking organization-level IAM policy...")
+    CHECK_NAME_CRITICAL = "Critical Org-Level Roles"
+    CHECK_NAME_PUBLIC = "Public Org-Level Access"
+    print(f"🕵️  [{job_id}] Checking for {CHECK_NAME_CRITICAL} and {CHECK_NAME_PUBLIC}...")
+
     try:
         credentials, _ = google_auth_default(scopes=SCOPES)
         service = google_api_build('cloudresourcemanager', 'v1', credentials=credentials)
         policy = service.organizations().getIamPolicy(resource=f'organizations/{org_id}', body={}).execute()
         
-        all_findings = []
         critical_roles = ['roles/owner', 'roles/resourcemanager.organizationAdmin']
         public_principals = ['allUsers', 'allAuthenticatedUsers']
 
-        crit_role_findings = [{"Role": b.get('role'), "Principal": m} for b in policy.get('bindings', []) if b.get('role') in critical_roles for m in b.get('members', [])]
-        if crit_role_findings:
-            all_findings.append({"Check": "Critical Org-Level Roles", "Finding": crit_role_findings, "Status": "Action Required"})
-
-        public_access_findings = [{"Role": b.get('role'), "Principal": m} for b in policy.get('bindings', []) for m in b.get('members', []) if m in public_principals]
-        if public_access_findings:
-            all_findings.append({"Check": "Public Org-Level Access", "Finding": public_access_findings, "Status": "Action Required"})
+        # --- Check 1: Critical Org-Level Roles ---
+        crit_role_findings = [{"Role": b.get('role'), "Principal": m} 
+                              for b in policy.get('bindings', []) 
+                              if b.get('role') in critical_roles 
+                              for m in b.get('members', [])]
         
-        if not all_findings:
-            return [{"Check": "Org-Level Critical Roles", "Finding": [{"Status": "No principals found with Owner, Org Admin, or public roles."}], "Status": "Compliant"}]
-        return all_findings
-    except Exception as e:
-        return [{"Check": "Organization IAM Policy Check", "Finding": [{"Error": str(e)}], "Status": "Error"}]
+        if crit_role_findings:
+            result_crit = {"Check": CHECK_NAME_CRITICAL, "Finding": crit_role_findings, "Status": "Action Required"}
+        else:
+            result_crit = {"Check": CHECK_NAME_CRITICAL, "Finding": [{"Status": "No principals found with Owner or Org Admin roles."}], "Status": "Compliant"}
+        _write_finding_to_gcs(job_id, CHECK_NAME_CRITICAL.replace(" ", "_"), result_crit)
 
-def check_audit_logging(org_id):
+        # --- Check 2: Public Org-Level Access ---
+        public_access_findings = [{"Role": b.get('role'), "Principal": m} 
+                                  for b in policy.get('bindings', []) 
+                                  for m in b.get('members', []) 
+                                  if m in public_principals]
+        
+        if public_access_findings:
+            result_public = {"Check": CHECK_NAME_PUBLIC, "Finding": public_access_findings, "Status": "Action Required"}
+        else:
+            result_public = {"Check": CHECK_NAME_PUBLIC, "Finding": [{"Status": "No public access found at the organization level."}], "Status": "Compliant"}
+        _write_finding_to_gcs(job_id, CHECK_NAME_PUBLIC.replace(" ", "_"), result_public)
+
+    except Exception as e:
+        # If the entire check fails, write a single error file.
+        error_result = {"Check": "Organization IAM Policy Check", "Finding": [{"Error": str(e)}], "Status": "Error"}
+        _write_finding_to_gcs(job_id, "Organization_IAM_Policy_Check_Error", error_result)
+
+def check_audit_logging(org_id, job_id):
     """
     Verifies if an organization-level log sink is configured for centralized audit logging.
 
@@ -459,20 +725,22 @@ def check_audit_logging(org_id):
     Returns:
         list: A list of finding dictionaries.
     """
-    print("📜 Checking for organization-level log sinks...")
+    CHECK_NAME = "Organization Log Sink"
+    print(f"📜 [{job_id}] Checking for {CHECK_NAME}...")
     try:
         credentials, _ = google_auth_default(scopes=SCOPES)
         service = google_api_build('logging', 'v2', credentials=credentials)
         sinks = service.organizations().sinks().list(parent=f'organizations/{org_id}').execute().get('sinks', [])
         if sinks:
             finding_data = [{"Sink Name": s['name'], "Destination": s['destination']} for s in sinks]
-            return [{"Check": "Organization Log Sink", "Finding": finding_data, "Status": "Compliant"}]
+            result = {"Check": CHECK_NAME, "Finding": finding_data, "Status": "Compliant"}
         else:
-            return [{"Check": "Organization Log Sink", "Finding": [{"Issue": "No organization-level log sink configured."}], "Status": "Action Required"}]
+            result = {"Check": CHECK_NAME, "Finding": [{"Issue": "No organization-level log sink configured."}], "Status": "Action Required"}
     except Exception as e:
-        return [{"Check": "Log Sink Check", "Finding": [{"Error": str(e)}], "Status": "Error"}]
+        result = {"Check": "Log Sink Check", "Finding": [{"Error": str(e)}], "Status": "Error"}
+    _write_finding_to_gcs(job_id, CHECK_NAME.replace(" ", "_"), result)
 
-def check_scc_status(org_id):
+def check_scc_status(org_id, job_id):
     """
     Checks the status and tier of Security Command Center (SCC) for the organization.
 
@@ -482,7 +750,8 @@ def check_scc_status(org_id):
     Returns:
         list: A list of finding dictionaries. Recommends 'PREMIUM' tier.
     """
-    print("🛡️  Checking Security Command Center status...")
+    CHECK_NAME = "Security Command Center Status"
+    print(f"🛡️  [{job_id}] Checking {CHECK_NAME}...")
     try:
         credentials, _ = google_auth_default(scopes=SCOPES)
         service = google_api_build('securitycenter', 'v1', credentials=credentials)
@@ -490,15 +759,17 @@ def check_scc_status(org_id):
         tier = settings.get('tier', 'STANDARD')
         status = "Compliant" if tier == "PREMIUM" else "Action Required"
         finding = {"Tier": tier, "Recommendation": "Premium tier provides advanced threat detection." if status == "Action Required" else "N/A"}
-        return [{"Check": "Security Command Center", "Finding": [finding], "Status": status}]
+        result = {"Check": "Security Command Center", "Finding": [finding], "Status": status}
     except HttpError as e:
         if "API has not been used" in str(e) or e.resp.status == 404:
-            return [{"Check": "Security Command Center", "Finding": [{"Issue": "Security Command Center is not enabled for this organization."}], "Status": "Action Required"}]
-        return [{"Check": "Security Command Center", "Finding": [{"Error": str(e)}], "Status": "Error"}]
+            result = {"Check": "Security Command Center", "Finding": [{"Issue": "Security Command Center is not enabled for this organization."}], "Status": "Action Required"}
+        else:
+            result = {"Check": "Security Command Center", "Finding": [{"Error": str(e)}], "Status": "Error"}
     except Exception as e:
-        return [{"Check": "Security Command Center", "Finding": [{"Error": str(e)}], "Status": "Error"}]
+        result = {"Check": "Security Command Center", "Finding": [{"Error": str(e)}], "Status": "Error"}
+    _write_finding_to_gcs(job_id, CHECK_NAME.replace(" ", "_"), result)
 
-def check_service_health_status(org_id):
+def check_service_health_status(org_id, job_id):
     """
     Verifies if the Personalized Service Health API is enabled and accessible.
 
@@ -508,7 +779,8 @@ def check_service_health_status(org_id):
     Returns:
         list: A list of finding dictionaries indicating the status.
     """
-    print("❤️‍🩹 Checking Personalized Service Health status...")
+    CHECK_NAME = "Personalized Service Health"
+    print(f"❤️‍🩹 [{job_id}] Checking {CHECK_NAME}...")
     try:
         credentials, _ = google_auth_default(scopes=SCOPES)
         credentials.refresh(GoogleAuthRequest())
@@ -516,15 +788,19 @@ def check_service_health_status(org_id):
         url = f"https://servicehealth.googleapis.com/v1beta/organizations/{org_id}/locations/global/organizationEvents?filter=state=ACTIVE%20category=INCIDENT"
         response = requests.get(url, headers=headers)
         if response.status_code == 200:
-            return [{"Check": "Personalized Service Health", "Finding": [{"Status": "Enabled"}], "Status": "Compliant"}]
+            result = {"Check": CHECK_NAME, "Finding": [{"Status": "Enabled"}], "Status": "Compliant"}
         elif response.status_code == 403:
             error = response.json().get('error', {}).get('message', 'Permission denied.')
-            return [{"Check": "Personalized Service Health", "Finding": [{"Error": error}], "Status": "Error"}]
-        response.raise_for_status()
+            result = {"Check": CHECK_NAME, "Finding": [{"Error": error}], "Status": "Error"}
+        else:
+            response.raise_for_status()
+            result = {"Check": CHECK_NAME, "Finding": [{"Status": "Enabled"}], "Status": "Compliant"} # Should not be reached on error
     except Exception as e:
-        return [{"Check": "Personalized Service Health", "Finding": [{"Error": str(e)}], "Status": "Error"}]
+        result = {"Check": CHECK_NAME, "Finding": [{"Error": str(e)}], "Status": "Error"}
+    _write_finding_to_gcs(job_id, CHECK_NAME.replace(" ", "_"), result)
 
-def check_essential_contacts(org_id):
+
+def check_essential_contacts(org_id, job_id):
     """
     Checks if Essential Contacts are configured for key notification categories.
 
@@ -534,7 +810,8 @@ def check_essential_contacts(org_id):
     Returns:
         list: A list of finding dictionaries indicating missing contact categories.
     """
-    print("📞 Checking for Essential Contacts...")
+    CHECK_NAME = "Essential Contacts"
+    print(f"📞 [{job_id}] Checking for {CHECK_NAME}...")
     try:
         credentials, _ = google_auth_default(scopes=SCOPES)
         service = google_api_build('essentialcontacts', 'v1', credentials=credentials)
@@ -543,17 +820,20 @@ def check_essential_contacts(org_id):
         missing = sorted(list({"SECURITY", "TECHNICAL", "LEGAL"} - found))
         
         if not missing:
-            return [{"Check": "Essential Contacts", "Finding": [{"Status": "All key contact categories are configured."}], "Status": "Compliant"}]
-        return [{"Check": "Essential Contacts", "Finding": [{"Missing Categories": ", ".join(missing)}], "Status": "Action Required"}]
+            result = {"Check": CHECK_NAME, "Finding": [{"Status": "All key contact categories are configured."}], "Status": "Compliant"}
+        else:
+            result = {"Check": CHECK_NAME, "Finding": [{"Missing Categories": ", ".join(missing)}], "Status": "Action Required"}
     except HttpError as e:
         if "API has not been used" in str(e) or "service is disabled" in str(e):
-             return [{"Check": "Essential Contacts", "Finding": [{"Error": "The Essential Contacts API is not enabled. Please enable it to run this check."}], "Status": "Error"}]
-        return [{"Check": "Essential Contacts", "Finding": [{"Error": str(e)}], "Status": "Error"}]
+             result = {"Check": CHECK_NAME, "Finding": [{"Error": "The Essential Contacts API is not enabled. Please enable it to run this check."}], "Status": "Error"}
+        else:
+            result = {"Check": CHECK_NAME, "Finding": [{"Error": str(e)}], "Status": "Error"}
     except Exception as e:
-        return [{"Check": "Essential Contacts", "Finding": [{"Error": str(e)}], "Status": "Error"}]
+        result = {"Check": CHECK_NAME, "Finding": [{"Error": str(e)}], "Status": "Error"}
+    _write_finding_to_gcs(job_id, CHECK_NAME.replace(" ", "_"), result)
 
 
-def check_project_iam_policy(scope_id, projects):
+def check_project_iam_policy(scope_id, projects, job_id):
     """
     Scans all projects in parallel for the use of primitive roles (Owner/Editor).
 
@@ -564,8 +844,12 @@ def check_project_iam_policy(scope_id, projects):
     Returns:
         list: A list of finding dictionaries detailing primitive role usage.
     """
-    print("🕵️  Checking project-level IAM hygiene in parallel...")
-    if not projects: return [{"Check": "Project IAM Hygiene", "Finding": [{"Error": "Could not list projects."}], "Status": "Error"}]
+    CHECK_NAME = "Primitive Roles (Owner or Editor)"
+    print(f"🕵️  [{job_id}] Checking for {CHECK_NAME} in parallel...")
+    if not projects: 
+        result = {"Check": "Project IAM Hygiene", "Finding": [{"Error": "Could not list projects."}], "Status": "Error"}
+        _write_finding_to_gcs(job_id, CHECK_NAME.replace(" ", "_"), result)
+        return
     
     def check_single_project(p):
         project_id, findings = p['projectId'], []
@@ -577,17 +861,20 @@ def check_project_iam_policy(scope_id, projects):
                 if b.get('role') in ['roles/owner', 'roles/editor']:
                     for member in b.get('members', []):
                         findings.append({'Project': project_id, 'Principal': member, 'Role': b.get('role')})
-        except Exception: pass
+        except Exception as e: logging.warning(f"Could not check {CHECK_NAME} for {project_id}: {e}")
         return findings
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
-        all_findings = [item for sublist in executor.map(check_single_project, projects) for item in sublist]
+    all_findings = []
+    for project in projects:
+        all_findings.extend(check_single_project(project))
     
     if all_findings:
-        return [{"Check": "Primitive Roles (Owner/Editor)", "Finding": all_findings, "Status": "Action Required"}]
-    return [{"Check": "Primitive Roles (Owner/Editor)", "Finding": [{"Status": "No projects found with Owner or Editor roles."}], "Status": "Compliant"}]
+        result = {"Check": CHECK_NAME, "Finding": all_findings, "Status": "Action Required"}
+    else:
+        result = {"Check": CHECK_NAME, "Finding": [{"Status": "No projects found with Owner or Editor roles."}], "Status": "Compliant"}
+    _write_finding_to_gcs(job_id, CHECK_NAME.replace(" ", "_"), result)
 
-def check_os_config_coverage(scope_id, all_projects):
+def check_os_config_coverage(scope_id, all_projects, job_id):
     """
     Checks VM instances across all projects to identify those not reporting to OS Config.
     This helps ensure patch management and inventory visibility. Excludes GKE and Dataproc VMs.
@@ -599,7 +886,8 @@ def check_os_config_coverage(scope_id, all_projects):
     Returns:
         list: A list of finding dictionaries listing VMs without OS Config agent coverage.
     """
-    print("🤖 Checking for OS Config agent coverage in parallel...")
+    CHECK_NAME = "OS Config Agent Coverage"
+    print(f"🤖 [{job_id}] Checking for {CHECK_NAME} in parallel...")
     if not all_projects: return []
 
     def check_single_project(project):
@@ -627,7 +915,7 @@ def check_os_config_coverage(scope_id, all_projects):
             if missing: return {"Project": project_id, "VMs Not Reporting": ", ".join(sorted(missing))}
         except core_exceptions.FailedPrecondition:
             return {"Project": project_id, "Issue": "OS inventory management disabled."}
-        except Exception: pass
+        except Exception as e: logging.warning(f"Could not check {CHECK_NAME} for {project_id}: {e}")
         return None
 
     def _is_os_reporting(client, project, vm):
@@ -640,14 +928,22 @@ def check_os_config_coverage(scope_id, all_projects):
         except Exception:
             return False
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
-        results = [r for r in executor.map(check_single_project, all_projects) if r]
+    results = []
+    for project in all_projects:
+        # check_single_project returns a single dictionary or None
+        finding = check_single_project(project)
+        if finding:
+            # We append the single dictionary to our list of results
+            results.append(finding)
 
     if not results:
-        return [{"Check": "OS Config Agent Coverage", "Finding": [{"Status": "All unmanaged VMs appear to have OS Config agent."}], "Status": "Compliant"}]
-    return [{"Check": "OS Config Agent Coverage", "Finding": results, "Status": "Action Required"}]
+        result = {"Check": CHECK_NAME, "Finding": [{"Status": "All unmanaged VMs appear to have OS Config agent."}], "Status": "Compliant"}
+    else:
+        result = {"Check": CHECK_NAME, "Finding": results, "Status": "Action Required"}
+    _write_finding_to_gcs(job_id, CHECK_NAME.replace(" ", "_"), result)
 
-def check_monitoring_coverage(scope_id, all_projects):
+
+def check_monitoring_coverage(scope_id, all_projects, job_id):
     """
     Scans projects for key monitoring alert policies (e.g., for Cloud SQL, GKE, Quotas).
 
@@ -658,7 +954,8 @@ def check_monitoring_coverage(scope_id, all_projects):
     Returns:
         list: A list of finding dictionaries for projects missing essential alerts.
     """
-    print("📊 Checking Monitoring Alert Coverage in parallel...")
+    CHECK_NAME = "Monitoring Alert Coverage"
+    print(f"📊 [{job_id}] Checking {CHECK_NAME} in parallel...")
     if not all_projects: return []
     
     def check_project(project):
@@ -676,20 +973,25 @@ def check_monitoring_coverage(scope_id, all_projects):
                     issues.append({"Project": project_id, "Issue": f"Missing alert policy for {name}"})
             if "serviceruntime.googleapis.com/quota" not in filters:
                 issues.append({"Project": project_id, "Issue": "Missing Quota alerting policy"})
-        except Exception: pass
+        except Exception as e: logging.warning(f"Could not check {CHECK_NAME} for {project_id}: {e}")
         return issues
         
-    with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
-        results = [item for sublist in executor.map(check_project, all_projects) for item in sublist]
+    results = []
+    for project in all_projects:
+        # check_project returns a list of findings for the project
+        findings = check_project(project)
+        if findings:
+            # We extend the main results list with the items from the findings list
+            results.extend(findings)
 
     if not results:
-        return [{"Check": "Monitoring Alert Coverage", "Finding": [{"Status": "All projects appear to have key alert policies."}], "Status": "Compliant"}]
-    return [{"Check": "Monitoring Alert Coverage", "Finding": results, "Status": "Action Required"}]
+        result = {"Check": CHECK_NAME, "Finding": [{"Status": "All projects appear to have key alert policies."}], "Status": "Compliant"}
+    else:
+        result = {"Check": CHECK_NAME, "Finding": results, "Status": "Action Required"}
+    _write_finding_to_gcs(job_id, CHECK_NAME.replace(" ", "_"), result)
 
 
-# --- ADD THESE NEW/RESTORED FUNCTIONS TO  SCRIPT ---
-
-def run_network_insights(scope_id, all_projects, active_zones, active_regions):
+def run_network_insights(scope_id, all_projects, active_zones, active_regions, job_id):
     """
     Fetches and parses Network Analyzer insights across all projects.
     Normalizes various insight types into a consistent, table-friendly format.
@@ -709,10 +1011,53 @@ def run_network_insights(scope_id, all_projects, active_zones, active_regions):
     all_locations = active_zones + active_regions
 
     # --- THIS HELPER FUNCTION DOES ALL THE PARSING ---
-    def _parse_network_insight_content(content_dict, description, project_id):
-        """Helper to parse raw insight data into a structured dictionary."""
+    def _parse_network_insight_content(insight_dict, description, project_id, check_name):
+        """
+        Helper to parse raw insight data into a structured dictionary. This version includes
+        the corrected logic for extracting the GKE cluster name for serviceAccountInsight.
+        """
         parsed_findings_list = []
-        try:
+        content_dict = insight_dict.get('content', {})
+        
+        if check_name == "GKE Service Account":
+            resource_name = "N/A"  # Default value
+
+            # Method 1 (Most Reliable): Use the specific, nested clusterUri from your log data.
+            try:
+                # Path: content -> nodeServiceAccountInsight -> clusterUri
+                cluster_uri = content_dict.get('nodeServiceAccountInsight', {}).get('clusterUri')
+                if cluster_uri and isinstance(cluster_uri, str):
+                    resource_name = cluster_uri.split('/')[-1]
+            except Exception:
+                pass # Failsafe
+
+            # Method 2 (Excellent Fallback): Use the top-level 'target_resources' field.
+            if resource_name == "N/A":
+                target_resources = insight_dict.get('target_resources', [])
+                if target_resources and isinstance(target_resources[0], str):
+                    resource_name = target_resources[0].split('/')[-1]
+
+            # Method 3 (Final Fallback): Regex on the description string.
+            if resource_name == "N/A":
+                match = re.search(r"GKE cluster '([^']+)'", description)
+                if match:
+                    resource_name = match.group(1)
+
+            # Append the finding once, after all attempts are complete.
+            parsed_findings_list.append({
+                "Project": project_id,
+                "Finding Type": "GKE Service Account",
+                "Resource": f"Cluster: {resource_name}",
+                "Detail": description,
+                "Value": "Compute Engine default service account"
+            })
+
+    # --- END OF GKE PARSER ---
+
+        # --- END OF MODIFICATION ---
+        
+        # --- EXISTING PARSERS FOR OTHER INSIGHT TYPES ---
+        elif 'Utilization' in check_name:
             # For Subnet IP Utilization
             if 'ipUtilizationSummaryInfo' in content_dict:
                 for info in content_dict.get('ipUtilizationSummaryInfo', []):
@@ -766,27 +1111,18 @@ def run_network_insights(scope_id, all_projects, active_zones, active_regions):
                         "Value": f"Unassigned Count: {stats.get('unassignedCount', 0):.0f} ({stats.get('unassignedRatio', 0) * 100:.2f}%)"
                 })
 
-        except Exception as e:
-            # This is the NEW clean exception handler
-            return [{
-                "Project": project_id,
-                "Finding Type": "Parse Error",
-                "Resource": description,
-                "Detail": str(e),
-                "Value": "Error"
-            }]
-
-        # Clean fallback logic
+        # --- Fallback for any other insight types remains the same ---
         if not parsed_findings_list:
+            # This block now also handles cases where an error might occur in a specific parser
             parsed_findings_list.append({
                 "Project": project_id,
-                "Finding Type": "General Insight",    
-                "Resource": description,            
-                "Detail": "(No structured data)",   
-                "Value": "See finding"              
+                "Finding Type": "General Insight",
+                "Resource": description,
+                "Detail": "(No structured data)",
+                "Value": "See finding"
             })
             
-        return parsed_findings_list # Return the final list
+        return parsed_findings_list
     
 
     insight_type_map = {
@@ -809,15 +1145,16 @@ def run_network_insights(scope_id, all_projects, active_zones, active_regions):
                 for check_name, insight_type_id in insight_type_map.items(): 
                     parent = f"projects/{project_id}/locations/{loc}/insightTypes/{insight_type_id}"
                     try:
-                        for insight in client.list_insights(parent=parent):
+                        api_call = lambda: client.list_insights(parent=parent)
+                        context = f"'{check_name}' in {project_id} at {loc}"
+                        for insight in _call_api_with_backoff(api_call,context_message=context):
                             parsed_data_list = []
                             try:
                                 insight_dict = Insight.to_dict(insight)
-                                content_dict = insight_dict.get('content', {})
                                 
                                 # --- MODIFIED CALL ---
-                                # Pass the project_id INTO the parser
-                                parsed_data_list = _parse_network_insight_content(content_dict, insight.description, project_id)
+                                # Pass the check_name INTO the parser so it knows what it's parsing.
+                                parsed_data_list = _parse_network_insight_content(insight_dict, insight.description, project_id, check_name)
 
                             except Exception as e:
                                 parsed_data_list = [{"Project": project_id, "Finding Type": "Top-level Parse Error", "Resource": insight.description, "Detail": str(e), "Value": "N/A"}]
@@ -831,51 +1168,115 @@ def run_network_insights(scope_id, all_projects, active_zones, active_regions):
                         pass 
         except Exception as e:
             logging.warning(f"Could not check network insights for {project_id}: {e}")
+        return project_findings_map
         
-        return [{"Check": name, "Finding": data_list, "Status": "Action Required"} 
-                for name, data_list in project_findings_map.items() if data_list] 
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
-        return [item for sublist in executor.map(check_project, all_projects) for item in sublist]
+    project_results_list = []
+    for project in all_projects:
+        project_results_list.append(check_project(project))
+
     
-def check_sa_key_rotation(scope_id, all_projects):
-    """
-    Scans projects for user-managed service account keys older than 90 days.
+    # Aggregate results from all projects
+    final_findings_by_check = {}
+    for project_map in project_results_list:
+        for check_name, findings in project_map.items():
+            if check_name not in final_findings_by_check:
+                final_findings_by_check[check_name] = []
+            final_findings_by_check[check_name].extend(findings)
 
-    Args:
-        org_id (str): The organization ID.
-        all_projects (list): A list of project dictionaries.
 
-    Returns:
-        list: A list of finding dictionaries for projects with old keys.
-    """
-    print("🔑 Checking for old Service Account keys...")
+    # Write one file per insight type
+    for check_name, all_findings in final_findings_by_check.items():
+        if all_findings:
+            result = {"Check": check_name, "Finding": all_findings, "Status": "Action Required"}
+            _write_finding_to_gcs(job_id, check_name.replace(" ", "_"), result)
+
     
-    def check_project(p):
-        project_id, findings = p['projectId'], []
+def check_sa_key_rotation(scope_id, all_projects, job_id):
+    """
+    Scans ALL projects and ALL service account keys for user-managed keys older than 90 days.
+    This version corrects the pagination logic for listing keys.
+    """
+    CHECK_NAME = "Service Account Key Rotation"
+    print(f"🔑 [{job_id}] Checking for {CHECK_NAME}...")
+
+    all_findings = []
+
+    for project in all_projects:
+        project_id = project['projectId']
         try:
             credentials, _ = google_auth_default(scopes=SCOPES)
             iam_service = google_api_build('iam', 'v1', credentials=credentials)
-            s_accounts = iam_service.projects().serviceAccounts().list(name=f'projects/{project_id}').execute().get('accounts', [])
+
+            # This pagination loop for service accounts is correct and remains unchanged.
+            s_accounts = []
+            request = iam_service.projects().serviceAccounts().list(name=f'projects/{project_id}')
+            while request:
+                response = request.execute()
+                s_accounts.extend(response.get('accounts', []))
+                request = iam_service.projects().serviceAccounts().list_next(previous_request=request, previous_response=response)
+
             for sa in s_accounts:
-                keys = iam_service.projects().serviceAccounts().keys().list(name=sa['name'], keyTypes=['USER_MANAGED']).execute().get('keys', [])
+                keys = []
+                # --- CORRECTED: Start of manual pagination for keys ---
+                # Make the initial request to list keys
+                key_request = iam_service.projects().serviceAccounts().keys().list(name=sa['name'], keyTypes=['USER_MANAGED'])
+
+                # Loop until there are no more pages
+                while True:
+                    key_response = key_request.execute()
+                    keys.extend(key_response.get('keys', []))
+                    
+                    next_page_token = key_response.get('nextPageToken')
+                    if next_page_token:
+                        # If a next page token exists, prepare the next request
+                        key_request = iam_service.projects().serviceAccounts().keys().list(
+                            name=sa['name'],
+                            keyTypes=['USER_MANAGED'],
+                            pageToken=next_page_token
+                        )
+                    else:
+                        # If there's no token, we've retrieved all keys, so break the loop
+                        break
+                # --- END of corrected manual pagination ---
+
                 for key in keys:
                     created_time = datetime.fromisoformat(key['validAfterTime'].replace('Z', '+00:00'))
                     if (datetime.now(timezone.utc) - created_time).days > 90:
-                        findings.append({"Project": project_id, "Service Account": sa['email'], "Issue": "Key is older than 90 days."})
-        except Exception: pass
-        return findings
+                        all_findings.append({
+                            "Project": project_id,
+                            "Service Account": sa['email'],
+                            "Issue": f"Key is older than 90 days (created {created_time.strftime('%Y-%m-%d')})."
+                        })
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
-        all_findings = [item for sublist in executor.map(check_project, all_projects) for item in sublist]
+        except Exception as e:
+            logging.error(f"Failed SA key check for project {project_id}: {e}")
+            all_findings.append({
+                "Project": project_id,
+                "Service Account": "N/A",
+                "Issue": f"Error scanning project for SA keys: {e}"
+            })
 
+    # Final reporting logic remains the same.
     if all_findings:
-        return [{"Check": "Service Account Key Rotation (>90 days)", "Finding": all_findings, "Status": "Action Required"}]
-    return [{"Check": "Service Account Key Rotation (>90 days)", "Finding": [{"Status": "No user-managed keys older than 90 days found."}], "Status": "Compliant"}]
+        result = {
+            "Check": CHECK_NAME,
+            "Finding": all_findings,
+            "Status": "Action Required"
+        }
+    else:
+        result = {
+            "Check": CHECK_NAME,
+            "Finding": [{"Status": "No user-managed service account keys older than 90 days were found."}],
+            "Status": "Compliant"
+        }
 
-def check_public_buckets(scope_id, all_projects):
+    _write_finding_to_gcs(job_id, CHECK_NAME.replace(" ", "_"), result)
+
+def check_public_buckets(scope_id, all_projects, job_id):
+    """Scans for public GCS buckets and writes findings to a temp file."""
     """
-    Scans all projects for Cloud Storage buckets that are publicly accessible.
+     Scans all projects for Cloud Storage buckets that are publicly accessible.
 
     Args:
         org_id (str): The organization ID.
@@ -884,29 +1285,56 @@ def check_public_buckets(scope_id, all_projects):
     Returns:
         list: A list of finding dictionaries for any public buckets found.
     """
-    print("🪣 Checking for public Cloud Storage buckets...")
+    CHECK_NAME = "Public GCS Buckets"
+    print(f"🪣 [{job_id}] Checking for {CHECK_NAME}...")
     
     def check_project(p):
         project_id, findings = p['projectId'], []
         try:
-            storage_client = storage.Client(project=project_id)
-            for bucket in storage_client.list_buckets():
+            # Using a project-specific client can be more reliable at scale
+            storage_client_local = storage.Client(project=project_id)
+            for bucket in storage_client_local.list_buckets():
                 policy = bucket.get_iam_policy(requested_policy_version=3)
                 for binding in policy.bindings:
                     if 'allUsers' in binding['members'] or 'allAuthenticatedUsers' in binding['members']:
                         findings.append({"Project": project_id, "Bucket": bucket.name, "Issue": f"Publicly accessible via role {binding['role']}."})
-                        break
-        except Exception: pass
+                        break # No need to check other bindings for this bucket
+        except Exception:
+            pass # Silently fail for projects where API is disabled or permissions lack
         return findings
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
-        all_findings = [item for sublist in executor.map(check_project, all_projects) for item in sublist]
+    all_findings = []
+    for project in all_projects:
+        findings = check_project(project)
+        if findings:
+            all_findings.extend(findings)
 
     if all_findings:
-        return [{"Check": "Public Cloud Storage Buckets", "Finding": all_findings, "Status": "Action Required"}]
-    return [{"Check": "Public Cloud Storage Buckets", "Finding": [{"Status": "No publicly accessible buckets found."}], "Status": "Compliant"}]
+        result = {"Check": CHECK_NAME, "Finding": all_findings, "Status": "Action Required"}
+    else:
+        result = {"Check": CHECK_NAME, "Finding": [{"Status": "No publicly accessible buckets found."}], "Status": "Compliant"}
+    
+    _write_finding_to_gcs(job_id, CHECK_NAME.replace(" ", "_"), result)
 
-def check_storage_versioning(scope_id, all_projects):
+def check_organization_policies(scope, scope_id, job_id):
+    """Fetches Org Policies and writes the raw data to temp files."""
+    CHECK_NAME = "Organization_Policies_Data"
+    print(f"📜 [{job_id}] Checking for {CHECK_NAME}...")
+    best_practices = get_best_practices_from_gcs(GCS_PUBLIC_URL)
+    
+   
+    # Call the function that manually traverses the hierarchy
+    current_policies = get_effective_org_policies(scope, scope_id)
+    
+    
+    if isinstance(best_practices, dict) and isinstance(current_policies, dict):
+        _write_org_policies_to_gcs(job_id, best_practices, current_policies)
+    else:
+        err_msg = f"Best practices error: {best_practices}" if not isinstance(best_practices, dict) else f"Policies error: {current_policies}"
+        result = {"Check": "Organization Policies", "Finding": [{"Error": f"Could not fetch policy data for {scope} '{scope_id}'. Details: {err_msg}"}], "Status": "Error"}
+        _write_finding_to_gcs(job_id, "Organization_Policies_Check", result)
+
+def check_storage_versioning(scope_id, all_projects, job_id):
     """
     Checks if Object Versioning is enabled on all Cloud Storage buckets.
 
@@ -917,7 +1345,8 @@ def check_storage_versioning(scope_id, all_projects):
     Returns:
         list: A list of finding dictionaries for buckets without versioning.
     """
-    print("🔄 Checking for Cloud Storage versioning...")
+    CHECK_NAME = "Cloud Storage Versioning"
+    print(f"🔄 [{job_id}] Checking for {CHECK_NAME}...")
 
     def check_project(p):
         project_id, findings = p['projectId'], []
@@ -926,17 +1355,22 @@ def check_storage_versioning(scope_id, all_projects):
             for bucket in storage_client.list_buckets():
                 if not bucket.versioning_enabled:
                     findings.append({"Project": project_id, "Bucket": bucket.name, "Issue": "Object versioning is not enabled."})
-        except Exception: pass
+        except Exception as e: logging.warning(f"Could not check {CHECK_NAME} for {project_id}: {e}")
         return findings
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
-        all_findings = [item for sublist in executor.map(check_project, all_projects) for item in sublist]
+    all_findings = []
+    for project in all_projects:
+        findings = check_project(project)
+        if findings:
+            all_findings.extend(findings)
 
     if all_findings:
-        return [{"Check": "Cloud Storage Versioning", "Finding": all_findings, "Status": "Action Required"}]
-    return [{"Check": "Cloud Storage Versioning", "Finding": [{"Status": "Object versioning is enabled on all buckets."}], "Status": "Compliant"}]
+        result = {"Check": CHECK_NAME, "Finding": all_findings, "Status": "Action Required"}
+    else:
+        result = {"Check": CHECK_NAME, "Finding": [{"Status": "Object versioning is enabled on all buckets."}], "Status": "Compliant"}
+    _write_finding_to_gcs(job_id, CHECK_NAME.replace(" ", "_"), result)
 
-def check_standalone_vms(scope_id, all_projects):
+def check_standalone_vms(scope_id, all_projects, job_id):
     """
     Identifies standalone VMs that are not managed by a Managed Instance Group (MIG).
     Excludes GKE and Dataproc VMs.
@@ -948,7 +1382,8 @@ def check_standalone_vms(scope_id, all_projects):
     Returns:
         list: A list of finding dictionaries for standalone VMs.
     """
-    print("🖥️  Checking for standalone VMs...")
+    CHECK_NAME = "Standalone VMs (Not in MIGs)"
+    print(f"🖥️  [{job_id}] Checking for {CHECK_NAME}...")
 
     def check_project(p):
         project_id = p['projectId']
@@ -971,17 +1406,22 @@ def check_standalone_vms(scope_id, all_projects):
             
             if standalone:
                 return {"Project": project_id, "Standalone VMs": ", ".join(sorted(standalone))}
-        except Exception: pass
+        except Exception as e: logging.warning(f"Could not check {CHECK_NAME} for {project_id}: {e}")
         return None
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
-        all_findings = [r for r in executor.map(check_project, all_projects) if r]
+    all_findings = []
+    for project in all_projects:
+        finding = check_project(project)
+        if finding:
+            all_findings.append(finding)
 
     if all_findings:
-        return [{"Check": "Standalone VMs (Not in MIGs)", "Finding": all_findings, "Status": "Investigation Recommended"}]
-    return [{"Check": "Standalone VMs (Not in MIGs)", "Finding": [{"Status": "No running standalone, unmanaged VMs found."}], "Status": "Compliant"}]
+        result = {"Check": CHECK_NAME, "Finding": all_findings, "Status": "Investigation Recommended"}
+    else:
+        result = {"Check": CHECK_NAME, "Finding": [{"Status": "No running standalone, unmanaged VMs found."}], "Status": "Compliant"}
+    _write_finding_to_gcs(job_id, CHECK_NAME.replace(" ", "_"), result)
 
-def check_open_firewall_rules(scope_id, all_projects):
+def check_open_firewall_rules(scope_id, all_projects, job_id):
     """
     Scans all projects for VPC firewall rules open to the internet (0.0.0.0/0).
 
@@ -992,7 +1432,8 @@ def check_open_firewall_rules(scope_id, all_projects):
     Returns:
         list: A list of finding dictionaries for open firewall rules.
     """
-    print("🔥 Checking for Open Firewall Rules in parallel...")
+    CHECK_NAME = "Open Firewall Rules"
+    print(f"🔥 [{job_id}] Checking for Open Firewall Rules in parallel...")
     
     def check_project(p):
         project_id, open_rules = p['projectId'], []
@@ -1002,17 +1443,22 @@ def check_open_firewall_rules(scope_id, all_projects):
             for rule in compute.firewalls().list(project=project_id).execute().get('items', []):
                 if not rule.get('disabled', False) and '0.0.0.0/0' in rule.get('sourceRanges', []):
                     open_rules.append({"Project": project_id, "Rule Name": rule['name'], "VPC": rule['network'].split('/')[-1]})
-        except Exception: pass
+        except Exception as e: logging.warning(f"Could not check {CHECK_NAME} for {project_id}: {e}")
         return open_rules
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
-        all_findings = [item for sublist in executor.map(check_project, all_projects) for item in sublist]
+    all_findings = []
+    for project in all_projects:
+        findings = check_project(project)
+        if findings:
+            all_findings.extend(findings)
 
     if all_findings:
-        return [{"Check": "Open Firewall Rules (0.0.0.0/0)", "Finding": all_findings, "Status": "Action Required"}]
-    return [{"Check": "Open Firewall Rules (0.0.0.0/0)", "Finding": [{"Status": "No firewall rules found open to 0.0.0.0/0."}], "Status": "Compliant"}]
+        result = {"Check": CHECK_NAME, "Finding": all_findings, "Status": "Action Required"}
+    else:
+        result = {"Check": CHECK_NAME, "Finding": [{"Status": "No firewall rules found open to 0.0.0.0/0."}], "Status": "Compliant"}
+    _write_finding_to_gcs(job_id, "Open_Firewall_Rules", result) # Using a simplified filename
 
-def check_gke_hygiene(scope_id, all_projects):
+def check_gke_hygiene(scope_id, all_projects, job_id):
     """
     Checks GKE clusters for best practices like using release channels and auto-upgrades.
     Also fetches active recommendations for the clusters.
@@ -1024,7 +1470,8 @@ def check_gke_hygiene(scope_id, all_projects):
     Returns:
         list: A list of finding dictionaries for GKE hygiene issues.
     """
-    print("🚢 Checking GKE Hygiene in parallel...")
+    CHECK_NAME = "GKE Hygiene"
+    print(f"🚢 [{job_id}] Checking {CHECK_NAME} in parallel...")
     
     def check_project(p):
         project_id, issues = p['projectId'], []
@@ -1052,14 +1499,19 @@ def check_gke_hygiene(scope_id, all_projects):
             logging.warning(f"Could not check GKE hygiene for {project_id}: {e}")
         return issues
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
-        all_findings = [item for sublist in executor.map(check_project, all_projects) for item in sublist]
+    all_findings = []
+    for project in all_projects:
+        findings = check_project(project)
+        if findings:
+            all_findings.extend(findings)
 
     if all_findings:
-        return [{"Check": "GKE Hygiene", "Finding": all_findings, "Status": "Action Required"}]
-    return [{"Check": "GKE Hygiene", "Finding": [{"Status": "All checked GKE clusters seem to follow best practices."}], "Status": "Compliant"}]
+        result = {"Check": CHECK_NAME, "Finding": all_findings, "Status": "Action Required"}
+    else:
+        result = {"Check": CHECK_NAME, "Finding": [{"Status": "All checked GKE clusters seem to follow best practices."}], "Status": "Compliant"}
+    _write_finding_to_gcs(job_id, CHECK_NAME.replace(" ", "_"), result)
 
-def check_resilience_assets(org_id):
+def check_resilience_assets(org_id, job_id):
     """
     Checks organization-wide assets for resilience best practices, including
     Cloud SQL HA, backups, MIGs, and disk snapshot storage redundancy.
@@ -1092,28 +1544,212 @@ def check_resilience_assets(org_id):
             elif not backup_conf.get("pointInTimeRecoveryEnabled"): no_pitr.append({"Project": proj, "Instance": name})
             if backup_conf.get("retainedBackupsCount", 0) < 30 : bad_retention.append({"Project": proj, "Instance": name, "Retention": backup_conf.get("retainedBackupsCount", "N/A")})
 
-        if non_ha: all_findings.append({"Check": "Cloud SQL High Availability", "Finding": non_ha, "Status": "Action Required"})
-        if no_backup: all_findings.append({"Check": "Cloud SQL Automated Backups", "Finding": no_backup, "Status": "Action Required"})
-        if bad_retention: all_findings.append({"Check": "Cloud SQL Backup Retention", "Finding": bad_retention, "Status": "Action Required"})
-        if no_pitr: all_findings.append({"Check": "Cloud SQL PITR", "Finding": no_pitr, "Status": "Action Required"})
+        if non_ha:
+            _write_finding_to_gcs(job_id, "Cloud_SQL_High_Availability", {"Check": "Cloud SQL High Availability", "Finding": non_ha, "Status": "Action Required"})
+        if no_backup:
+            _write_finding_to_gcs(job_id, "Cloud_SQL_Automated_Backups", {"Check": "Cloud SQL Automated Backups", "Finding": no_backup, "Status": "Action Required"})
+        if bad_retention:
+            _write_finding_to_gcs(job_id, "Cloud_SQL_Backup_Retention", {"Check": "Cloud SQL Backup Retention", "Finding": bad_retention, "Status": "Action Required"})
+        if no_pitr:
+            _write_finding_to_gcs(job_id, "Cloud_SQL_PITR", {"Check": "Cloud SQL PITR", "Finding": no_pitr, "Status": "Action Required"})
 
         # Zonal MIGs Check
         mig_req = {"parent": parent, "asset_types": ["compute.googleapis.com/InstanceGroupManager"], "content_type": asset_v1.ContentType.RESOURCE}
         zonal_migs = [{"Project": get_project_from_asset_name(a.name), "MIG Name": a.resource.data.get('name')} for a in asset_client.list_assets(request=mig_req) if 'zone' in a.resource.data and not a.resource.data.get('name', '').startswith('gke-')]
-        if zonal_migs: all_findings.append({"Check": "MIG Resilience (Zonal)", "Finding": zonal_migs, "Status": "Action Required"})
+        if zonal_migs:
+            _write_finding_to_gcs(job_id, "MIG_Resilience_(Zonal)", {"Check": "MIG Resilience (Zonal)", "Finding": zonal_migs, "Status": "Action Required"})
         
         # Disk Snapshots Check
         snap_req = {"parent": parent, "asset_types": ["compute.googleapis.com/Snapshot"], "content_type": asset_v1.ContentType.RESOURCE}
         single_region = len([a for a in asset_client.list_assets(request=snap_req) if len(a.resource.data.get("storageLocations", [])) <= 1])
-        if single_region > 0: all_findings.append({"Check": "Disk Snapshot Resilience", "Finding": [{"Issue": f"Found {single_region} snapshots stored in only one region."}], "Status": "Action Required"})
+        if single_region > 0:
+            _write_finding_to_gcs(job_id, "Disk_Snapshot_Resilience", {"Check": "Disk Snapshot Resilience", "Finding": [{"Issue": f"Found {single_region} snapshots stored in only one region."}], "Status": "Action Required"})
 
     except Exception as e:
-        all_findings.append({"Check": "Resilience Asset Checks", "Finding": [{"Error": str(e)}], "Status": "Error"})
-    return all_findings
+        error_result = {"Check": "Resilience Asset Checks", "Finding": [{"Error": str(e)}], "Status": "Error"}
+        _write_finding_to_gcs(job_id, "Resilience_Asset_Checks_Error", error_result)
+
+def check_cloud_sql_security(scope_id, all_projects, job_id):
+    """
+    Checks Cloud SQL instances for Public IPs and SSL enforcement.
+
+    Args:
+        scope_id (str): The scope ID.
+        all_projects (list): A list of project dictionaries.
+        job_id (str): The job ID.
+    """
+    CHECK_NAME = "Cloud SQL Security"
+    print(f"🛡️  [{job_id}] Checking {CHECK_NAME}...")
+    
+    def check_project(p):
+        project_id, findings = p['projectId'], []
+        try:
+            credentials, _ = google_auth_default(scopes=SCOPES)
+            # Use Asset API for efficiency if possible, or SQL Admin API
+            # Using SQL Admin API for direct configuration check
+            service = google_api_build('sqladmin', 'v1beta4', credentials=credentials)
+            instances = service.instances().list(project=project_id).execute().get('items', [])
+            
+            for instance in instances:
+                name = instance.get('name')
+                settings = instance.get('settings', {})
+                ip_config = settings.get('ipConfiguration', {})
+                
+                # Check 1: Public IP
+                if ip_config.get('ipv4Enabled', False):
+                     findings.append({"Project": project_id, "Instance": name, "Issue": "Public IP enabled."})
+                
+                # Check 2: SSL Enforcement
+                if not ip_config.get('requireSsl', False):
+                    findings.append({"Project": project_id, "Instance": name, "Issue": "SSL not enforced."})
+
+        except Exception as e:
+            logging.warning(f"Could not check {CHECK_NAME} for {project_id}: {e}")
+        return findings
+
+    all_findings = []
+    for project in all_projects:
+        findings = check_project(project)
+        if findings:
+            all_findings.extend(findings)
+
+    if all_findings:
+        result = {"Check": CHECK_NAME, "Finding": all_findings, "Status": "Action Required"}
+    else:
+        result = {"Check": CHECK_NAME, "Finding": [{"Status": "All Cloud SQL instances have Public IP disabled and SSL enforced."}], "Status": "Compliant"}
+    _write_finding_to_gcs(job_id, CHECK_NAME.replace(" ", "_"), result)
+
+def check_vpc_configuration(scope_id, all_projects, job_id):
+    """
+    Checks for 'default' VPC usage and subnets without Private Google Access.
+
+    Args:
+        scope_id (str): The scope ID.
+        all_projects (list): A list of project dictionaries.
+        job_id (str): The job ID.
+    """
+    CHECK_NAME = "VPC Configuration"
+    print(f"🕸️  [{job_id}] Checking {CHECK_NAME}...")
+
+    def check_project(p):
+        project_id, findings = p['projectId'], []
+        try:
+            credentials, _ = google_auth_default(scopes=SCOPES)
+            compute = google_api_build('compute', 'v1', credentials=credentials)
+            
+            # Check 1: Default VPC
+            networks = compute.networks().list(project=project_id).execute().get('items', [])
+            for net in networks:
+                if net.get('name') == 'default':
+                    findings.append({"Project": project_id, "Network": "default", "Issue": "Default VPC network exists."})
+
+            # Check 2: Private Google Access
+            regions = compute.regions().list(project=project_id).execute().get('items', [])
+            for region in regions:
+                subnets = compute.subnetworks().list(project=project_id, region=region['name']).execute().get('items', [])
+                for subnet in subnets:
+                    if not subnet.get('privateIpGoogleAccess', False):
+                        findings.append({"Project": project_id, "Subnet": subnet['name'], "Issue": "Private Google Access disabled."})
+
+        except Exception as e:
+            logging.warning(f"Could not check {CHECK_NAME} for {project_id}: {e}")
+        return findings
+
+    all_findings = []
+    for project in all_projects:
+        findings = check_project(project)
+        if findings:
+            all_findings.extend(findings)
+
+    if all_findings:
+        result = {"Check": CHECK_NAME, "Finding": all_findings, "Status": "Action Required"}
+    else:
+        result = {"Check": CHECK_NAME, "Finding": [{"Status": "No default VPCs found and all subnets have Private Google Access."}], "Status": "Compliant"}
+    _write_finding_to_gcs(job_id, CHECK_NAME.replace(" ", "_"), result)
+
+def check_storage_ubla(scope_id, all_projects, job_id):
+    """
+    Checks if Uniform Bucket-Level Access (UBLA) is enabled on GCS buckets.
+
+    Args:
+        scope_id (str): The scope ID.
+        all_projects (list): A list of project dictionaries.
+        job_id (str): The job ID.
+    """
+    CHECK_NAME = "GCS Uniform Bucket-Level Access"
+    print(f"🪣 [{job_id}] Checking {CHECK_NAME}...")
+
+    def check_project(p):
+        project_id, findings = p['projectId'], []
+        try:
+            storage_client = storage.Client(project=project_id)
+            for bucket in storage_client.list_buckets():
+                if not bucket.iam_configuration.uniform_bucket_level_access_enabled:
+                    findings.append({"Project": project_id, "Bucket": bucket.name, "Issue": "UBLA not enabled."})
+        except Exception as e:
+            logging.warning(f"Could not check {CHECK_NAME} for {project_id}: {e}")
+        return findings
+
+    all_findings = []
+    for project in all_projects:
+        findings = check_project(project)
+        if findings:
+            all_findings.extend(findings)
+
+    if all_findings:
+        result = {"Check": CHECK_NAME, "Finding": all_findings, "Status": "Action Required"}
+    else:
+        result = {"Check": CHECK_NAME, "Finding": [{"Status": "All buckets have Uniform Bucket-Level Access enabled."}], "Status": "Compliant"}
+    _write_finding_to_gcs(job_id, CHECK_NAME.replace(" ", "_"), result)
+
+def check_vm_external_ips(scope_id, all_projects, job_id):
+    """
+    Checks for VM instances with external IP addresses.
+
+    Args:
+        scope_id (str): The scope ID.
+        all_projects (list): A list of project dictionaries.
+        job_id (str): The job ID.
+    """
+    CHECK_NAME = "VM External IPs"
+    print(f"🖥️  [{job_id}] Checking {CHECK_NAME}...")
+
+    def check_project(p):
+        project_id, findings = p['projectId'], []
+        try:
+            credentials, _ = google_auth_default(scopes=SCOPES)
+            compute = google_api_build('compute', 'v1', credentials=credentials)
+            
+            req = compute.instances().aggregatedList(project=project_id)
+            while req:
+                resp = req.execute()
+                for scope, result in resp.get('items', {}).items():
+                    if 'instances' in result:
+                        for instance in result['instances']:
+                            for interface in instance.get('networkInterfaces', []):
+                                if 'accessConfigs' in interface: # accessConfigs implies external IP
+                                    findings.append({"Project": project_id, "VM": instance['name'], "Issue": "Has external IP address."})
+                req = compute.instances().aggregatedList_next(previous_request=req, previous_response=resp)
+
+        except Exception as e:
+            logging.warning(f"Could not check {CHECK_NAME} for {project_id}: {e}")
+        return findings
+
+    all_findings = []
+    for project in all_projects:
+        findings = check_project(project)
+        if findings:
+            all_findings.extend(findings)
+
+    if all_findings:
+        result = {"Check": CHECK_NAME, "Finding": all_findings, "Status": "Action Required"}
+    else:
+        result = {"Check": CHECK_NAME, "Finding": [{"Status": "No VMs with external IP addresses found."}], "Status": "Compliant"}
+    _write_finding_to_gcs(job_id, CHECK_NAME.replace(" ", "_"), result)
 
 # --- Cost Optimization Checks ---
 
-def run_cost_recommendations(scope_id, all_projects, active_zones, active_regions):
+def run_cost_recommendations(scope_id, all_projects, active_zones, active_regions, job_id):
     """
     Fetches cost-saving recommendations from the Recommender API for all projects.
     Covers idle resources, rightsizing, and underutilized reservations.
@@ -1210,7 +1846,9 @@ def run_cost_recommendations(scope_id, all_projects, active_zones, active_region
                         continue
                     parent = f"projects/{project_id}/locations/{loc}/recommenders/{rec_id}"
                     try:
-                        for reco in client.list_recommendations(parent=parent):
+                        api_call = lambda: client.list_recommendations(parent=parent)
+                        context = f"'{check}' in {project_id} at {loc}"
+                        for reco in _call_api_with_backoff(api_call, context_message=context):
                             finding = _parse_recommendation_safely(reco, project_id)
                             if check not in findings_map:
                                 findings_map[check] = []
@@ -1223,14 +1861,28 @@ def run_cost_recommendations(scope_id, all_projects, active_zones, active_region
         except Exception as e:
             logging.error(f"CRITICAL: Cost check failed for project {project_id}. Error: {e}")
         
-        return [{"Check": name, "Finding": data, "Status": "Action Required"} for name, data in findings_map.items()]
+        return findings_map
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
-        return [item for sublist in executor.map(check_project, all_projects) for item in sublist]
+    project_results_list = []
+    for project in all_projects:
+        project_results_list.append(check_project(project))
+    
+    final_findings_by_check = {}
+    for project_map in project_results_list:
+        for check_name, findings in project_map.items():
+            if check_name not in final_findings_by_check:
+                final_findings_by_check[check_name] = []
+            final_findings_by_check[check_name].extend(findings)
+
+    for check_name, all_findings in final_findings_by_check.items():
+        if all_findings:
+            result = {"Check": check_name, "Finding": all_findings, "Status": "Action Required"}
+            # Use the check_name as the unique identifier for the filename
+            _write_finding_to_gcs(job_id, check_name.replace(" ", "_"), result)
 
 # --- Operational Excellence Checks ---
 
-def run_miscellaneous_checks_refactored(scope, scope_id, all_projects):
+def run_miscellaneous_checks_refactored(scope, scope_id, all_projects, job_id):
     """
     Runs a series of miscellaneous operational checks, such as firewall complexity,
     recent changes, and unattended projects, respecting the scan scope.
@@ -1243,7 +1895,7 @@ def run_miscellaneous_checks_refactored(scope, scope_id, all_projects):
     firewall_findings = []
     recent_change_findings = []
     unattended_findings = []
-    final_check_groups = []
+
 
     # --- Check 1: Firewall Rules (Runs for all scopes) ---
     def check_firewall_rules_count(project):
@@ -1254,14 +1906,18 @@ def run_miscellaneous_checks_refactored(scope, scope_id, all_projects):
             rules = compute_service.firewalls().list(project=project_id).execute().get('items', [])
             if len(rules) > 150:
                 return {"Project": project_id, "Rule Count": len(rules), "Recommendation": f"Project has {len(rules)} firewall rules."}
-        except Exception: pass
+        except Exception as e: logging.warning(f"Could not check firewall_rule_count for {project_id}: {e}")
         return None
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
-        firewall_findings = [res for res in executor.map(check_firewall_rules_count, all_projects) if res]
+    firewall_findings = []
+    for project in all_projects:
+        finding = check_firewall_rules_count(project)
+        if finding:
+            firewall_findings.append(finding)
 
     if firewall_findings:
-        final_check_groups.append({"Check": "VPC Firewall Complexity (>150 Rules)", "Finding": firewall_findings, "Status": "Investigation Recommended"})
+        result = {"Check": "VPC Firewall Complexity (>150 Rules)", "Finding": firewall_findings, "Status": "Investigation Recommended"}
+        _write_finding_to_gcs(job_id, "VPC_Firewall_Complexity", result)
 
     # --- Org-Level Recommender/Insight Checks (Run ONLY for organization scope) ---
     if scope == 'organization':
@@ -1270,19 +1926,34 @@ def run_miscellaneous_checks_refactored(scope, scope_id, all_projects):
             recommender_client = recommender_v1.RecommenderClient()
             
             # Check for Org-Level Recent Changes
-            parent = f"organizations/{scope_id}/locations/global/insightTypes/google.cloud.RecentChangeInsight"
-            for insight in recommender_client.list_insights(parent=parent):
+            parent_recent = f"organizations/{scope_id}/locations/global/insightTypes/google.cloud.RecentChangeInsight"
+            api_call_recent = lambda: recommender_client.list_insights(parent=parent_recent)
+            for insight in _call_api_with_backoff(api_call_recent, context_message="Org-Level Recent Changes"):
                 recent_change_findings.append({
                     "Project": f"Org-Level ({scope_id})",
                     "Insight": insight.description
                 })
 
             # Check for Unattended Project Recommendations
-            parent = f"organizations/{scope_id}/locations/global/recommenders/google.resourcemanager.projectUtilization.Recommender"
-            for reco in recommender_client.list_recommendations(parent=parent):
+            parent_unattended = f"organizations/{scope_id}/locations/global/recommenders/google.resourcemanager.projectUtilization.Recommender"
+            api_call_unattended = lambda: recommender_client.list_recommendations(parent=parent_unattended)
+            for reco in _call_api_with_backoff(api_call_unattended, context_message="Unattended Projects"):
                 project_id_from_reco = "Unknown"
-                if hasattr(reco, 'target_resources') and reco.target_resources:
-                    project_id_from_reco = reco.target_resources[0].split('/')[-1]
+                # Method 1: Try the structured targetResources field (camelCase)
+                if hasattr(reco, 'targetResources') and reco.targetResources:
+                    project_id_from_reco = reco.targetResources[0].split('/')[-1]
+
+                # Method 2: Try the operation_groups field (snake_case)
+                elif (hasattr(reco.content, 'operation_groups') and reco.content.operation_groups and
+                      reco.content.operation_groups[0].operations and reco.content.operation_groups[0].operations[0].resource):
+                    project_id_from_reco = reco.content.operation_groups[0].operations[0].resource.split('/')[-1]
+
+                # Method 3: As a final fallback, parse the description string
+                elif reco.description:
+                    match = re.search(r"Project `([^`]+)`", reco.description)
+                    if match:
+                        project_id_from_reco = match.group(1)
+                        
                 unattended_findings.append({"Project": project_id_from_reco, "Recommendation": reco.description})
         except Exception as e:
             # Add a single error message if the org-level API calls fail
@@ -1316,24 +1987,18 @@ def run_miscellaneous_checks_refactored(scope, scope_id, all_projects):
 
     # --- Final Assembly ---
     if recent_change_findings:
-        final_check_groups.append({
-            "Check": "Recent Changes (Org & Project)",
-            "Finding": recent_change_findings,
-            "Status": "Informational"
-        })
+        result = {"Check": "Recent Changes (Org & Project)", "Finding": recent_change_findings, "Status": "Informational"}
+        _write_finding_to_gcs(job_id, "Recent_Changes", result)
     
     if unattended_findings:
-        final_check_groups.append({
-            "Check": "Unattended Projects",
-            "Finding": unattended_findings,
-            "Status": "Action Required"
-        })
+        result = {"Check": "Unattended Projects", "Finding": unattended_findings, "Status": "Action Required"}
+        _write_finding_to_gcs(job_id, "Unattended_Projects", result)
 
     print("✅ Miscellaneous checks complete.")
-    return final_check_groups
 
 
-def run_service_limit_checks_refactored(scope_id, all_projects):
+
+def run_service_limit_checks_refactored(scope_id, all_projects, job_id):
     """
     Checks regional compute quotas for all projects to identify any approaching their limit (>80%).
 
@@ -1344,7 +2009,8 @@ def run_service_limit_checks_refactored(scope_id, all_projects):
     Returns:
         list: A list of finding dictionaries for quotas with high utilization.
     """
-    print("🚦 Performing Service Limit (Quota) checks (Refactored)...")
+    CHECK_NAME = "Quota Utilization (>80%)"
+    print(f"🚦 [{job_id}] Performing Service Limit (Quota) checks...")
     
     def check_project_quotas(project):
         project_id = project['projectId']
@@ -1372,27 +2038,22 @@ def run_service_limit_checks_refactored(scope_id, all_projects):
             pass 
         return exceeded_quotas # Return the list of findings (will be empty if none)
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
-        # results is a list of lists (e.g., [[proj1-finding], [], [proj3-f1, proj3-f2]])
-        results = executor.map(check_project_quotas, all_projects)
-        # Flatten the list of lists into a single list
-        all_findings = [finding for proj_list in results for finding in proj_list]
+    all_findings = []
+    for project in all_projects:
+        # check_project_quotas returns a list of findings for the project
+        findings = check_project_quotas(project)
+        if findings:
+            # We extend the main list with the items from the returned list
+            all_findings.extend(findings)
 
     print("✅ Service Limit checks complete.")
     
     # Wrap the final list in our standard check group format
     if not all_findings:
-        return [{
-            "Check": "Quota Utilization (>80%)",
-            "Finding": [{"Status": "No quotas found over 80% utilization."}],
-            "Status": "Compliant"
-        }]
-        
-    return [{
-        "Check": "Quota Utilization (>80%)",
-        "Finding": all_findings,
-        "Status": "Action Required"
-    }]
+        result = {"Check": CHECK_NAME, "Finding": [{"Status": "No quotas found over 80% utilization."}], "Status": "Compliant"}
+    else:
+        result = {"Check": CHECK_NAME, "Finding": all_findings, "Status": "Action Required"}
+    _write_finding_to_gcs(job_id, "Quota_Utilization", result)
     
 # --- Vertex AI Remediation Generation ---
 
@@ -1456,13 +2117,15 @@ def generate_remediation_command(finding_text: str, project_id: str) -> str:
     return "Error: All retry attempts failed." # Should not be reached, but as a fallback
 
 
-def run_all_checks(scope, scope_id):
+def run_all_checks(scope, scope_id, job_id, progress_callback=None):
     """
     Orchestrates the entire scan by running all check functions in parallel.
     Groups the results into high-level categories for reporting.
 
     Args:
-        org_id (str): The organization ID.
+        scope (str): The scope of the scan (organization, folder, project).
+        scope_id (str): The ID of the resource to scan.
+        progress_callback (function, optional): A function to call with progress updates.
 
     Returns:
         dict: A dictionary containing all categorized findings.
@@ -1478,71 +2141,70 @@ def run_all_checks(scope, scope_id):
     active_zones, active_regions = get_active_compute_locations(all_projects)
     print(f"✅ Discovery complete. Found {len(active_zones)} zones and {len(active_regions)} regions.")
 
-    # Initialize the categorized results dictionary
-    results = {
-        "Organization Policies": None,
-        "Security & Identity": [],
-        "Cost Optimization": [],
-        "Reliability & Resilience": [],
-        "Operational Excellence & Observability": []
-    }
+
+    # --- This structured list is the key to accurate progress reporting ---
+    # Format: (Category, Friendly Name, function_to_run, (tuple_of_arguments,))
+    all_checks_to_run = [
+        ("Special", "Organization Policies", check_organization_policies, (scope, scope_id, job_id)),
+        ("Security & Identity", "Project IAM Hygiene", check_project_iam_policy, (scope_id, all_projects, job_id)),
+        ("Security & Identity", "Service Account Key Rotation", check_sa_key_rotation, (scope_id, all_projects, job_id)),
+        ("Security & Identity", "Public GCS Buckets", check_public_buckets, (scope_id, all_projects, job_id)),
+        ("Security & Identity", "Open Firewall Rules", check_open_firewall_rules, (scope_id, all_projects, job_id)),
+        ("Cost Optimization", "Cost-Saving Recommendations", run_cost_recommendations, (scope_id, all_projects, active_zones, active_regions, job_id)),
+        ("Reliability & Resilience", "GCS Bucket Versioning", check_storage_versioning, (scope_id, all_projects, job_id)),
+        ("Reliability & Resilience", "GKE Hygiene", check_gke_hygiene, (scope_id, all_projects, job_id)),
+        ("Operational Excellence & Observability", "OS Config Agent Coverage", check_os_config_coverage, (scope_id, all_projects, job_id)),
+        ("Operational Excellence & Observability", "Monitoring Alert Coverage", check_monitoring_coverage, (scope_id, all_projects, job_id)),
+        ("Operational Excellence & Observability", "Standalone VMs", check_standalone_vms, (scope_id, all_projects, job_id)),
+        ("Operational Excellence & Observability", "Network Insights", run_network_insights, (scope_id, all_projects, active_zones, active_regions, job_id)),
+        ("Operational Excellence & Observability", "Miscellaneous Checks", run_miscellaneous_checks_refactored, (scope, scope_id, all_projects, job_id)),
+        ("Operational Excellence & Observability", "Service Quota Limits", run_service_limit_checks_refactored, (scope_id, all_projects, job_id)),
+        ("Security & Identity", "Cloud SQL Security", check_cloud_sql_security, (scope_id, all_projects, job_id)),
+        ("Security & Identity", "VPC Configuration", check_vpc_configuration, (scope_id, all_projects, job_id)),
+        ("Security & Identity", "GCS Uniform Bucket-Level Access", check_storage_ubla, (scope_id, all_projects, job_id)),
+        ("Security & Identity", "VM External IPs", check_vm_external_ips, (scope_id, all_projects, job_id)),
+    ]
+
+    if scope == 'organization':
+        org_only_checks = [
+            ("Security & Identity", "Organization IAM Policy", check_org_iam_policy, (scope_id, job_id)),
+            ("Security & Identity", "Security Command Center Status", check_scc_status, (scope_id, job_id)),
+            ("Operational Excellence & Observability", "Organization Audit Logging", check_audit_logging, (scope_id, job_id)),
+            ("Reliability & Resilience", "Essential Contacts", check_essential_contacts, (scope_id, job_id)),
+            ("Reliability & Resilience", "Resilience of Critical Assets", check_resilience_assets, (scope_id, job_id)),
+            ("Reliability & Resilience", "Personalized Service Health", check_service_health_status, (scope_id, job_id)),
+        ]
+        all_checks_to_run.extend(org_only_checks)
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=15) as executor:
-        # Define checks that run for ALL scopes (project, folder, or org)
-        future_to_check = {
-            executor.submit(check_project_iam_policy, scope_id, all_projects): "Security & Identity",
-            executor.submit(check_sa_key_rotation, scope_id, all_projects): "Security & Identity",
-            executor.submit(check_public_buckets, scope_id, all_projects): "Security & Identity",
-            executor.submit(check_open_firewall_rules, scope_id, all_projects): "Security & Identity",
-            executor.submit(run_cost_recommendations, scope_id, all_projects, active_zones, active_regions): "Cost Optimization",
-            executor.submit(check_storage_versioning, scope_id, all_projects): "Reliability & Resilience",
-            executor.submit(check_gke_hygiene, scope_id, all_projects): "Reliability & Resilience",
-            executor.submit(check_os_config_coverage, scope_id, all_projects): "Operational Excellence & Observability",
-            executor.submit(check_monitoring_coverage, scope_id, all_projects): "Operational Excellence & Observability",
-            executor.submit(check_standalone_vms, scope_id, all_projects): "Operational Excellence & Observability",
-            executor.submit(run_network_insights, scope_id, all_projects, active_zones, active_regions): "Operational Excellence & Observability",
-            executor.submit(run_miscellaneous_checks_refactored, scope, scope_id, all_projects): "Operational Excellence & Observability",
-            executor.submit(run_service_limit_checks_refactored, scope_id, all_projects): "Operational Excellence & Observability",
+        # This map directly links each running task (future) to its specific name and category.
+        future_to_info = {
+            executor.submit(func, *args): {"category": category, "name": name}
+            for category, name, func, args in all_checks_to_run
         }
 
-        # If the scope is 'organization', add the organization-only checks
-        if scope == 'organization':
-            print("Scope is organization, adding organization-level checks...")
-            org_only_checks = {
-                executor.submit(check_org_iam_policy, scope_id): "Security & Identity",
-                executor.submit(check_scc_status, scope_id): "Security & Identity",
-                executor.submit(check_audit_logging, scope_id): "Operational Excellence & Observability",
-                executor.submit(check_essential_contacts, scope_id): "Reliability & Resilience",
-                executor.submit(check_resilience_assets, scope_id): "Reliability & Resilience",
-                executor.submit(check_service_health_status, scope_id): "Reliability & Resilience",
-            }
-            future_to_check.update(org_only_checks)
+        total_checks = len(future_to_info)
+        completed_checks = 0
 
-        # This part for collecting results remains the same
-        for future in concurrent.futures.as_completed(future_to_check):
-            category = future_to_check[future]
+        for future in concurrent.futures.as_completed(future_to_info):
+            info = future_to_info[future]
+            category = info["category"]
+            check_name = info["name"] # This will now ALWAYS be the specific name.
+
             try:
-                result = future.result()
-                if result:  # Ensure the result is not None or empty
-                    results[category].extend(result)
+                future.result()  # Call result to raise exceptions, but don't store return value
             except Exception as e:
-                print(f"❌ A check in category '{category}' failed critically: {e}")
-                results[category].append({"Check": "Execution Error", "Finding": [{"Error": str(e)}], "Status": "Error"})
+                print(f"❌ Check '{check_name}' failed critically: {e}")
+                # Optionally write an error finding to a temp file
+                error_result = {"Check": check_name, "Finding": [{"Error": str(e)}], "Status": "Error"}
+                _write_finding_to_gcs(job_id, f"ERROR_{check_name}".replace(" ", "_"), error_result)
+            finally:
+                completed_checks += 1
+                progress = 5 + int((completed_checks / total_checks) * 90)
+                if progress_callback:
+                    progress_callback(progress=progress, current_task=f"({completed_checks}/{total_checks}) Finished: {check_name}")
                 
-   # --- Conditionally handle Org Policies ---
-    if scope == 'organization':
-        best_practices = get_best_practices_from_gcs(GCS_PUBLIC_URL)
-        current_policies = get_organization_policies(scope_id)
-        if isinstance(best_practices, dict) and isinstance(current_policies, dict):
-            results['Organization Policies'] = (best_practices, current_policies)
-        else:
-            # Provide a more specific error message
-            err_msg = f"Best practices error: {best_practices}" if not isinstance(best_practices, dict) else f"Org policies error: {current_policies}"
-            results['Security & Identity'].append({"Check": "Organization Policies", "Finding": [{"Error": f"Could not fetch policy data. Details: {err_msg}"}], "Status": "Error"})
-    else:
-        results['Organization Policies'] = None # Ensure it's null for non-org scans
-
-    return results
+    return True
 
 def get_js_script_content(scope, scope_id, job_id):
     """
@@ -1821,6 +2483,26 @@ def get_js_script_content(scope, scope_id, job_id):
     """
 
 # --- Report Generation ---
+
+def update_status_in_gcs(job_id, scope_id, progress, current_task, status="running"):
+    """Creates or overwrites a status file in GCS for the given job."""
+    try:
+        bucket = storage_client.bucket(RESULTS_BUCKET)
+        status_blob = bucket.blob(f"{job_id}/{scope_id}_status.json")
+        status_data = {
+            "job_id": job_id,
+            "scope_id": scope_id,
+            "progress": progress,
+            "current_task": current_task,
+            "status": status,
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
+        status_blob.upload_from_string(json.dumps(status_data), content_type='application/json')
+        print(f"[{job_id}] Status updated: {progress}% - {current_task}")
+    except Exception as e:
+        print(f"[{job_id}] WARNING: Could not update status file in GCS: {e}")
+
+
 
 def generate_and_upload_reports(scope_id, job_id, all_results):
     """Generates HTML and CSV reports and uploads them to GCS."""
@@ -2441,43 +3123,100 @@ def run_scan_worker():
         scope_id = data['scope_id']
         job_id = data['job_id']
         print(f"[{job_id}] Worker received task for ID: {scope_id}")
-        
-        all_results = run_all_checks(scope, scope_id)
-        
-        # --- MODIFIED to call the new report generator ---
-        html_report = html_report = generate_html_report(scope, scope_id, job_id, **all_results)
+
+        update_status_in_gcs(job_id, scope_id, 5, "Initializing scan and listing resources...")
+
+        # --- Throttling logic setup ---
+        # We will only update GCS if at least 2 seconds have passed since the last update.
+        UPDATE_INTERVAL = 2  # seconds
+        last_update_time = 0
+        # A lock ensures thread-safe updates to the last_update_time variable.
+        lock = threading.Lock()
+        final_progress = {"progress": 0, "task": ""}
+
+        def progress_reporter(progress, current_task):
+            nonlocal last_update_time
+            current_time = time.time()
+
+            # Store the latest progress regardless of timing
+            final_progress["progress"] = progress
+            final_progress["task"] = current_task
+
+            with lock:
+                if (current_time - last_update_time) > UPDATE_INTERVAL:
+                    update_status_in_gcs(job_id, scope_id, progress, current_task)
+                    last_update_time = current_time
+
+        run_all_checks(scope, scope_id, job_id, progress_callback=progress_reporter)
+
+        # --- Final, unconditional update after checks complete ---
+        # This ensures the user sees the 100% completion of the checks phase, even if
+        # it happened within the 2-second throttle window.
+        if final_progress["task"]:
+            update_status_in_gcs(job_id, scope_id, final_progress["progress"], final_progress["task"])
+
+        update_status_in_gcs(job_id, scope_id, 98, "Generating final HTML and CSV reports...")
+
+        # 2. Read all results back from /gcs for report generation
+        all_results = _read_all_findings_from_gcs(job_id)
+        # Also read the special-cased org policy data
+        org_policy_data = _read_org_policies_from_gcs(job_id)
+        if org_policy_data[0] and org_policy_data[1]:
+            all_results["Organization Policies"] = org_policy_data
+
+        html_report = generate_html_report(scope, scope_id, job_id, **all_results)
         csv_report = generate_csv_data(all_results)
-        
+
+
         bucket = storage_client.bucket(RESULTS_BUCKET)
         bucket.blob(f"{job_id}/{scope_id}_report.html").upload_from_string(html_report, content_type='text/html')
         bucket.blob(f"{job_id}/{scope_id}_report.csv").upload_from_string(csv_report, content_type='text/csv')
-        
+
+        update_status_in_gcs(job_id, scope_id, 100, "Scan complete!", status="completed")
+
         print(f"[{job_id}] Task completed successfully.")
         return "Scan completed and reports uploaded.", 200
     except Exception as e:
         print(f"[{job_id}] CRITICAL ERROR in worker for ID {scope_id}: {e}")
         traceback.print_exc()
+        if job_id and scope_id:
+             update_status_in_gcs(job_id, scope_id, 100, f"A critical error occurred: {e}", status="error")
         return "Internal Server Error", 500
+    finally:
+        # CRUCIAL: Clean up all intermediate files from GCS for this job_id
+        if job_id:
+            print(f"[{job_id}] Cleaning up intermediate files from GCS...")
+            try:
+                bucket = storage_client.bucket(RESULTS_BUCKET)
+                prefix_to_delete = f"intermediate/{job_id}/"
+                blobs_to_delete = list(bucket.list_blobs(prefix=prefix_to_delete))
+                if blobs_to_delete:
+                    bucket.delete_blobs(blobs_to_delete)
+                    print(f"[{job_id}] Deleted {len(blobs_to_delete)} intermediate files.")
+            except Exception as e:
+                logging.error(f"[{job_id}] Failed to clean up intermediate GCS files: {e}")
     
 @app.route('/api/status/<string:job_id>/<string:scope_id>')
 def api_check_status(job_id, scope_id):
     """
-    API endpoint for the front-end to poll. Checks if the final report
-    exists in GCS, indicating the scan is complete.
+    API endpoint for the front-end to poll. Checks the status.json file
+    in GCS to provide real-time progress updates.
     """
     try:
         bucket = storage_client.bucket(RESULTS_BUCKET)
-        report_blob_name = f"{job_id}/{scope_id}_report.html"
-        blob = bucket.blob(report_blob_name)
+        status_blob = bucket.blob(f"{job_id}/{scope_id}_status.json")
 
-        if blob.exists():
-            return {"status": "ready"}
+        if status_blob.exists():
+            # If the status file is there, return its content
+            status_data = json.loads(status_blob.download_as_text())
+            return jsonify(status_data)
         else:
-            return {"status": "pending"}
+            # If the worker hasn't created the file yet, return a pending state
+            return jsonify({"status": "pending", "progress": 0, "current_task": "Waiting for task to start..."})
             
     except Exception as e:
         print(f"Error checking status for job {job_id}: {e}")
-        return {"status": "error", "message": str(e)}, 500
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 @app.route('/report/<string:job_id>/<string:scope_id>')
 def view_report(job_id, scope_id):
@@ -2551,7 +3290,7 @@ def get_insights():
                     for insight in insights:
                         resource_name = insight.target_resources[0].split('/')[-1] if insight.target_resources else 'N/A'
                         all_findings.append({"check": check_name, "project": project_id, "resource": resource_name, "details": insight.description})
-                except Exception: pass
+                except Exception as e: logging.warning(f"Could not check global insight for {project_id}: {e}")
 
             # Scan for REGIONAL insights
             for loc in active_regions:
@@ -2562,7 +3301,7 @@ def get_insights():
                         for insight in insights:
                             resource_name = insight.target_resources[0].split('/')[-1] if insight.target_resources else 'N/A'
                             all_findings.append({"check": check_name, "project": project_id, "resource": resource_name, "details": insight.description})
-                    except Exception: pass
+                    except Exception as e: logging.warning(f"Could not check regional insight for {project_id}: {e}")
             
             # Scan for ZONAL insights
             for loc in active_zones:
@@ -2573,7 +3312,7 @@ def get_insights():
                         for insight in insights:
                             resource_name = insight.target_resources[0].split('/')[-1] if insight.target_resources else 'N/A'
                             all_findings.append({"check": check_name, "project": project_id, "resource": resource_name, "details": insight.description})
-                    except Exception: pass
+                    except Exception as e: logging.warning(f"Could not check zonal isnight for {project_id}: {e}")
         
         return all_findings
 
@@ -2767,28 +3506,17 @@ def get_status(job_id, scope, scope_id):
             <script>
                 const job_id = "{{ job_id }}";
                 const scope_id = "{{ scope_id }}";
-                // The signed_csv_url is now passed in from Python
                 const signed_csv_url = "{{ signed_csv_url | safe }}"; 
                 const card = document.getElementById('status-card');
 
-                let progress = 0;
-                const stopPoint = 95; // The point where simulation waits for the backend
-                let progressInterval;
-                const messages = [
-                    "Initializing scan...", "Listing projects and assets...", "Analyzing IAM policies...",
-                    "Checking network configurations...", "Assessing resilience settings...", "Compiling findings..."
-                ];
-                let messageIndex = 0;
-                let messageInterval;
-
-                // --- UI Update Functions ---
+                // --- UI Update Functions  ---
                 function showInProgressUI() {
                     document.title = "Scan in Progress...";
                     card.innerHTML = `
                         <h1>Scan in Progress</h1>
                         <p>Your request for job <strong>${job_id}</strong> is being processed. This may take several minutes.</p>
                         <div class="loader"></div>
-                        <p class="status-message">${messages[0]}</p>
+                        <p id="status-message" class="status-message">Initializing...</p>
                         <div class="progress-bar-container">
                             <div id="progress-bar" class="progress-bar"></div>
                         </div>
@@ -2799,10 +3527,6 @@ def get_status(job_id, scope, scope_id):
                 function showReadyUI() {
                     document.title = "Report Ready!";
                     const report_url = `/report/${job_id}/${scope_id}`;
-                
-                    // --- THIS IS THE ONLY JAVASCRIPT CHANGE ---
-                    // Instead of building a public GCS URL, we now use the
-                    // signed_csv_url variable passed from our Python code.
                     card.innerHTML = `
                         <div class="success-icon">&#10003;</div>
                         <h1>Scan Complete!</h1>
@@ -2813,59 +3537,55 @@ def get_status(job_id, scope, scope_id):
                         </div>
                     `;
                 }
+
+                function showErrorUI(message) {
+                    document.title = "Scan Failed!";
+                    card.innerHTML = `
+                        <div class="success-icon" style="color: var(--error-color);">&#10007;</div>
+                        <h1>Scan Failed</h1>
+                        <p>An error occurred while processing your request for job <strong>${job_id}</strong>.</p>
+                        <p style="font-family: monospace; background-color: #f1f3f4; padding: 10px; border-radius: 4px;">${message || 'Unknown error. Please check the application logs.'}</p>
+                    `;
+                }
                 
                 // --- Logic to run on page load ---
                 showInProgressUI();
                 
                 const progressBar = document.getElementById('progress-bar');
                 const progressText = document.getElementById('progress-text');
-                const statusMessage = document.querySelector('.status-message');
+                const statusMessage = document.getElementById('status-message');
 
-                // --- NEW: Smarter, decelerating progress simulation ---
-                progressInterval = setInterval(() => {
-                    if (progress < stopPoint) {
-                        // The increment gets smaller as we approach the stopPoint, creating a slowdown effect.
-                        // Adjust the '0.05' factor to be faster or slower.
-                        const increment = (stopPoint - progress) * 0.05;
-                        progress += increment;
-                        if (progress > stopPoint) { progress = stopPoint; }
-                        
-                        progressBar.style.width = progress + '%';
-                        progressText.textContent = Math.round(progress) + '%';
-                    }
-                }, 400); // Update every 400ms for a smooth animation
-
-                // Cycle through messages every few seconds
-                messageInterval = setInterval(() => {
-                    messageIndex = (messageIndex + 1) % messages.length;
-                    statusMessage.textContent = messages[messageIndex];
-                }, 4000);
-
-                // --- API Polling ---
+                // --- Real-time API Polling ---
                 async function checkStatus() {
                     try {
                         const response = await fetch(`/api/status/${job_id}/${scope_id}`);
+                        if (!response.ok) {
+                            // Handle server errors during polling
+                            throw new Error(`API returned status ${response.status}`);
+                        }
                         const data = await response.json();
 
-                        if (data.status === 'ready') {
-                            // Stop all animations
-                            clearInterval(progressInterval);
-                            clearInterval(messageInterval);
-                            
-                            // Jump to 100% and show the final page
-                            progressBar.style.width = '100%';
-                            progressText.textContent = '100%';
-                            statusMessage.textContent = "Report generated successfully!";
-                            setTimeout(showReadyUI, 500); // Short delay for the 100% to be visible
-                            clearInterval(statusInterval); 
+                        // Update the UI with real data from the backend
+                        if (progressBar) progressBar.style.width = data.progress + '%';
+                        if (progressText) progressText.textContent = Math.round(data.progress) + '%';
+                        if (statusMessage) statusMessage.textContent = data.current_task;
+
+                        // Check the final status
+                        if (data.status === 'completed') {
+                            clearInterval(statusInterval); // Stop polling
+                            setTimeout(showReadyUI, 500); // Short delay to show 100%
+                        } else if (data.status === 'error') {
+                            clearInterval(statusInterval); // Stop polling
+                            showErrorUI(data.current_task);
                         }
                     } catch (e) {
-                         console.error(e);
+                        console.error("Failed to get status:", e);
+                        // Optional: You could stop polling after several consecutive errors
                     }
                 }
                 
-                const statusInterval = setInterval(checkStatus, 5000); // Check every 5 seconds
-                checkStatus(); // Initial check
+                const statusInterval = setInterval(checkStatus, 3000); // Check every 3 seconds
+                checkStatus(); // Initial check on page load
             </script>
         </body>
         </html>
