@@ -239,7 +239,7 @@ Follow the **Common Prerequisites** first, then choose **Method 1** or **Method 
 ```
 export BUCKET_NAME="cloudgauge-reports-${PROJECT_ID}"
 
-gsutil mb -p ${PROJECT_ID} gs://${BUCKET_NAME}
+gcloud storage buckets create --project=${PROJECT_ID} gs://${BUCKET_NAME}
 
 gcloud storage buckets add-iam-policy-binding gs://${BUCKET_NAME} --member="serviceAccount:${SA_EMAIL}" --role="roles/storage.objectAdmin"
 ```
@@ -595,7 +595,7 @@ gcloud tasks queues delete ${QUEUE_NAME} --location=${REGION} --quiet
 
 # 3. Delete the GCS bucket and all its contents
 echo "Deleting GCS bucket: gs://${BUCKET_NAME}..."
-gsutil -m rm -r "gs://${BUCKET_NAME}"
+gcloud storage rm -r "gs://${BUCKET_NAME}"
 
 # 4. Delete the container image from GCR
 echo "Deleting container image..."
@@ -633,7 +633,7 @@ Here's a breakdown of what each command in the script does:
    * This removes the main web application itself, stopping it from running and incurring costs.  
 2. **Delete Cloud Tasks Queue**: `gcloud tasks queues delete`  
    * Your script automatically creates a Cloud Tasks queue named `cloudgauge-scan-queue`. This command deletes that queue.  
-3. **Delete GCS Bucket**: `gsutil -m rm -r`  
+3. **Delete GCS Bucket**: `gcloud storage rm -r`  
    * This command deletes the `cloudgauge-reports-...` bucket and all the HTML/CSV reports stored inside it. The `-m` flag helps it run faster if there are many report files.  
 4. **Delete Container Image**: `gcloud container images delete`  
    * When you deployed the service, Cloud Build created a container image and stored it in Google Container Registry (GCR). This command deletes that stored image to keep your registry clean.  
