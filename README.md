@@ -6,7 +6,7 @@
 
 CloudGauge is a web application designed to run a comprehensive set of compliance, security, cost optimization, and best-practice checks against a Google Cloud Organization.
 
-It is built with Python/Flask and deployed as a serverless application on **Google Cloud Run**. The application leverages **Cloud Tasks** to run scans asynchronously, ensuring that even very large organizations can be scanned without browser timeouts.
+It is built with Python/Flask, structured as a modular application package (Flask *application factory*), and deployed as a serverless application on **Google Cloud Run**. The application leverages **Cloud Tasks** to run scans asynchronously, ensuring that even very large organizations can be scanned without browser timeouts.
 
 Final results are delivered as an interactive **HTML report** and a **CSV file** stored in a Google Cloud Storage bucket. The reports also feature **Gemini-powered** executive summaries and `gCloud` remediation suggestions.
 
@@ -16,11 +16,15 @@ Final results are delivered as an interactive **HTML report** and a **CSV file**
 
 * [Features](#features)
 * [Architecture](#architecture)
+  * [Project Structure](#project-structure)
 * [Deployment Instructions](#deployment-instructions)
   * [Common Prerequisites (Required for all methods)](#common-prerequisites-required-for-all-methods)
   * [Method 1: Deploy from Source (Recommended)](#method-1-deploy-from-source-recommended)
   * [Method 2: Manual Build & Deploy via gcloud](#method-2-manual-build--deploy-via-gcloud)
+* [Configuration Reference](#configuration-reference)
+* [Updating an Existing Deployment (Zero-Downtime)](#updating-an-existing-deployment-zero-downtime)
 * [How to Use](#how-to-use)
+* [Local Development & Testing](#local-development--testing)
 * [Troubleshooting](#troubleshooting)
 * [Cleanup Script](#cleanup-script)
 * [License & Support](#license--support)
@@ -38,6 +42,10 @@ CloudGauge scans your organization across several key domains, modeled after the
 * **SA Key Rotation**: Finds user-managed service account keys older than 90 days.
 * **Public GCS Buckets**: Detects GCS buckets that are publicly accessible.
 * **Open Firewall Rules**: Scans all VPCs for firewall rules open to the internet (`0.0.0.0/0`).
+* **Cloud SQL Security**: Flags Cloud SQL instances with a public IP or without SSL enforcement.
+* **VPC Configuration**: Detects projects still using the `default` VPC network and subnets without Private Google Access.
+* **GCS Uniform Bucket-Level Access**: Finds buckets without Uniform Bucket-Level Access (UBLA) enabled.
+* **VM External IPs**: Finds VM instances with external IP addresses.
 
 ### **Cost Optimization**
 
@@ -64,6 +72,11 @@ CloudGauge scans your organization across several key domains, modeled after the
 * **Quota Utilization**: Identifies any regional compute quotas exceeding 80% utilization.
 * **Unattended Projects**: Flags projects with low utilization.
 
+### **AI-Powered Insights (Gemini)**
+
+* **Executive Summary & Remediation Suggestions**: Generated on demand from the report using Gemini on Vertex AI (via the `google-genai` SDK).
+* **Automatic model selection**: By default (`GEMINI_MODEL=auto`) CloudGauge uses the newest stable Gemini Flash model available to your project, so it keeps working when older models are retired. Pin a specific model with the `GEMINI_MODEL` environment variable (see [Configuration Reference](#configuration-reference)).
+
 ##  **Architecture**
 
 The application follows a robust, scalable, and asynchronous "fire-and-forget" pattern. This ensures the user gets an immediate response while the heavy work (which can take many minutes) is done in the background.
@@ -71,8 +84,8 @@ The application follows a robust, scalable, and asynchronous "fire-and-forget" p
 1.  **UI Trigger**: A user navigates to the Cloud Run URL and submits an Organization ID.
 2.  **Task Creation**: The `/scan` endpoint creates a **Cloud Task** with the scan details and redirects the user to a status page.
 3.  **Background Worker**: Cloud Tasks securely invokes the `/run-scan` endpoint in the background.
-4.  **Parallel Processing**: The worker executes dozens of checks, running project-level scans in parallel using a thread pool.
-5.  **Report Storage**: The worker generates the HTML/CSV reports and uploads them to Google Cloud Storage.
+4.  **Parallel Processing**: The worker executes dozens of checks concurrently using a thread pool (`app/checks/runner.py`). Each finding is written to an intermediate file in GCS as soon as it is found.
+5.  **Report Storage**: The worker aggregates the findings, generates the HTML/CSV reports, uploads them to Google Cloud Storage, and deletes the intermediate files.
 6.  **Status Polling**: The user's status page polls an API endpoint until the report files are found in GCS, at which point it displays the download links.
 
 ### **Architecture Diagram**
@@ -108,13 +121,13 @@ graph LR
             K -- "Dispatches" --> L1[IAM Checks];
             K -- "Dispatches" --> L2[Cost Checks];
             K -- "Dispatches" --> L3[...];
-            L1 -- "Writes to" --> M([Local /tmp Files]);
+            L1 -- "Writes to" --> M([Intermediate Findings in GCS]);
             L2 -- "Writes to" --> M;
             L3 -- "Writes to" --> M;
             M --> N[3. Aggregate Findings];
             N --> O[4. Generate Reports];
             O --> P[5. Upload Reports];
-            P --> Q[6. Cleanup tmp Files];
+            P --> Q[6. Cleanup Intermediate Files];
         end
     end
 
@@ -130,6 +143,39 @@ graph LR
         P -- "writes to" --> GCS_REPORTS([Final Reports in GCS]);
     end
 ```
+
+### **Project Structure**
+
+The application is a Flask package built by an application factory (`create_app()` in `app/__init__.py`). The root `cloudgauge.py` is a thin entrypoint that exposes `app = create_app()`, so the container command (`gunicorn ... cloudgauge:app`) is the same as before the refactor.
+
+```
+cloudgauge.py            # Entrypoint for gunicorn / Cloud Run: app = create_app()
+run.py                   # Local development server (see Local Development & Testing)
+app/
+├── __init__.py          # create_app(): settings, startup checks, blueprints
+├── config.py            # Settings read from environment variables; profiles
+├── extensions.py        # Shared, lazily created clients and the resolved worker URL
+├── scan_job.py          # Background scan: run checks -> build reports -> upload -> clean up
+├── routes/              # Blueprints
+│   ├── ui.py            #   /, /scan, /status/..., /report/...
+│   ├── api.py           #   /api/list-resources, /api/status/..., /api/get-summary, ...
+│   └── worker.py        #   /run-scan (invoked by Cloud Tasks)
+├── checks/              # Checks grouped by pillar: security, cost, reliability, operations, network
+│   ├── registry.py      #   The check plan: which checks run, and in what order
+│   ├── runner.py        #   Runs the plan concurrently (ThreadPoolExecutor) and reports progress
+│   └── categories.py    #   Maps check names to report categories
+├── services/            # GCP clients, Cloud Tasks, GCS results store, Gemini, insights, org policies
+├── reporting/           # HTML and CSV report builders
+└── templates/           # index.html, status.html, report/ (HTML, CSS, JS)
+tests/                   # pytest suite (see Local Development & Testing)
+Dockerfile               # Production image
+Dockerfile.test          # Runs the test suite inside the production image
+cloudbuild.yaml          # Cloud Build: build -> test -> push
+requirements.txt         # Production dependencies (pinned)
+requirements-dev.txt     # Adds pytest and ruff
+```
+
+**Adding a check:** write the function in the matching `app/checks/` module, add a `CheckSpec` entry to `app/checks/registry.py`, and map the names it reports to a category in `app/checks/categories.py`.
 
 ## **Deployment Instructions** 
 
@@ -288,6 +334,7 @@ Now, let's create the initial Cloud Run service and connect it to your new repos
      * `RESULTS_BUCKET`: The name of your GCS bucket (e.g., `cloudgauge-reports-my-gcp-project`)  
      * `SERVICE_ACCOUNT_EMAIL`: The full email of your service account  
      * `LOCATION`: The region you selected (e.g., `asia-south1`)  
+     * Optional settings such as `GEMINI_MODEL` are listed in the [Configuration Reference](#configuration-reference).  
 10. Click **Create**. The service will start building and deploying.
 
 ---
@@ -328,7 +375,7 @@ This method gives you manual control over the build and deploy steps.
 1. **Clone this repository**:
 ```
 git clone https://github.com/GoogleCloudPlatform/CloudGauge
-cd cloudgauge
+cd CloudGauge
 ```
 2. **Set Environment Variables**:  
    * (You should already have `PROJECT_ID` and `SA_EMAIL` from the common setup)
@@ -339,12 +386,21 @@ cd cloudgauge
      export QUEUE_NAME="cloudgauge-scan-queue"
 ```   
 
-3. **Build and Deploy Service **:
-   * This command builds the container and deploys it.
+3. **Build and Deploy Service**:
+   * Build the container image with **one** of the two options below, then deploy it.
+   * **Option A (recommended): build, test, and push with `cloudbuild.yaml`.** Cloud Build builds the image, runs the full test suite inside it, and pushes the image only if every test passes.
+```
+gcloud builds submit . --config cloudbuild.yaml \
+  --substitutions=_IMAGE=gcr.io/${PROJECT_ID}/${SERVICE_NAME},_TAG=latest
+```
+   * **Option B: build only.**
 ```
 # Build the container image using Cloud Build  
 gcloud builds submit . --tag "gcr.io/${PROJECT_ID}/${SERVICE_NAME}" --region=${REGION}
-
+```
+   * `.gcloudignore` keeps local files such as `.git/` and virtual environments out of the upload.
+   * Then deploy:
+```
 # Deploy to Cloud Run  
 gcloud run deploy ${SERVICE_NAME} \
   --image "gcr.io/${PROJECT_ID}/${SERVICE_NAME}" \
@@ -372,6 +428,60 @@ gcloud run services add-iam-policy-binding ${SERVICE_NAME} \
 
 Your service is now fully deployed and configured\!
 
+## **Configuration Reference**
+
+CloudGauge is configured entirely through environment variables on the Cloud Run service.
+
+| Variable | Required | Default | Description |
+|---|---|---|---|
+| `PROJECT_ID` | Yes | – | Project that hosts CloudGauge (Cloud Tasks, GCS, Vertex AI). |
+| `LOCATION` | Yes | – | Region of the Cloud Run service and the Cloud Tasks queue. |
+| `TASK_QUEUE` | Yes | – | Cloud Tasks queue name. The queue is created automatically at startup if it doesn't exist. |
+| `RESULTS_BUCKET` | Yes | – | GCS bucket for status files, intermediate findings, and reports. |
+| `SERVICE_ACCOUNT_EMAIL` | Yes | – | Service account used for Cloud Tasks OIDC tokens and signed report URLs. |
+| `GEMINI_MODEL` | No | `auto` | `auto` uses the newest stable Gemini Flash model available to the project (falls back to `gemini-flash-latest` if models can't be listed). Set a model ID (e.g. `gemini-2.5-flash`) to pin one. |
+| `VERTEX_LOCATION` | No | `global` | Vertex AI location used for Gemini calls. |
+| `WORKER_URL` | No | auto-discovered | URL that Cloud Tasks calls for `/run-scan`. By default the service discovers its own URL at startup (needs `roles/run.viewer`). Set it to override discovery, for example for a tagged canary revision. |
+| `BEST_PRACTICES_CSV_URL` | No | GitHub-hosted CSV | Source of the best-practice list used by the Organization Policies check. |
+| `CLOUDGAUGE_ENV` | No | `production` | `production` runs the startup checks (required variables, worker URL, queue). `development` and `testing` skip them. |
+
+## **Updating an Existing Deployment (Zero-Downtime)**
+
+To roll out a new version safely, deploy it as a tagged revision that receives **no traffic**, test it, then shift traffic gradually.
+
+```
+export SERVICE_NAME="cloudgauge-service"   # your service
+export REGION="asia-south1"                # its region
+export IMAGE="gcr.io/${PROJECT_ID}/${SERVICE_NAME}"
+export TAG=$(git rev-parse --short HEAD)
+export PROJECT_NUMBER=$(gcloud projects describe ${PROJECT_ID} --format='value(projectNumber)')
+export CANARY_URL="https://canary---${SERVICE_NAME}-${PROJECT_NUMBER}.${REGION}.run.app"
+
+# 1. Note the revision currently serving traffic (your rollback target)
+gcloud run services describe ${SERVICE_NAME} --region ${REGION} --format='value(status.traffic[0].revisionName)'
+
+# 2. Build, test, and push
+gcloud builds submit . --config cloudbuild.yaml --substitutions=_IMAGE=${IMAGE},_TAG=${TAG}
+
+# 3. Deploy the new revision with 0% traffic, reachable only at its tag URL
+gcloud run deploy ${SERVICE_NAME} --region ${REGION} --image ${IMAGE}:${TAG} \
+  --no-traffic --tag canary --update-env-vars WORKER_URL=${CANARY_URL}
+
+# 4. Test it at ${CANARY_URL}, then shift traffic gradually
+gcloud run services update-traffic ${SERVICE_NAME} --region ${REGION} --to-tags canary=10
+gcloud run services update-traffic ${SERVICE_NAME} --region ${REGION} --to-tags canary=100
+
+# 5. Finalize: remove the canary-only override and the tag
+gcloud run services update ${SERVICE_NAME} --region ${REGION} --remove-env-vars WORKER_URL
+gcloud run services update-traffic ${SERVICE_NAME} --region ${REGION} --to-latest
+gcloud run services update-traffic ${SERVICE_NAME} --region ${REGION} --remove-tags canary
+
+# Rollback at any time
+gcloud run services update-traffic ${SERVICE_NAME} --region ${REGION} --to-revisions <OLD_REVISION>=100
+```
+
+**Why `WORKER_URL` is set on the canary:** the service discovers its *main* URL at startup. Without the override, scans started from the canary would be executed by the revision serving the main URL.
+
 ## **How to Use** 
 
 1. Navigate to your service's URL (`${SERVICE_URL}`).  
@@ -380,6 +490,44 @@ Your service is now fully deployed and configured\!
 4. Click "Start Scan".  
 5. You will be redirected to a status page. Wait for the scan to complete (this can take 5-15 minutes depending on org size).  
 6. Once finished, links to the **Interactive HTML Report** and **Download CSV Report** will appear.
+
+## **Local Development & Testing**
+
+Requires Python 3.11.
+
+```
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements-dev.txt
+```
+
+**Run the app locally.** `run.py` starts the Flask development server with the `development` profile, which skips the Cloud Run startup checks. It listens on `127.0.0.1:8080` by default; `HOST`, `PORT`, and `FLASK_DEBUG` override this.
+
+```
+gcloud auth application-default login   # credentials for the Google Cloud APIs
+export PROJECT_ID=... LOCATION=... TASK_QUEUE=... RESULTS_BUCKET=... SERVICE_ACCOUNT_EMAIL=...
+python run.py
+```
+
+Scans are always executed through Cloud Tasks, which must reach a public worker URL. To start scans from a local instance, set `WORKER_URL` to a deployed CloudGauge service.
+
+**Run the tests.** The suite uses in-memory fakes for GCS, Cloud Tasks, and the Google APIs, so it needs no credentials or network access.
+
+```
+pytest                         # full suite
+pytest tests/test_smoke.py     # quick pre-deploy smoke tests
+# Lint: errors, undefined names, and unused/redefined imports (tests/legacy is a frozen upstream copy)
+ruff check --extend-exclude tests/legacy --select E9,F63,F7,F82,F401,F811 app tests cloudgauge.py run.py
+```
+
+**Test the container.** This is what the `test` step in `cloudbuild.yaml` runs:
+
+```
+docker build -t cloudgauge .
+DOCKER_BUILDKIT=1 docker build -f Dockerfile.test --build-arg APP_IMAGE=cloudgauge -t cloudgauge-test .
+docker run --rm cloudgauge-test
+```
+
+`tests/legacy/` holds a frozen copy of the original single-file `cloudgauge.py`. The parity tests use it to check that the refactored routes, worker, and reports behave like the original.
 
 ## **Troubleshooting**
 
@@ -437,8 +585,23 @@ gcloud run services update cloudgauge-service \
   2. There is a bug in the application code or a missing dependency in `requirements.txt`.  
 * **Solution**:  
   1. Check the **LOGS** tab for the specific error message that occurs when the container tries to start.  
-  2. If the error is related to a variable, click **"Edit & Deploy New Revision,"** go to the **"Variables & Secrets"** tab, and ensure all required variables (`PROJECT_ID`, `WORKER_URL`, etc.) are present and have the correct values.  
-  3. If it is a code error, you will need to fix the source code and deploy a new revision.
+  2. If the error is related to a variable, click **"Edit & Deploy New Revision,"** go to the **"Variables & Secrets"** tab, and ensure all required variables (`PROJECT_ID`, `LOCATION`, `TASK_QUEUE`, `RESULTS_BUCKET`, `SERVICE_ACCOUNT_EMAIL`) are present and have the correct values. The startup log line `FATAL: Missing required environment variables: ...` names the missing ones.  
+  3. If the log shows `FATAL: Could not discover WORKER_URL via API`, the service account is missing `roles/run.viewer` on the service (see **Grant Invoker & Viewer Permission**). Alternatively, set `WORKER_URL` to the service URL.  
+  4. If it is a code error, you will need to fix the source code and deploy a new revision.
+
+---
+
+#### **AI Summary or Suggestions Fail**
+
+* **Symptom**: The report loads, but the Gemini executive summary or remediation suggestions return an error.  
+* **Cause**: The service account lacks `roles/aiplatform.user`, the Vertex AI API (`aiplatform.googleapis.com`) is not enabled, or the selected model isn't available to your project or location.  
+* **Solution**: Verify the role and API from the **Common Prerequisites**. If a specific model is the problem, pin one that is available with `GEMINI_MODEL` (and, if needed, `VERTEX_LOCATION`):
+
+```
+gcloud run services update cloudgauge-service \
+  --update-env-vars GEMINI_MODEL=<model-id> \
+  --region=<your-region>
+```
 
 ---
 
