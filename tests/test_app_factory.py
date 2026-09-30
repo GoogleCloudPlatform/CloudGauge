@@ -127,6 +127,23 @@ def test_worker_url_setting_replaces_the_lookup(gcp, env, monkeypatch):
     assert gcp.tasks.queues == [QUEUE_CREATED]
 
 
+def test_canary_settings_send_the_task_to_the_tag_url_with_the_main_url_as_audience(gcp, env, monkeypatch):
+    """Canary revision: WORKER_URL is its tag URL, WORKER_AUDIENCE the service's main URL.
+
+    Cloud Run answers 401 to a token whose audience is a tag URL (the default,
+    since Cloud Tasks uses the task URL), but accepts the main URL on any tag.
+    """
+    canary, main = 'https://canary---cloudgauge-123.us-central1.run.app', 'https://cloudgauge-123.us-central1.run.app'
+    monkeypatch.setenv('WORKER_URL', canary)
+    monkeypatch.setenv('WORKER_AUDIENCE', main)
+    assert create_app().test_client().post('/scan', data={'scope': 'project', 'scope_id': 'p1'}).status_code == 302
+    ((_, task),) = gcp.tasks.tasks
+    assert task['http_request']['url'] == f'{canary}/run-scan'
+    assert task['http_request']['oidc_token'] == {'service_account_email': fakes.TEST_ENV['SERVICE_ACCOUNT_EMAIL'],
+                                                  'audience': main}
+    assert gcp.discovery.calls == []  # WORKER_URL replaces the lookup
+
+
 def test_existing_queue_is_reused(gcp, env):
     gcp.tasks.create_queue_error = AlreadyExists('Queue already exists')
     create_app()

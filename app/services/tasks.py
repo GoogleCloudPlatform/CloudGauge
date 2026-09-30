@@ -65,8 +65,12 @@ def ensure_queue_if_configured(settings, client=None):
         print("⚠️ PROJECT_ID or TASK_QUEUE environment variables not set. Skipping queue creation.")
 
 
-def build_scan_task(worker_url, service_account_email, scope, scope_id, job_id):
-    """Builds the Cloud Tasks HTTP task that triggers ``/run-scan`` for one scan."""
+def build_scan_task(worker_url, service_account_email, scope, scope_id, job_id, audience=None):
+    """Builds the Cloud Tasks HTTP task that triggers ``/run-scan`` for one scan.
+
+    ``audience`` sets the OIDC token audience; when omitted (the legacy task),
+    Cloud Tasks uses the task URL.
+    """
     task = {
         "http_request": {
             "http_method": tasks_v2.HttpMethod.POST,
@@ -77,6 +81,8 @@ def build_scan_task(worker_url, service_account_email, scope, scope_id, job_id):
             },
         }
     }
+    if audience:
+        task["http_request"]["oidc_token"]["audience"] = audience
     # NEW: Use a generic payload
     task["http_request"]["body"] = json.dumps({"scope": scope, "scope_id": scope_id, "job_id": job_id}).encode()
     return task
@@ -85,6 +91,7 @@ def build_scan_task(worker_url, service_account_email, scope, scope_id, job_id):
 def enqueue_scan(settings, worker_url, scope, scope_id, job_id, client=None):
     """Creates the scan task on the configured queue and returns the created task."""
     client = client or gcp.tasks_client()
-    task = build_scan_task(worker_url, settings.service_account_email, scope, scope_id, job_id)
+    task = build_scan_task(worker_url, settings.service_account_email, scope, scope_id, job_id,
+                           audience=settings.worker_audience)
     parent = client.queue_path(settings.project_id, settings.location, settings.task_queue)
     return client.create_task(parent=parent, task=task)

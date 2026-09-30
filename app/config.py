@@ -76,6 +76,10 @@ class Settings:
     k_service: str | None = None
     # Optional; the defaults match the legacy behavior
     worker_url: str | None = None
+    # OIDC audience for the scan task's token. Unset: Cloud Tasks uses the task URL.
+    # Needed when WORKER_URL is a revision tag URL (canary): Cloud Run rejects
+    # tokens whose audience is a tag URL (401), so set this to the service's main URL.
+    worker_audience: str | None = None
     gemini_model: str = DEFAULT_GEMINI_MODEL
     vertex_location: str = DEFAULT_VERTEX_LOCATION
     best_practices_csv_url: str = BEST_PRACTICES_CSV_URL
@@ -100,6 +104,7 @@ class Settings:
             service_account_email=env.get('SERVICE_ACCOUNT_EMAIL'),
             k_service=env.get('K_SERVICE'),
             worker_url=env.get('WORKER_URL') or None,
+            worker_audience=env.get('WORKER_AUDIENCE') or None,
             gemini_model=_gemini_model(env.get('GEMINI_MODEL')),
             vertex_location=env.get('VERTEX_LOCATION') or DEFAULT_VERTEX_LOCATION,
             best_practices_csv_url=env.get('BEST_PRACTICES_CSV_URL') or BEST_PRACTICES_CSV_URL,

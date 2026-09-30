@@ -442,6 +442,7 @@ CloudGauge is configured entirely through environment variables on the Cloud Run
 | `GEMINI_MODEL` | No | `auto` | `auto` uses the newest stable Gemini Flash model available to the project (falls back to `gemini-flash-latest` if models can't be listed). Set a model ID (e.g. `gemini-2.5-flash`) to pin one. |
 | `VERTEX_LOCATION` | No | `global` | Vertex AI location used for Gemini calls. |
 | `WORKER_URL` | No | auto-discovered | URL that Cloud Tasks calls for `/run-scan`. By default the service discovers its own URL at startup (needs `roles/run.viewer`). Set it to override discovery, for example for a tagged canary revision. |
+| `WORKER_AUDIENCE` | No | the task URL | Audience of the OIDC token on scan tasks. Leave unset normally. For a canary, set it to the service's **main** URL: Cloud Run rejects tokens whose audience is a revision tag URL (HTTP 401). |
 | `BEST_PRACTICES_CSV_URL` | No | GitHub-hosted CSV | Source of the best-practice list used by the Organization Policies check. |
 | `CLOUDGAUGE_ENV` | No | `production` | `production` runs the startup checks (required variables, worker URL, queue). `development` and `testing` skip them. |
 
@@ -455,6 +456,7 @@ export REGION="asia-south1"                # its region
 export IMAGE="gcr.io/${PROJECT_ID}/${SERVICE_NAME}"
 export TAG=$(git rev-parse --short HEAD)
 export PROJECT_NUMBER=$(gcloud projects describe ${PROJECT_ID} --format='value(projectNumber)')
+export MAIN_URL="https://${SERVICE_NAME}-${PROJECT_NUMBER}.${REGION}.run.app"
 export CANARY_URL="https://canary---${SERVICE_NAME}-${PROJECT_NUMBER}.${REGION}.run.app"
 
 # 1. Note the revision currently serving traffic (your rollback target)
@@ -465,14 +467,15 @@ gcloud builds submit . --config cloudbuild.yaml --substitutions=_IMAGE=${IMAGE},
 
 # 3. Deploy the new revision with 0% traffic, reachable only at its tag URL
 gcloud run deploy ${SERVICE_NAME} --region ${REGION} --image ${IMAGE}:${TAG} \
-  --no-traffic --tag canary --update-env-vars WORKER_URL=${CANARY_URL}
+  --no-traffic --tag canary \
+  --update-env-vars WORKER_URL=${CANARY_URL},WORKER_AUDIENCE=${MAIN_URL}
 
 # 4. Test it at ${CANARY_URL}, then shift traffic gradually
 gcloud run services update-traffic ${SERVICE_NAME} --region ${REGION} --to-tags canary=10
 gcloud run services update-traffic ${SERVICE_NAME} --region ${REGION} --to-tags canary=100
 
-# 5. Finalize: remove the canary-only override and the tag
-gcloud run services update ${SERVICE_NAME} --region ${REGION} --remove-env-vars WORKER_URL
+# 5. Finalize: remove the canary-only overrides and the tag
+gcloud run services update ${SERVICE_NAME} --region ${REGION} --remove-env-vars WORKER_URL,WORKER_AUDIENCE
 gcloud run services update-traffic ${SERVICE_NAME} --region ${REGION} --to-latest
 gcloud run services update-traffic ${SERVICE_NAME} --region ${REGION} --remove-tags canary
 
@@ -480,7 +483,9 @@ gcloud run services update-traffic ${SERVICE_NAME} --region ${REGION} --remove-t
 gcloud run services update-traffic ${SERVICE_NAME} --region ${REGION} --to-revisions <OLD_REVISION>=100
 ```
 
-**Why `WORKER_URL` is set on the canary:** the service discovers its *main* URL at startup. Without the override, scans started from the canary would be executed by the revision serving the main URL.
+**Why the canary needs two overrides:**
+* `WORKER_URL`: the service discovers its *main* URL at startup. Without this override, scans started from the canary would be executed by the revision serving the main URL.
+* `WORKER_AUDIENCE`: by default the scan task's OIDC token is issued for the task URL, which is now the tag URL. Cloud Run rejects that with HTTP 401, and the scan never starts. A token issued for the service's main URL is accepted on any of its tag URLs.
 
 ## **How to Use** 
 
