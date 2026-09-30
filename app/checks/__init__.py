@@ -11,18 +11,14 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Entrypoint: ``gunicorn cloudgauge:app`` (the Dockerfile) or ``python cloudgauge.py``.
+"""Scan checks, their registry, and the concurrent runner.
 
-The application lives in the ``app`` package; see ``app.create_app``. This
-module keeps the upstream entrypoint name, so existing deploy commands still
-work. It builds the app in the production profile. For local development, use
-``python run.py`` instead.
+- ``security``, ``reliability``, ``operations``, ``cost``, ``network``: the checks
+- ``categories``: check result name -> report category
+- ``registry``: ``CheckSpec`` and ``build_check_plan()`` (what runs, with which args)
+- ``runner``: ``run_all_checks()`` executes the plan on a ``ThreadPoolExecutor``
+
+Every check keeps its legacy positional signature and adds a keyword-only
+``sink`` (a ``GcsResultsStore``) for writing findings. No eager submodule
+imports here.
 """
-import os
-
-from app import create_app
-
-app = create_app()
-
-if __name__ == '__main__':
-    app.run(debug=True, host='0.0.0.0', port=int(os.environ.get('PORT', 8080)))

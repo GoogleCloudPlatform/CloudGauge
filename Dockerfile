@@ -3,9 +3,11 @@ FROM python:3.11-slim
 
 # Step 2: Set environment variables
 # Prevents Python from writing pyc files to disc
-ENV PYTHONDONTWRITEBYTECODE 1
 # Ensures Python output is sent straight to the terminal without buffering
-ENV PYTHONUNBUFFERED 1
+# PORT: Cloud Run always sets it; 8080 is the default for a plain `docker run`
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PORT=8080
 
 # Step 3: Set the working directory inside the container
 WORKDIR /app
@@ -16,10 +18,20 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Step 5: Copy the rest of your application code into the container
-COPY . .
+# Step 5: Copy the application: the Flask package (code and templates) and the
+# cloudgauge.py entrypoint shim. Tests, run.py, and dev files stay out of the image.
+COPY app ./app
+COPY cloudgauge.py .
 
-# Step 6: Define the command to run your application
-# Use Gunicorn as a production-grade WSGI server, not Flask's built-in server.
-# It will listen on the port defined by the PORT environment variable, which Cloud Run sets automatically.
-ENTRYPOINT ["gunicorn", "--bind", "0.0.0.0:8080", "--workers", "1", "--threads", "8", "--timeout", "0", "cloudgauge:app"]
+# Step 6: Run as an unprivileged user. It needs a home directory: gunicorn's
+# control server keeps its socket under $HOME.
+RUN useradd --system --uid 10001 --create-home cloudgauge
+USER cloudgauge
+
+# Step 7: Define the command to run your application
+# Gunicorn (a production-grade WSGI server, not Flask's built-in server) serves
+# the app that cloudgauge.py builds with create_app(). The shell form expands
+# $PORT; `exec` replaces the shell, so gunicorn is PID 1 and receives Cloud
+# Run's SIGTERM for a graceful shutdown. One worker with 8 threads: scans run in
+# threads, and --timeout 0 leaves request time limits to Cloud Run.
+CMD exec gunicorn --bind :$PORT --workers 1 --threads 8 --timeout 0 cloudgauge:app

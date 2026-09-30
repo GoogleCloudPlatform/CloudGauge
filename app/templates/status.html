@@ -1,0 +1,130 @@
+{#
+  Copyright 2025 Google LLC
+
+  Licensed under the Apache License, Version 2.0 (the "License");
+  you may not use this file except in compliance with the License.
+  You may obtain a copy of the License at
+
+      https://www.apache.org/licenses/LICENSE-2.0
+
+  Unless required by applicable law or agreed to in writing, software
+  distributed under the License is distributed on an "AS IS" BASIS,
+  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+  See the License for the specific language governing permissions and
+  limitations under the License.
+#}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Scan in Progress...</title>
+    <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&display=swap" rel="stylesheet">
+    <style>
+        :root { --primary-color: #4285F4; --success-color: #1e8e3e; --background-color: #f8f9fa; --text-color: #3c4043; --border-color: #dfe1e5; --card-bg-color: #ffffff; }
+        body { font-family: 'Roboto', sans-serif; margin: 0; background-color: var(--background-color); color: var(--text-color); display: flex; align-items: center; justify-content: center; height: 100vh; }
+        .status-card { background-color: var(--card-bg-color); padding: 40px; border-radius: 8px; box-shadow: 0 4px 10px rgba(0,0,0,0.08); border: 1px solid var(--border-color); text-align: center; max-width: 600px; width: 100%; }
+        h1 { color: #202124; font-weight: 500; margin-top: 0; }
+        p { color: #5f6368; margin-bottom: 30px; line-height: 1.6; }
+        .progress-bar-container { background-color: #e9ecef; border-radius: 8px; height: 16px; width: 100%; margin: 20px 0; overflow: hidden; }
+        .progress-bar { background-color: var(--primary-color); height: 100%; width: 0%; border-radius: 8px; transition: width 0.4s linear; }
+        .loader { border: 4px solid #f3f3f3; border-top: 4px solid var(--primary-color); border-radius: 50%; width: 40px; height: 40px; animation: spin 1s linear infinite; margin: 20px auto; }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+        .status-message { font-weight: 500; height: 24px; }
+        .button-group { display: flex; gap: 15px; justify-content: center; margin-top: 20px; }
+        .btn { text-decoration: none; display: inline-block; background-color: var(--primary-color); color: white; padding: 12px 20px; border-radius: 5px; border: none; cursor: pointer; font-size: 16px; font-weight: 500; transition: background-color 0.2s ease, box-shadow 0.2s ease; }
+        .btn:hover { box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+        .btn.secondary { background-color: #e8eaed; color: var(--text-color); }
+        .success-icon { font-size: 48px; color: var(--success-color); }
+    </style>
+</head>
+<body>
+    <div id="status-card" class="status-card">
+        </div>
+
+    <script>
+        const job_id = "{{ job_id }}";
+        const scope_id = "{{ scope_id }}";
+        const signed_csv_url = "{{ signed_csv_url | safe }}"; 
+        const card = document.getElementById('status-card');
+
+        // --- UI Update Functions  ---
+        function showInProgressUI() {
+            document.title = "Scan in Progress...";
+            card.innerHTML = `
+                <h1>Scan in Progress</h1>
+                <p>Your request for job <strong>${job_id}</strong> is being processed. This may take several minutes.</p>
+                <div class="loader"></div>
+                <p id="status-message" class="status-message">Initializing...</p>
+                <div class="progress-bar-container">
+                    <div id="progress-bar" class="progress-bar"></div>
+                </div>
+                <p id="progress-text">0%</p>
+            `;
+        }
+
+        function showReadyUI() {
+            document.title = "Report Ready!";
+            const report_url = `/report/${job_id}/${scope_id}`;
+            card.innerHTML = `
+                <div class="success-icon">&#10003;</div>
+                <h1>Scan Complete!</h1>
+                <p>Your report is ready. You can now view the interactive report online or download the raw data as a CSV file.</p>
+                <div class="button-group">
+                    <a href="${report_url}" target="_blank" class="btn">View Interactive Report</a>
+                    <a href="${signed_csv_url}" class="btn secondary">Download CSV Report</a>
+                </div>
+            `;
+        }
+
+        function showErrorUI(message) {
+            document.title = "Scan Failed!";
+            card.innerHTML = `
+                <div class="success-icon" style="color: var(--error-color);">&#10007;</div>
+                <h1>Scan Failed</h1>
+                <p>An error occurred while processing your request for job <strong>${job_id}</strong>.</p>
+                <p style="font-family: monospace; background-color: #f1f3f4; padding: 10px; border-radius: 4px;">${message || 'Unknown error. Please check the application logs.'}</p>
+            `;
+        }
+
+        // --- Logic to run on page load ---
+        showInProgressUI();
+
+        const progressBar = document.getElementById('progress-bar');
+        const progressText = document.getElementById('progress-text');
+        const statusMessage = document.getElementById('status-message');
+
+        // --- Real-time API Polling ---
+        async function checkStatus() {
+            try {
+                const response = await fetch(`/api/status/${job_id}/${scope_id}`);
+                if (!response.ok) {
+                    // Handle server errors during polling
+                    throw new Error(`API returned status ${response.status}`);
+                }
+                const data = await response.json();
+
+                // Update the UI with real data from the backend
+                if (progressBar) progressBar.style.width = data.progress + '%';
+                if (progressText) progressText.textContent = Math.round(data.progress) + '%';
+                if (statusMessage) statusMessage.textContent = data.current_task;
+
+                // Check the final status
+                if (data.status === 'completed') {
+                    clearInterval(statusInterval); // Stop polling
+                    setTimeout(showReadyUI, 500); // Short delay to show 100%
+                } else if (data.status === 'error') {
+                    clearInterval(statusInterval); // Stop polling
+                    showErrorUI(data.current_task);
+                }
+            } catch (e) {
+                console.error("Failed to get status:", e);
+                // Optional: You could stop polling after several consecutive errors
+            }
+        }
+
+        const statusInterval = setInterval(checkStatus, 3000); // Check every 3 seconds
+        checkStatus(); // Initial check on page load
+    </script>
+</body>
+</html>

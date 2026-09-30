@@ -1,0 +1,39 @@
+# Build context for the application image (Dockerfile). The image only needs
+# requirements.txt, app/, and cloudgauge.py; everything below stays out of the
+# upload and out of the layer cache keys.
+# (Dockerfile.test uses Dockerfile.test.dockerignore instead, which keeps tests/.)
+
+# Version control
+.git/
+.gitignore
+
+# Local environments, bytecode, and tool caches
+.venv/
+venv/
+**/__pycache__/
+**/*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Tests and development-only files
+tests/
+run.py
+requirements-dev.txt
+pytest.ini
+Dockerfile.test
+Dockerfile.test.dockerignore
+cloudbuild.yaml
+
+# Docs and repository assets
+*.md
+LICENSE
+assets/
+
+# Editors, OS, local configuration
+.DS_Store
+.idea/
+.vscode/
+.env
+*.log

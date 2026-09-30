@@ -1,0 +1,18 @@
+# Runs the test suite inside the application image, so the tests see exactly
+# the Python version and pinned dependencies that ship. Needs BuildKit (for
+# Dockerfile.test.dockerignore, which keeps tests/ in the build context):
+#   docker build -t cloudgauge .
+#   DOCKER_BUILDKIT=1 docker build -f Dockerfile.test --build-arg APP_IMAGE=cloudgauge -t cloudgauge-test .
+#   docker run --rm cloudgauge-test
+ARG APP_IMAGE=cloudgauge
+FROM ${APP_IMAGE}
+
+USER root
+# Dockerfile and the ignore files are copied only so test_packaging.py can inspect them.
+COPY requirements-dev.txt pytest.ini Dockerfile .dockerignore Dockerfile.test.dockerignore run.py ./
+RUN pip install --no-cache-dir -r requirements-dev.txt
+COPY tests ./tests
+USER cloudgauge
+
+# Replaces the app image's CMD (setting ENTRYPOINT clears the inherited CMD).
+ENTRYPOINT ["python", "-m", "pytest", "-p", "no:cacheprovider", "-q"]

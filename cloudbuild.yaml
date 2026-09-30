@@ -1,0 +1,30 @@
+# Builds the image, runs the test suite inside it, and pushes the image only if
+# the tests pass. Deploying is a separate, explicit step:
+#   gcloud builds submit --project=PROJECT --region=REGION --config=cloudbuild.yaml \
+#     --substitutions=_IMAGE=gcr.io/PROJECT/cloudgauge,_TAG=refactor-modular-factory .
+substitutions:
+  _IMAGE: gcr.io/${PROJECT_ID}/cloudgauge
+  _TAG: latest
+
+steps:
+  - id: build
+    name: gcr.io/cloud-builders/docker
+    env: ['DOCKER_BUILDKIT=1']
+    args: ['build', '-t', '${_IMAGE}:${_TAG}', '.']
+
+  # BuildKit reads Dockerfile.test.dockerignore, which keeps tests/ in the context.
+  - id: build-tests
+    name: gcr.io/cloud-builders/docker
+    env: ['DOCKER_BUILDKIT=1']
+    args: ['build', '-f', 'Dockerfile.test', '--build-arg', 'APP_IMAGE=${_IMAGE}:${_TAG}', '-t', 'cloudgauge-test', '.']
+
+  - id: test
+    name: gcr.io/cloud-builders/docker
+    args: ['run', '--rm', 'cloudgauge-test']
+
+images:
+  - '${_IMAGE}:${_TAG}'
+
+options:
+  dynamicSubstitutions: true  # lets _IMAGE's default refer to ${PROJECT_ID}
+  logging: CLOUD_LOGGING_ONLY

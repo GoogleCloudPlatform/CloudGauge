@@ -11,18 +11,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Entrypoint: ``gunicorn cloudgauge:app`` (the Dockerfile) or ``python cloudgauge.py``.
+"""Report generation.
 
-The application lives in the ``app`` package; see ``app.create_app``. This
-module keeps the upstream entrypoint name, so existing deploy commands still
-work. It builds the app in the production profile. For local development, use
-``python run.py`` instead.
+- ``context``      view-model: groups findings, evaluates org policies, scores sections
+- ``html_report``  renders the self-contained HTML report (``templates/report/``)
+- ``csv_report``   the CSV report
+
+Nothing here uses Flask: reports render without an app or request context.
+No eager submodule imports here.
 """
-import os
-
-from app import create_app
-
-app = create_app()
-
-if __name__ == '__main__':
-    app.run(debug=True, host='0.0.0.0', port=int(os.environ.get('PORT', 8080)))

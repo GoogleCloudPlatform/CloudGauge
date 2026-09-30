@@ -1,0 +1,116 @@
+{#
+  Copyright 2025 Google LLC
+
+  Licensed under the Apache License, Version 2.0 (the "License");
+  you may not use this file except in compliance with the License.
+  You may obtain a copy of the License at
+
+      https://www.apache.org/licenses/LICENSE-2.0
+
+  Unless required by applicable law or agreed to in writing, software
+  distributed under the License is distributed on an "AS IS" BASIS,
+  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+  See the License for the specific language governing permissions and
+  limitations under the License.
+#}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CloudGauge</title>
+    <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&display=swap" rel="stylesheet">
+    <style>
+        :root { --primary-color: #4285F4; --background-color: #f8f9fa; --text-color: #3c4043; --border-color: #dfe1e5; --card-bg-color: #ffffff; }
+        body { font-family: 'Roboto', sans-serif; margin: 0; background-color: var(--background-color); color: var(--text-color); display: flex; align-items: center; justify-content: center; height: 100vh; }
+        .scan-card { background-color: var(--card-bg-color); padding: 40px; border-radius: 8px; box-shadow: 0 4px 10px rgba(0,0,0,0.08); text-align: center; max-width: 500px; width: 100%; }
+        h1 { font-weight: 500; }
+        p { color: #5f6368; margin-bottom: 30px; }
+        form { display: flex; flex-direction: column; gap: 20px; }
+        .form-group { text-align: left; }
+        label { font-weight: 500; display: block; margin-bottom: 5px; }
+        select, button { font-size: 16px; padding: 12px; border-radius: 5px; border: 1px solid var(--border-color); width: 100%; box-sizing: border-box; }
+        button { background-color: var(--primary-color); color: white; cursor: pointer; font-weight: 500; }
+        button:disabled { background-color: #e0e0e0; cursor: not-allowed; }
+        #loader { display: none; margin-top: 10px; font-style: italic; color: var(--text-color); }
+    </style>
+</head>
+<body>
+    <div class="scan-card">
+        <h1>Review Your Cloud Environment</h1>
+        <p>Select a scope and resource to begin a comprehensive review.</p>
+        <form action="/scan" method="post">
+            <div class="form-group">
+                <label for="scope">1. Select Scan Scope:</label>
+                <select id="scope" name="scope">
+                    <option value="" disabled selected>-- Choose a scope --</option>
+                    <option value="organization">Organization</option>
+                    <option value="folder">Folder</option>
+                    <option value="project">Project</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label for="scope_id">2. Select Resource:</label>
+                <select id="scope_id" name="scope_id" required disabled>
+                    <option value="" disabled selected>-- Select scope first --</option>
+                </select>
+                <div id="loader">Loading resources...</div>
+            </div>
+            <button id="submit-btn" type="submit" disabled>Start Scan</button>
+        </form>
+    </div>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', function() {
+            const scopeSelect = document.getElementById('scope');
+            const resourceSelect = document.getElementById('scope_id');
+            const loader = document.getElementById('loader');
+            const submitBtn = document.getElementById('submit-btn');
+
+            scopeSelect.addEventListener('change', async function() {
+                const selectedScope = this.value;
+                if (!selectedScope) return;
+
+                // Reset and show loader
+                resourceSelect.innerHTML = '<option value="" disabled selected>-- Loading... --</option>';
+                resourceSelect.disabled = true;
+                submitBtn.disabled = true;
+                loader.style.display = 'block';
+
+                try {
+                    const response = await fetch(`/api/list-resources?scope=${selectedScope}`);
+                    if (!response.ok) {
+                        throw new Error('Failed to fetch resources.');
+                    }
+                    const resources = await response.json();
+
+                    // Clear dropdown and add new options
+                    resourceSelect.innerHTML = '<option value="" disabled selected>-- Select a resource --</option>';
+                    if (resources.length > 0) {
+                        resources.forEach(resource => {
+                            const option = new Option(resource.name, resource.id);
+                            resourceSelect.appendChild(option);
+                        });
+                        resourceSelect.disabled = false;
+                    } else {
+                        resourceSelect.innerHTML = '<option value="" disabled selected>-- No resources found --</option>';
+                    }
+                } catch (error) {
+                    console.error('Error:', error);
+                    resourceSelect.innerHTML = '<option value="" disabled selected>-- Error loading resources --</option>';
+                } finally {
+                    loader.style.display = 'none';
+                }
+            });
+
+            resourceSelect.addEventListener('change', function() {
+                if (this.value) {
+                    submitBtn.disabled = false;
+                } else {
+                    submitBtn.disabled = true;
+                }
+            });
+        });
+    </script>
+</body>
+</html>

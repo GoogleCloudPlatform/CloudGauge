@@ -1,0 +1,101 @@
+{#
+  Copyright 2025 Google LLC
+
+  Licensed under the Apache License, Version 2.0 (the "License");
+  you may not use this file except in compliance with the License.
+  You may obtain a copy of the License at
+
+      https://www.apache.org/licenses/LICENSE-2.0
+
+  Unless required by applicable law or agreed to in writing, software
+  distributed under the License is distributed on an "AS IS" BASIS,
+  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+  See the License for the specific language governing permissions and
+  limitations under the License.
+#}
+{#
+  Building blocks of the report's category sections. Tables are emitted on a
+  single line, as the legacy report did; getGeminiSuggestions() in _script.js
+  reads the details tables and the fix-N placeholders.
+#}
+{% macro details_cell(details) -%}
+{% if details is not none -%}
+{% if details.kind == "table" -%}
+<table class='details-table'><thead><tr>{% for header in details.headers %}<th>{{ header }}</th>{% endfor %}</tr></thead><tbody>{% for row in details.rows %}<tr>{% for cell in row %}<td>{{ cell }}</td>{% endfor %}</tr>{% endfor %}</tbody></table>
+{%- else -%}
+{{ details.lines|join("<br>"|safe) }}
+{%- endif %}
+{%- endif %}
+{%- endmacro %}
+
+{% macro org_policy_rows(categories) -%}
+{% for category in categories -%}
+<tr class="category-header"><td colspan="4">{{ category.name }}</td></tr>
+{%- for row in category.rows -%}
+<tr><td>{{ row.display_name }}</td><td>{{ row.expected_value }}</td><td>{{ row.current_value }}</td><td class='status-text-{{ row.status_class }}'>{{ row.status }}</td></tr>
+{%- endfor %}
+{% endfor %}
+{%- endmacro %}
+
+{% macro org_policy_item(org_policies) %}
+<li class="status-{{ org_policies.status_class }}">
+    <span class="icon">{{ org_policies.icon }}</span>
+    <div class="check-content">
+        <strong>Organization Policies ({{ org_policies.compliant }}/{{ org_policies.total }} Compliant)</strong>
+        <div class="details">
+            <button class="btn toggle-btn" onclick="toggleSubSection(this)" style="margin-top: 5px;">View Details</button>
+            <div class="toggle-container" style="display:none; margin-top: 10px;">
+                <table class="styled-table">
+                    <thead><tr><th>Policy</th><th>Expected Value</th><th>Current Value</th><th>Status</th></tr></thead>
+                    <tbody>{{ org_policy_rows(org_policies.categories) }}</tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+    <span class="status-badge">{{ org_policies.compliant }}/{{ org_policies.total }} Compliant</span>
+</li>
+{% endmacro %}
+
+{% macro check_item(check) %}
+<li class="status-{{ check.status_class }}">
+    <span class="icon">{{ check.icon }}</span>
+    <div class="check-content">
+        <strong>{{ check.check_name }}</strong>
+        <div class="details">{{ details_cell(check.details) }}</div>
+        {% if check.fix_id is not none %}
+        <div class='remediation-placeholder' id='fix-{{ check.fix_id }}'></div>
+        {% endif %}
+    </div>
+    <span class="status-badge">{{ check.status }}</span>
+</li>
+{% endmacro %}
+
+{% macro category_section(section, scope_id) %}
+<div id="{{ section.section_id }}-section" class="content-section" style="display: none;">
+    <div class="checks-section">
+        <div class="section-header">
+            <h2>{{ section.title }}</h2>
+            <span class="score-badge score-{{ section.score_class }}">{{ section.score_display }}% Compliant</span>
+        </div>
+        <ul class="checks-list">
+            {% if section.org_policies is not none %}
+            {{ org_policy_item(section.org_policies) }}
+            {% endif %}
+            {% for check in section.checks %}
+            {{ check_item(check) }}
+            {% endfor %}
+        </ul>
+        {% if section.footer == "cost" %}
+        <div class="section-footer">
+            <p class="insights-intro">For a detailed breakdown of potential savings, use the button below to query the Recommender API (this may be slow).</p>
+            <button id="insights-btn" class="btn" onclick="fetchInsights(this)"><span class="loader"></span>Get Detailed Insights</button>
+            <div id="insights-placeholder" style="margin-top: 20px;"></div>
+        </div>
+        {% elif section.footer == "security" %}
+        <div class="section-footer">
+            <p>To get more security insights, <a href="https://console.cloud.google.com/active-assist/list/security/recommendations?organizationId={{ scope_id }}&supportedpurview=project" target="_blank">click here to go to your console</a>.</p>
+        </div>
+        {% endif %}
+    </div>
+</div>
+{% endmacro %}

@@ -1,0 +1,11 @@
+# Files `gcloud builds submit` leaves out of the uploaded source (without this
+# file it would upload .venv/).
+.gcloudignore
+.venv/
+**/__pycache__/
+**/*.pyc
+.pytest_cache/
+.ruff_cache/
+.git/
+.DS_Store
+*.log
