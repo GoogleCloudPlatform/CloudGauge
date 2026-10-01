@@ -13,9 +13,11 @@
 # limitations under the License.
 """Maps check result names to report categories.
 
-``CATEGORY_MAP`` is moved unchanged from the legacy ``_read_all_findings_from_gcs``.
-Its keys are the ``"Check"`` values that checks write. Findings whose name is
-not a key are left out of the report.
+``CATEGORY_MAP`` started as the legacy ``_read_all_findings_from_gcs`` map. Its
+keys are the ``"Check"`` values that checks write. Findings whose name is not a
+key are left out of the report, so every name a check can write must be here,
+including the names of error results (B1/B2; enforced by
+``tests/test_category_consistency.py``).
 """
 
 
@@ -54,7 +56,26 @@ CATEGORY_MAP = {
     "Dynamic Route Health": "Operational Excellence & Observability", "Cloud SQL Connectivity": "Operational Excellence & Observability",
     "VPC Firewall Complexity (>150 Rules)": "Operational Excellence & Observability",
     "Recent Changes (Org & Project)": "Operational Excellence & Observability", "Unattended Projects": "Operational Excellence & Observability",
-    "Quota Utilization (>80%)": "Operational Excellence & Observability"
+    "Quota Utilization (>80%)": "Operational Excellence & Observability",
+
+    # B2: error results. These names are only written when a check fails; the
+    # legacy map left them out, so failures silently disappeared from the report.
+    "Organization Policies": "Security & Identity",  # policy data couldn't be fetched
+    "Organization IAM Policy Check": "Security & Identity",
+    "Resilience Asset Checks": "Reliability & Resilience",
+    "Log Sink Check": "Operational Excellence & Observability",
+
+    # B2: display names from app.checks.registry. When a check raises, the runner
+    # records the error under this name. Names already mapped above aren't repeated;
+    # test_category_consistency.py checks every registry name maps to its category.
+    "Cost-Saving Recommendations": "Cost Optimization",
+    "GCS Bucket Versioning": "Reliability & Resilience",
+    "Resilience of Critical Assets": "Reliability & Resilience",
+    "Standalone VMs": "Operational Excellence & Observability",
+    "Network Insights": "Operational Excellence & Observability",
+    "Miscellaneous Checks": "Operational Excellence & Observability",
+    "Service Quota Limits": "Operational Excellence & Observability",
+    "Organization Audit Logging": "Operational Excellence & Observability",
 }
 
 

@@ -102,14 +102,14 @@ def check_scc_status(org_id, job_id, *, sink):
         tier = settings.get('tier', 'STANDARD')
         status = "Compliant" if tier == "PREMIUM" else "Action Required"
         finding = {"Tier": tier, "Recommendation": "Premium tier provides advanced threat detection." if status == "Action Required" else "N/A"}
-        result = {"Check": "Security Command Center", "Finding": [finding], "Status": status}
+        result = {"Check": CHECK_NAME, "Finding": [finding], "Status": status}
     except HttpError as e:
         if "API has not been used" in str(e) or e.resp.status == 404:
-            result = {"Check": "Security Command Center", "Finding": [{"Issue": "Security Command Center is not enabled for this organization."}], "Status": "Action Required"}
+            result = {"Check": CHECK_NAME, "Finding": [{"Issue": "Security Command Center is not enabled for this organization."}], "Status": "Action Required"}
         else:
-            result = {"Check": "Security Command Center", "Finding": [{"Error": str(e)}], "Status": "Error"}
+            result = {"Check": CHECK_NAME, "Finding": [{"Error": str(e)}], "Status": "Error"}
     except Exception as e:
-        result = {"Check": "Security Command Center", "Finding": [{"Error": str(e)}], "Status": "Error"}
+        result = {"Check": CHECK_NAME, "Finding": [{"Error": str(e)}], "Status": "Error"}
     sink.write_finding(job_id, CHECK_NAME.replace(" ", "_"), result)
 
 

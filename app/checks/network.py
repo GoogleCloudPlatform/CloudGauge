@@ -30,6 +30,20 @@ from google.cloud.recommender_v1.types import Insight
 from app.utils import call_api_with_backoff
 
 
+# Report name -> Network Analyzer insight type. The names are the "Check" values
+# the findings are written under; each must be a key of CATEGORY_MAP.
+NETWORK_INSIGHT_TYPES = {
+    "VPC IP Address Utilization": "google.networkanalyzer.vpcnetwork.ipAddressInsight",
+    "VPC Connectivity": "google.networkanalyzer.vpcnetwork.connectivityInsight",
+    "Load Balancer Health": "google.networkanalyzer.networkservices.loadBalancerInsight",
+    "GKE IP Address Utilization": "google.networkanalyzer.container.ipAddressInsight",
+    "GKE Connectivity": "google.networkanalyzer.container.connectivityInsight",
+    "GKE Service Account": "google.networkanalyzer.container.serviceAccountInsight",
+    "Dynamic Route Health": "google.networkanalyzer.hybridconnectivity.dynamicRouteInsight",
+    "Cloud SQL Connectivity": "google.networkanalyzer.managedservices.cloudSqlInsight",
+}
+
+
 # --- THIS HELPER FUNCTION DOES ALL THE PARSING ---
 def parse_network_insight_content(insight_dict, description, project_id, check_name):
     """
@@ -164,16 +178,7 @@ def run_network_insights(scope_id, all_projects, active_zones, active_regions, j
     
     all_locations = active_zones + active_regions
 
-    insight_type_map = {
-        "VPC IP Address Utilization": "google.networkanalyzer.vpcnetwork.ipAddressInsight",
-        "VPC Connectivity": "google.networkanalyzer.vpcnetwork.connectivityInsight",
-        "Load Balancer Health": "google.networkanalyzer.networkservices.loadBalancerInsight",
-        "GKE IP Address Utilization": "google.networkanalyzer.container.ipAddressInsight",
-        "GKE Connectivity": "google.networkanalyzer.container.connectivityInsight",
-        "GKE Service Account": "google.networkanalyzer.container.serviceAccountInsight",
-        "Dynamic Route Health": "google.networkanalyzer.hybridconnectivity.dynamicRouteInsight",
-        "Cloud SQL Connectivity": "google.networkanalyzer.managedservices.cloudSqlInsight",
-    }
+    insight_type_map = NETWORK_INSIGHT_TYPES
 
     def check_project(project):
         project_id = project['projectId']

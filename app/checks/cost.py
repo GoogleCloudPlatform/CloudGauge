@@ -32,6 +32,20 @@ from app.utils import call_api_with_backoff
 
 # --- Cost Optimization Checks ---
 
+# Report name -> (Recommender ID, location type). The names are the "Check" values
+# the findings are written under; each must be a key of CATEGORY_MAP.
+COST_RECOMMENDERS = {
+    "Idle Cloud SQL Instances": ("google.cloudsql.instance.IdleRecommender", "region"),
+    "Low Utilization VMs": ("google.compute.instance.IdleResourceRecommender", "zone"),
+    "VM Rightsizing": ("google.compute.instance.MachineTypeRecommender", "zone"),
+    "Unassociated IPs": ("google.compute.address.IdleResourceRecommender", "region"),
+    "Idle Load Balancers": ("google.compute.loadBalancer.IdleResourceRecommender", "region"),
+    "Idle Persistent Disks": ("google.compute.disk.IdleResourceRecommender", "zone"),
+    "Underutilized Reservations": ("google.compute.RightSizeResourceRecommender", "zone"),
+    "Idle Reservations": ("google.compute.IdleResourceRecommender", "zone"),
+}
+
+
 def parse_recommendation(reco, project_id):
     """Safely parses a recommendation proto to extract resource name and savings."""
     resource_name = "N/A"
@@ -111,16 +125,7 @@ def run_cost_recommendations(scope_id, all_projects, active_zones, active_region
     def check_project(project):
         project_id = project['projectId']
         findings_map = {}
-        recommender_map = {
-            "Idle Cloud SQL Instances": ("google.cloudsql.instance.IdleRecommender", "region"),
-            "Low Utilization VMs": ("google.compute.instance.IdleResourceRecommender", "zone"),
-            "VM Rightsizing": ("google.compute.instance.MachineTypeRecommender", "zone"),
-            "Unassociated IPs": ("google.compute.address.IdleResourceRecommender", "region"),
-            "Idle Load Balancers": ("google.compute.loadBalancer.IdleResourceRecommender", "region"),
-            "Idle Persistent Disks": ("google.compute.disk.IdleResourceRecommender", "zone"),
-            "Underutilized Reservations": ("google.compute.RightSizeResourceRecommender", "zone"),
-            "Idle Reservations": ("google.compute.IdleResourceRecommender", "zone"),
-        }
+        recommender_map = COST_RECOMMENDERS
         try:
             client = recommender_v1.RecommenderClient()
             for check, (rec_id, loc_type) in recommender_map.items():

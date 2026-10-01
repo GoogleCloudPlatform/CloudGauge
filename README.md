@@ -496,6 +496,8 @@ gcloud run services update-traffic ${SERVICE_NAME} --region ${REGION} --to-revis
 5. You will be redirected to a status page. Wait for the scan to complete (this can take 5-15 minutes depending on org size).  
 6. Once finished, links to the **Interactive HTML Report** and **Download CSV Report** will appear.
 
+> **Checks that can't run are reported, not hidden.** If a check fails (for example, a missing permission or a disabled API), the report shows it with status **Error** and the reason, in the check's own section. Errors count against that section's score, so fix the cause (see [Permission Denied on Google Cloud APIs](#permission-denied-on-google-cloud-apis)) for an accurate score. Organization scans also include the **Security Command Center Status** check.
+
 ## **Local Development & Testing**
 
 Requires Python 3.11.
