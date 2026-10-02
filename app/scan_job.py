@@ -20,18 +20,33 @@ CSV reports, uploads them, and marks the job complete. If anything fails, the
 error is written to the job's status file. Intermediate files are always
 deleted. The ``/run-scan`` route only turns the result into an HTTP response.
 
+Large scopes don't run here: when a ``fanout`` is given and the scope has more
+projects than one shard holds, the job is handed to ``app.fanout`` (the
+dispatcher enqueues one task per shard and returns), and the status page
+follows those tasks instead. Small scopes run inline exactly as before.
+
 It sits above ``app.checks`` and ``app.reporting`` so that neither depends on the other.
 """
 import traceback
 
 from app.checks.categories import categorize_findings
-from app.checks.runner import run_all_checks
+from app.checks.runner import list_projects, run_all_checks
 from app.reporting.csv_report import generate_csv_data
 from app.reporting.html_report import generate_html_report
 from app.utils import ThrottledProgressReporter
 
 
-def execute_scan_job(data, *, store, banner=None):
+def already_completed(store, job_id, scope_id):
+    """Whether the job's status says it is done (a retried task must not scan again)."""
+    try:
+        status = store.read_status(job_id, scope_id)
+    except Exception as e:
+        print(f"[{job_id}] Could not read the job's status ({e}); assuming it has not run.")
+        return False
+    return bool(status) and status.get("status") == "completed"
+
+
+def execute_scan_job(data, *, store, banner=None, fanout=None):
     """
     Executes the main `run_all_checks` function and uploads the generated reports
     to Google Cloud Storage.
@@ -41,19 +56,43 @@ def execute_scan_job(data, *, store, banner=None):
         store (GcsResultsStore): The results bucket: findings, status, and reports.
         banner (str, optional): A notice rendered at the top of the HTML report
             (the synthetic load mode marks its reports with one).
+        fanout (FanOut, optional): Runs scopes with more projects than one shard
+            holds as a sharded scan. ``None``: every scope runs inline.
 
     Returns:
-        bool: True if the reports were uploaded. False if the job failed; the error
+        bool: True if the reports were uploaded (or the job was dispatched to
+        shards, or had already completed). False if the job failed; the error
         was logged and, if the job is known, written to its status file.
     """
     scope_id, job_id = None, None
+    dispatched = False
     try:
         scope = data['scope']
         scope_id = data['scope_id']
         job_id = data['job_id']
         print(f"[{job_id}] Worker received task for ID: {scope_id}")
 
+        # Cloud Tasks delivers at least once: a task retried after the scan finished must not run it again.
+        if already_completed(store, job_id, scope_id):
+            print(f"[{job_id}] Job already completed; ignoring the duplicate task.")
+            dispatched = True  # nothing to clean up either
+            return True
+        if fanout is not None and fanout.is_dispatched(job_id):
+            # A retried dispatcher: the shards are planned; make sure every task exists and leave them to it.
+            print(f"[{job_id}] Job already dispatched to shards; re-enqueueing any missing shard tasks.")
+            fanout.dispatch(scope, scope_id, job_id)
+            dispatched = True
+            return True
+
         store.update_status(job_id, scope_id, 5, "Initializing scan and listing resources...")
+
+        projects = None
+        if fanout is not None:
+            projects = list_projects(scope, scope_id)
+            if fanout.should_fan_out(projects):
+                fanout.dispatch(scope, scope_id, job_id, projects)
+                dispatched = True
+                return True
 
         # --- Throttling logic setup ---
         # We will only update GCS if at least 2 seconds have passed since the last update.
@@ -61,7 +100,7 @@ def execute_scan_job(data, *, store, banner=None):
             lambda progress, current_task: store.update_status(job_id, scope_id, progress, current_task)
         )
 
-        run_all_checks(scope, scope_id, job_id, progress_callback=progress_reporter, sink=store)
+        run_all_checks(scope, scope_id, job_id, progress_callback=progress_reporter, sink=store, projects=projects)
 
         # --- Final, unconditional update after checks complete ---
         progress_reporter.flush()
@@ -92,5 +131,6 @@ def execute_scan_job(data, *, store, banner=None):
         return False
     finally:
         # CRUCIAL: Clean up all intermediate files from GCS for this job_id
-        if job_id:
+        # (not when the job runs in shards: they are writing there now).
+        if job_id and not dispatched:
             store.cleanup_intermediate(job_id)

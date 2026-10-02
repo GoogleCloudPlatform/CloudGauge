@@ -19,6 +19,7 @@ key are left out of the report, so every name a check can write must be here,
 including the names of error results (B1/B2; enforced by
 ``tests/test_category_consistency.py``).
 """
+import json
 
 
 CATEGORY_MAP = {
@@ -99,3 +100,47 @@ def categorize_findings(findings):
         if category:
             categorized_results[category].append(data)
     return categorized_results
+
+
+def merge_shard_findings(findings):
+    """
+    Merges the finding records of several shards into what one scan would have written.
+
+    A single scan writes one record per check and status (``{"Check", "Status",
+    "Finding": [row, ...]}``) covering every project. Shards each write their
+    own, covering their projects only, so the merge, per check name:
+
+    - drops the "all clear" records (``Status: Compliant``, e.g.
+      ``[{"Status": "No firewall rules found open to 0.0.0.0/0."}]``) of a check
+      that has findings in another shard (rendered together, the placeholder
+      would become a bogus table column: the report takes its headers from the
+      first row);
+    - collapses identical records into one (the placeholders of a check that is
+      compliant in every shard);
+    - joins the records that share a check name and status into one, with the
+      rows of every shard in shard order, so a check that found something in
+      several shards is one item with one table in the report, as in one scan.
+
+    Records keep their input order (a joined record sits where its first part
+    was) and are never shared with the input (the join copies the rows). A
+    single shard's findings pass through unchanged.
+    """
+    checks_with_findings = {f.get("Check") for f in findings if f.get("Status") != "Compliant"}
+    merged, by_key, seen = [], {}, set()
+    for finding in findings:
+        check_name, status = finding.get("Check"), finding.get("Status")
+        if status == "Compliant" and check_name in checks_with_findings:
+            continue
+        identity = json.dumps(finding, sort_keys=True, default=str)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        rows, first = finding.get("Finding"), by_key.get((check_name, status))
+        if first is not None and isinstance(rows, list) and isinstance(first.get("Finding"), list):
+            first["Finding"].extend(rows)
+            continue
+        if isinstance(rows, list):
+            finding = {**finding, "Finding": list(rows)}
+            by_key.setdefault((check_name, status), finding)
+        merged.append(finding)
+    return merged

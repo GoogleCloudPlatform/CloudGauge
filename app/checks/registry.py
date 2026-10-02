@@ -18,6 +18,7 @@ A check doesn't know how it is run: this module lists the checks, and
 ``app.checks`` modules, add a ``CheckSpec`` below, and add the names it
 reports to ``app.checks.categories.CATEGORY_MAP``.
 """
+import functools
 from typing import Any, Callable, NamedTuple
 
 from app.checks.cost import run_cost_recommendations
@@ -104,3 +105,49 @@ def build_check_plan(scope, scope_id, job_id, all_projects, active_zones, active
         all_checks_to_run.extend(org_only_checks)
 
     return all_checks_to_run
+
+
+# Checks that look at the scope itself rather than at its projects. A sharded
+# scan (app.fanout) runs them once, in the "scope" shard, and the project checks
+# once per shard of projects. Rule: a check is scope-level iff its arguments
+# don't include the project list (tests/test_fanout.py verifies this agrees).
+SCOPE_LEVEL_CHECKS = frozenset({
+    "Organization Policies", "Organization IAM Policy", "Security Command Center Status",
+    "Organization Audit Logging", "Essential Contacts", "Resilience of Critical Assets", "Personalized Service Health",
+})
+# The one check that does both: organization-wide insights plus per-project work.
+# Shards split it with its keyword flags (see run_miscellaneous_checks_refactored).
+MISCELLANEOUS_CHECK = "Miscellaneous Checks"
+
+
+def scope_check_plan(scope, scope_id, job_id):
+    """The scope-level checks of :func:`build_check_plan`: Organization Policies, plus, for an
+    organization, the org-only checks and the organization-wide half of the miscellaneous checks."""
+    plan = [spec for spec in build_check_plan(scope, scope_id, job_id, [], [], []) if spec.name in SCOPE_LEVEL_CHECKS]
+    if scope == 'organization':
+        plan.append(CheckSpec("Operational Excellence & Observability", MISCELLANEOUS_CHECK,
+                              functools.partial(run_miscellaneous_checks_refactored, project_checks=False),
+                              (scope, scope_id, [], job_id)))
+    return plan
+
+
+def project_check_plan(scope, scope_id, job_id, projects, active_zones, active_regions):
+    """The project-level checks of :func:`build_check_plan`, over ``projects`` only."""
+    plan = []
+    for spec in build_check_plan(scope, scope_id, job_id, projects, active_zones, active_regions):
+        if spec.name in SCOPE_LEVEL_CHECKS:
+            continue
+        if spec.name == MISCELLANEOUS_CHECK:
+            spec = spec._replace(func=functools.partial(spec.func, org_insights=False))
+        plan.append(spec)
+    return plan
+
+
+def shard_check_names(scope, scope_level):
+    """The names of the checks a shard owns: the scope shard's (``scope_level``) or a project shard's.
+
+    Pure (no clients, no network), so it works even when the shard itself could
+    not run: a sharded scan records one error row per name for such a shard.
+    """
+    plan = scope_check_plan(scope, "", "") if scope_level else project_check_plan(scope, "", "", [], [], [])
+    return [spec.name for spec in plan]

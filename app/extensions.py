@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 from flask import current_app
 
 from app.config import Settings
-from app.services import gcp
+from app.services import gcp, tasks
 from app.services.results_store import GcsResultsStore
 from app.services.worker_url import resolve_worker_url
 
@@ -41,12 +41,15 @@ class Services:
         worker_url: URL that Cloud Tasks calls; ``None`` means resolve it on first use.
         report_banner: Notice rendered on the pages and reports; ``None`` means none.
             The synthetic load mode sets it so no synthetic report can pass for a real one.
+        fanout: The sharded-scan orchestrator (``app.fanout.FanOut``); ``None`` means
+            build it on first use from the fields above.
     """
     settings: Settings
     results_store: GcsResultsStore
     tasks_client: object = None
     worker_url: str | None = None
     report_banner: str | None = None
+    fanout: object = None
     _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False, compare=False)
 
     def get_tasks_client(self):
@@ -62,6 +65,26 @@ class Services:
                 if self.worker_url is None:
                     self.worker_url = resolve_worker_url(self.settings)
         return self.worker_url
+
+    def enqueue_task(self, path, body, task_id, schedule_delay_seconds=None):
+        """Creates the named task ``task_id`` calling ``path`` on this service; ``False`` if it already exists."""
+        return tasks.enqueue_task(self.settings, self.get_worker_url(), path, body, task_id=task_id,
+                                  schedule_delay_seconds=schedule_delay_seconds, client=self.get_tasks_client())
+
+    def task_exists(self, task_id):
+        """Whether the named task is still on the queue (``None`` if the lookup failed)."""
+        return tasks.task_exists(self.settings, task_id, client=self.get_tasks_client())
+
+    def get_fanout(self):
+        """Returns the sharded-scan orchestrator, built on first use."""
+        if self.fanout is None:
+            from app.fanout import FanOut  # imports the checks and reporting; only needed by the worker routes
+
+            with self._lock:
+                if self.fanout is None:
+                    self.fanout = FanOut(self.settings, self.results_store, enqueue=self.enqueue_task,
+                                         task_exists=self.task_exists, banner=self.report_banner)
+        return self.fanout
 
 
 def build_services(settings):

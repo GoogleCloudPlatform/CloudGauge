@@ -97,7 +97,7 @@ def test_shim_builds_the_app_in_the_testing_profile():
     rules = json.loads(run_python(code, CLOUDGAUGE_ENV='testing'))
     expected = sorted([rule.rule, sorted(rule.methods), rule.endpoint] for rule in create_app(make_settings()).url_map.iter_rules())
     assert rules == expected
-    assert len(rules) == 11  # 10 routes and static
+    assert len(rules) == 14  # 13 routes and static
 
 
 def test_shim_fails_fast_without_configuration():

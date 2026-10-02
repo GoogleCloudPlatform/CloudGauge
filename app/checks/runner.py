@@ -14,19 +14,105 @@
 """Runs a scan's checks concurrently.
 
 ``run_all_checks`` replaces the legacy function of the same name. It lists the
-projects in scope, discovers active locations once, builds the plan with
-``app.checks.registry.build_check_plan``, and runs every check on a
-``ThreadPoolExecutor``. Checks write their findings through ``sink``. A check
-that raises is recorded as an ``ERROR_<name>`` finding and the scan continues.
+projects in scope (unless given them), discovers active locations once, builds
+the plan with ``app.checks.registry.build_check_plan``, and runs every check on
+a ``ThreadPoolExecutor`` through ``run_check_plan``, which the sharded scan
+(``app.fanout``) also uses for one shard's plan. Checks write their findings
+through ``sink``. A check that raises is recorded as an ``ERROR_<name>`` finding
+and the scan continues; so is a check that hasn't finished when the optional
+time budget runs out.
 """
 import concurrent.futures
+import time
 
 from app.checks.registry import build_check_plan
 from app.config import CHECK_RUNNER_MAX_WORKERS
 from app.services.resource_manager import get_active_compute_locations, list_projects_for_scope
 
 
-def run_all_checks(scope, scope_id, job_id, progress_callback=None, *, sink, max_workers=CHECK_RUNNER_MAX_WORKERS):
+def list_projects(scope, scope_id):
+    """Lists the ACTIVE projects in scope: the first step of every scan."""
+    print("🚀 Starting organization scan, fetching all projects first...")
+    return list_projects_for_scope(scope, scope_id)
+
+
+def error_finding(check_name, message):
+    """The finding the runner records for a check that failed or didn't finish."""
+    return {"Check": check_name, "Finding": [{"Error": message}], "Status": "Error"}
+
+
+def record_error(sink, job_id, check_name, message):
+    """Writes :func:`error_finding` under the ``ERROR_<name>`` file name."""
+    sink.write_finding(job_id, f"ERROR_{check_name}".replace(" ", "_"), error_finding(check_name, message))
+
+
+def run_check_plan(plan, job_id, *, sink, progress_callback=None, max_workers=CHECK_RUNNER_MAX_WORKERS,
+                   time_budget_seconds=None, clock=time.monotonic):
+    """Runs the ``CheckSpec`` entries of ``plan`` concurrently and returns a summary.
+
+    Args:
+        plan: ``CheckSpec`` entries; each is called as ``func(*args, sink=sink)``.
+        job_id: The scan's job ID, used to name the findings.
+        sink: Where checks (and the runner's error records) write their findings.
+        progress_callback: Called after every check with ``progress`` (5..95) and ``current_task``.
+        max_workers: Number of checks that run at the same time.
+        time_budget_seconds: If set, checks that have not finished by then are
+            recorded as errors and the call returns without waiting for them
+            (queued ones are cancelled; running ones finish in the background).
+        clock: Monotonic clock (tests).
+
+    Returns:
+        dict: ``{"checks", "completed", "failed", "unfinished": [names]}``.
+    """
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
+    started = clock()
+    # This map directly links each running task (future) to its specific name and category.
+    future_to_info = {
+        executor.submit(func, *args, sink=sink): {"category": category, "name": name}
+        for category, name, func, args in plan
+    }
+    total_checks = len(future_to_info)
+    completed_checks, failed = 0, 0
+    pending = set(future_to_info)
+    timed_out = False
+
+    while pending:
+        timeout = None
+        if time_budget_seconds is not None:
+            timeout = max(0.0, time_budget_seconds - (clock() - started))
+        done, pending = concurrent.futures.wait(pending, timeout=timeout, return_when=concurrent.futures.FIRST_COMPLETED)
+        if not done:
+            timed_out = True
+            break
+        for future in done:
+            check_name = future_to_info[future]["name"]  # This will now ALWAYS be the specific name.
+            try:
+                future.result()  # Call result to raise exceptions, but don't store return value
+            except Exception as e:
+                print(f"❌ Check '{check_name}' failed critically: {e}")
+                failed += 1
+                # Optionally write an error finding to a temp file
+                record_error(sink, job_id, check_name, str(e))
+            finally:
+                completed_checks += 1
+                progress = 5 + int((completed_checks / total_checks) * 90)
+                if progress_callback:
+                    progress_callback(progress=progress, current_task=f"({completed_checks}/{total_checks}) Finished: {check_name}")
+
+    unfinished = []
+    if timed_out:
+        for future in pending:
+            future.cancel()
+            check_name = future_to_info[future]["name"]
+            unfinished.append(check_name)
+            print(f"⏱️ Check '{check_name}' did not finish within the {time_budget_seconds:.0f} s budget.")
+            record_error(sink, job_id, check_name, f"Check did not finish within the shard's time budget of {time_budget_seconds:.0f} seconds.")
+    # Don't block on checks that are still running after a timeout: the caller must answer Cloud Tasks.
+    executor.shutdown(wait=not timed_out, cancel_futures=True)
+    return {"checks": total_checks, "completed": completed_checks, "failed": failed, "unfinished": sorted(unfinished)}
+
+
+def run_all_checks(scope, scope_id, job_id, progress_callback=None, *, sink, max_workers=CHECK_RUNNER_MAX_WORKERS, projects=None):
     """
     Orchestrates the entire scan by running all check functions in parallel.
     Groups the results into high-level categories for reporting.
@@ -38,14 +124,15 @@ def run_all_checks(scope, scope_id, job_id, progress_callback=None, *, sink, max
         progress_callback (function, optional): A function to call with progress updates.
         sink (GcsResultsStore): Where checks write their findings.
         max_workers (int): Number of checks that run at the same time.
+        projects (list, optional): The projects in scope, if the caller has
+            already listed them; ``None`` lists them here.
 
     Returns:
         dict: A dictionary containing all categorized findings.
         (In practice: ``True`` once every check has finished, or
         ``{"error": ...}`` if no projects were found. Findings are in ``sink``.)
     """
-    print("🚀 Starting organization scan, fetching all projects first...")
-    all_projects = list_projects_for_scope(scope, scope_id)
+    all_projects = list_projects(scope, scope_id) if projects is None else projects
     if not all_projects:
         print("❌ No active projects found or failed to list projects. Aborting scan.")
         return {"error": "Could not retrieve project list."}
@@ -57,32 +144,5 @@ def run_all_checks(scope, scope_id, job_id, progress_callback=None, *, sink, max
 
     # The registry lists every check as (Category, Friendly Name, function_to_run, (tuple_of_arguments,))
     all_checks_to_run = build_check_plan(scope, scope_id, job_id, all_projects, active_zones, active_regions)
-
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-        # This map directly links each running task (future) to its specific name and category.
-        future_to_info = {
-            executor.submit(func, *args, sink=sink): {"category": category, "name": name}
-            for category, name, func, args in all_checks_to_run
-        }
-
-        total_checks = len(future_to_info)
-        completed_checks = 0
-
-        for future in concurrent.futures.as_completed(future_to_info):
-            info = future_to_info[future]
-            check_name = info["name"] # This will now ALWAYS be the specific name.
-
-            try:
-                future.result()  # Call result to raise exceptions, but don't store return value
-            except Exception as e:
-                print(f"❌ Check '{check_name}' failed critically: {e}")
-                # Optionally write an error finding to a temp file
-                error_result = {"Check": check_name, "Finding": [{"Error": str(e)}], "Status": "Error"}
-                sink.write_finding(job_id, f"ERROR_{check_name}".replace(" ", "_"), error_result)
-            finally:
-                completed_checks += 1
-                progress = 5 + int((completed_checks / total_checks) * 90)
-                if progress_callback:
-                    progress_callback(progress=progress, current_task=f"({completed_checks}/{total_checks}) Finished: {check_name}")
-
+    run_check_plan(all_checks_to_run, job_id, sink=sink, progress_callback=progress_callback, max_workers=max_workers)
     return True

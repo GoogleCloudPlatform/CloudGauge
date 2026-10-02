@@ -73,6 +73,9 @@ def test_scan_enqueues_the_legacy_task(legacy_client, client, gcp, monkeypatch):
     assert response.headers['Location'] == f'/status/{job_id}/folder/42'
 
     (legacy_parent, legacy_task), (parent, task) = gcp.tasks.tasks
+    # New: the task has a dispatch deadline (the legacy task had none, so Cloud Tasks
+    # retried a scan still running after 10 minutes). Everything else is the legacy task.
+    assert task.pop('dispatch_deadline') == timedelta(minutes=30)
     assert (parent, task) == (legacy_parent, legacy_task)
     assert parent == 'projects/test-project/locations/us-central1/queues/test-queue'
     request = task['http_request']

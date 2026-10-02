@@ -112,7 +112,7 @@ def scripted_scan(legacy, monkeypatch):
     def legacy_run_all_checks(scope, scope_id, job_id, progress_callback=None):
         return run(legacy._write_finding_to_gcs, legacy._write_org_policies_to_gcs, scope, scope_id, job_id, progress_callback)
 
-    def new_run_all_checks(scope, scope_id, job_id, progress_callback=None, *, sink):
+    def new_run_all_checks(scope, scope_id, job_id, progress_callback=None, *, sink, projects=None):
         return run(sink.write_finding, sink.write_org_policies, scope, scope_id, job_id, progress_callback)
 
     monkeypatch.setattr(legacy, 'run_all_checks', legacy_run_all_checks)

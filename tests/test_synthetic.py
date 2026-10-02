@@ -307,3 +307,30 @@ def test_offline_harness_runs_a_scan_and_writes_reports(gcp, tmp_path, capsys):
     result = json.loads(json_path.read_text())
     assert result['outcome']['ok'] and result['api']['total_calls'] > 50 and result['report']['error_checks'] == []
     assert (tmp_path / 'organization-6-seed42.html').exists() and (tmp_path / 'organization-6-seed42.csv').exists()
+
+
+def test_offline_harness_runs_a_sharded_scan(gcp, tmp_path, capsys):
+    from tools import synthetic_scan
+
+    json_path = tmp_path / 'metrics.json'
+    code = synthetic_scan.main(['--projects', '7', '--shard-size', '3', '--concurrency', '2', '--latency-ms', '0', '--quiet',
+                                '--output-dir', str(tmp_path), '--json', str(json_path)])
+    assert code == 0
+    out = capsys.readouterr().out
+    assert 'RESULT: ok (status=completed)' in out and 'Sharded: 4 shards of 3, 2 at a time' in out
+    assert 'coverage: 7 of 7 projects scanned (100%) · 4 shards · scope-level checks: completed' in out
+    result = json.loads(json_path.read_text())
+    sharding = result['sharding']
+    assert (sharding['shards'], sharding['shard_attempts'], sharding['shard_retries'], sharding['failed_shards']) == (4, 4, 0, 0)
+    assert sharding['aggregation_attempts'] == 1 and sharding['sweeps'] == 1 and sharding['dispatch_seconds'] >= 0
+    assert [d['path'] for d in sharding['deliveries']][-2:] == ['/run-aggregation', '/sweep']
+    assert result['report']['error_checks'] == [] and result['results_bucket']['deletes'] > 50  # the shards' files were cleaned up
+    sharded = (tmp_path / 'organization-7-seed42-shards3.csv').read_text()
+    assert synthetic_scan.main(['--projects', '7', '--latency-ms', '0', '--quiet', '--output-dir', str(tmp_path)]) == 0
+    single = (tmp_path / 'organization-7-seed42.csv').read_text()
+
+    def data_rows(text):  # headers are taken from a record's first row, whose keys can vary with thread timing
+        return sorted(line for line in text.splitlines() if line and not line.startswith(('Check,', 'Category,')))
+
+    assert data_rows(sharded) == data_rows(single) and len(data_rows(single)) > 50
+    assert len(sharded.splitlines()) == len(single.splitlines())  # same records: same headers and spacers

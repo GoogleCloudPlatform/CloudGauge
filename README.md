@@ -80,24 +80,24 @@ CloudGauge scans your organization across several key domains, modeled after the
 
 ##  **Architecture**
 
-The application follows a robust, scalable, and asynchronous "fire-and-forget" pattern. This ensures the user gets an immediate response while the heavy work (which can take many minutes) is done in the background.
+The application follows a robust, scalable, and asynchronous "fire-and-forget" pattern. This ensures the user gets an immediate response while the heavy work (which can take many minutes) is done in the background. The same flow serves a single project and an organization with thousands of projects; the difference is only in how the work is split behind the scenes.
 
 1.  **UI Trigger**: A user navigates to the Cloud Run URL and submits an Organization ID.
 2.  **Task Creation**: The `/scan` endpoint creates a **Cloud Task** with the scan details and redirects the user to a status page.
-3.  **Background Worker**: Cloud Tasks securely invokes the `/run-scan` endpoint in the background.
-4.  **Parallel Processing**: The worker executes dozens of checks concurrently using a thread pool (`app/checks/runner.py`). Each finding is written to an intermediate file in GCS as soon as it is found.
-5.  **Report Storage**: The worker aggregates the findings, generates the HTML/CSV reports, uploads them to Google Cloud Storage, and deletes the intermediate files.
-6.  **Status Polling**: The user's status page polls an API endpoint until the report files are found in GCS, at which point it displays the download links.
+3.  **Background Worker**: Cloud Tasks securely invokes the `/run-scan` endpoint in the background. The worker lists the projects in scope and decides:
+    * **Up to `SCAN_SHARD_SIZE` projects (default 20)**: it runs the whole scan in this one request, exactly as before.
+    * **More projects**: it becomes a **dispatcher**. It writes the job's *manifest* (which projects belong to which shard), enqueues one `/scan-shard` task per shard of `SCAN_SHARD_SIZE` projects plus one **scope shard** for the checks that look at the organization itself (Organization Policies, org IAM, SCC, audit logging, Essential Contacts, ...), schedules a *sweeper*, and returns within seconds.
+4.  **Parallel Processing**: Each shard executes its checks concurrently using a thread pool (`app/checks/runner.py`) under a time budget (`SHARD_TIME_BUDGET_SECONDS`). Every finding is written to an intermediate file in GCS as soon as it is found. Cloud Tasks runs up to `SCAN_MAX_CONCURRENT_SHARDS` shards at a time and retries a failed shard; a shard that fails on its last attempt records its checks as error rows so one bad shard never costs the whole report.
+5.  **Automatic Fan-in**: When a shard finishes it writes a *marker* file. The shard that sees a marker for every shard enqueues the `/run-aggregation` task. The task name is deterministic (`<job>-aggregate`), so when two shards finish together Cloud Tasks accepts only one; nothing is counted, nothing needs a database. The `/sweep` task runs every `SWEEP_INTERVAL_SECONDS` as a safety net: it gives shards whose task has vanished error rows and finishes the job, so a scan always terminates.
+6.  **Report Storage**: The aggregation merges the shards' findings into the same report a single-task scan produces (one item per check, with a **coverage** line stating how many projects were scanned), generates the HTML/CSV reports, uploads them to Google Cloud Storage, and deletes the intermediate files.
+7.  **Status Polling**: The user's status page polls an API endpoint; for a sharded scan it shows *"Scanned 640 of 1,000 projects (32/51 shards done)"* until the report files are found in GCS, at which point it displays the download links.
 
 ### **Architecture Diagram**
 
-The diagram below illustrates the asynchronous "fire-and-forget" pattern.
+The diagram below illustrates the asynchronous "fire-and-forget" pattern with the sharded path a large scope takes.
 
 ```mermaid
 graph LR
-    %% The diagram is now Left-to-Right for a clearer flow.
-    %% Custom styling has been removed to ensure readability on any background.
-
     %% Column 1: User
     subgraph User
         A[Selects Scan Scope] --> B{Lists Resources};
@@ -110,40 +110,58 @@ graph LR
         D -- "1. POST Request" --> E{Scan Endpoint};
         E -- "2. Creates Task" --> F[(Cloud Tasks)];
         E -- "3. Redirects" --> G[Status Page];
-        G -- "7. Polls API" --> H{Status API};
+        G -- "Polls API" --> H{Status API};
     end
 
-    %% Column 3: The "Backend" part of the Cloud Run service (the worker)
-    subgraph Cloud Run - Background Worker
-        F -- "4. Invokes Worker" --> I{Worker Endpoint};
-        subgraph Worker Process
-            I --> J[1. Init status.json];
-            J --> K{2. Start Parallel Checks};
-            K -- "Dispatches" --> L1[IAM Checks];
-            K -- "Dispatches" --> L2[Cost Checks];
-            K -- "Dispatches" --> L3[...];
-            L1 -- "Writes to" --> M([Intermediate Findings in GCS]);
-            L2 -- "Writes to" --> M;
-            L3 -- "Writes to" --> M;
-            M --> N[3. Aggregate Findings];
-            N --> O[4. Generate Reports];
-            O --> P[5. Upload Reports];
-            P --> Q[6. Cleanup Intermediate Files];
-        end
+    %% Column 3: The dispatcher (the same Cloud Run service, invoked by Cloud Tasks)
+    subgraph Cloud Run - Dispatcher
+        F -- "4. Invokes /run-scan" --> I{Lists Projects};
+        I -- "up to SCAN_SHARD_SIZE projects" --> J[Runs every check in this request];
+        I -- "more projects" --> K[Writes manifest];
+        K -- "5. One task per shard + scope shard + sweep" --> F;
     end
 
-    %% Column 4: External Google Cloud Services
+    %% Column 4: The shards (concurrent Cloud Run requests)
+    subgraph Cloud Run - Shards
+        F -- "6. Invokes /scan-shard (N at a time)" --> L[Shard: 20 projects, every project check];
+        F -- "6. Invokes /scan-shard" --> S[Scope shard: org-level checks];
+        L -- "Writes findings + marker" --> M([Intermediate Findings in GCS]);
+        S -- "Writes findings + marker" --> M;
+        L -- "7. Last marker? Enqueue aggregation (named task)" --> F;
+        F -- "Every 30 min: /sweep" --> SW[Sweeper: finishes a job whose shards died];
+    end
+
+    %% Column 5: Aggregation and delivery
+    subgraph Cloud Run - Aggregation
+        F -- "8. Invokes /run-aggregation" --> N[Merges every shard's findings];
+        J --> N;
+        M --> N;
+        N --> O[Generates Reports with coverage];
+        O --> P[Uploads Reports];
+        P --> Q[Cleans up intermediate files];
+    end
+
+    %% External Google Cloud Services
     subgraph External GCP Services
-        L1 -- "queries" --> APIS([Cloud APIs]);
-        L2 -- "queries" --> APIS;
-        L3 -- "queries" --> APIS;
-        
+        L -- "queries" --> APIS([Cloud APIs]);
+        S -- "queries" --> APIS;
         H -- "reads" --> GCS_STATUS([status.json in GCS]);
-        K -- "sends progress updates to" --> GCS_STATUS;
-        
+        L -- "progress: shards done / projects scanned" --> GCS_STATUS;
         P -- "writes to" --> GCS_REPORTS([Final Reports in GCS]);
     end
 ```
+
+### **Scaling to Large Organizations**
+
+A single request scanning 1,000 projects used to hang, run out of memory, or trip API quotas, and recovering meant a separate "aggregate" step. Sharding removes the ceiling without changing the user's workflow:
+
+* **Bounded work per request.** A shard holds `SCAN_SHARD_SIZE` projects (default 20) and has `SHARD_TIME_BUDGET_SECONDS` (default 20 minutes) for its checks; checks that do not finish in time are reported as errors for that shard, the rest of the shard is kept. Each shard task has a 30-minute Cloud Tasks dispatch deadline, so set the Cloud Run request timeout to at least `1800` (the instructions use `3600`).
+* **Bounded load on the APIs.** The queue created at startup allows `SCAN_MAX_CONCURRENT_SHARDS` (default 25) concurrent dispatches, 3 attempts per task, and 30 s–10 min back-off. If the queue already exists with different limits, the service logs a warning with the `gcloud tasks queues update ...` command to apply them (it never changes an existing queue by itself).
+* **Spread across instances.** Deploy the service with a low request concurrency (the instructions use `--concurrency=4`) so that a burst of shards is spread over several Cloud Run instances instead of piling onto one.
+* **Always terminates.** Markers in GCS plus deterministic task names make the fan-in exact and idempotent: retried or duplicated deliveries re-check the markers and never aggregate twice. A shard that crashes on every attempt is caught by the sweeper (`SWEEP_INTERVAL_SECONDS`, at most 12 sweeps), and the report is delivered with that shard's checks as error rows and an amber coverage line. Partial reports are deliberate: an organization-wide report with 980 of 1,000 projects beats no report.
+* **Same report.** The merged report is the one a single-task scan would have written for the same organization (the test suite verifies this against the synthetic organization), plus the coverage line.
+
+The sizes can be tuned per deployment (see [Configuration Reference](#configuration-reference)); `tools/synthetic_scan.py --shard-size 20` rehearses the whole flow offline (see [Load Testing](#load-testing-with-a-synthetic-organization)).
 
 ### **Project Structure**
 
@@ -156,11 +174,12 @@ app/
 ├── __init__.py          # create_app(): settings, startup checks, blueprints
 ├── config.py            # Settings read from environment variables; profiles
 ├── extensions.py        # Shared, lazily created clients and the resolved worker URL
-├── scan_job.py          # Background scan: run checks -> build reports -> upload -> clean up
+├── scan_job.py          # Background scan: run checks -> build reports -> upload -> clean up (or dispatch shards)
+├── fanout.py            # Sharded scans: dispatcher, shard worker, marker fan-in, aggregation, sweeper
 ├── routes/              # Blueprints
 │   ├── ui.py            #   /, /scan, /status/..., /report/...
 │   ├── api.py           #   /api/list-resources, /api/status/..., /api/get-summary, ...
-│   └── worker.py        #   /run-scan (invoked by Cloud Tasks)
+│   └── worker.py        #   /run-scan, /scan-shard, /run-aggregation, /sweep (invoked by Cloud Tasks)
 ├── checks/              # Checks grouped by pillar: security, cost, reliability, operations, network
 │   ├── registry.py      #   The check plan: which checks run, and in what order
 │   ├── runner.py        #   Runs the plan concurrently (ThreadPoolExecutor) and reports progress
@@ -330,7 +349,7 @@ Now, let's create the initial Cloud Run service and connect it to your new repos
    * **Region**: Choose a region, for example, `asia-south1`.  
 9. Expand the "Container(s), Volumes, Networking, Security" section.  
    * Go to the **Identity & Security** tab and select the service account you previously created (e.g., `cloudgauge-sa@...`).  
-   * Go to the **General** tab and set the **Request Timeout** to `3600` seconds.  
+   * Go to the **General** tab and set the **Request Timeout** to `3600` seconds, and under **Requests** set the **Maximum concurrent requests per instance** to `4` (the shards of a large scan then spread over several instances; see [Scaling to Large Organizations](#scaling-to-large-organizations)).  
    * Go to the **Variables & Secrets** tab and add the following **Environment Variables**. Replace the example values with your own.  
      * `PROJECT_ID`: Your GCP Project ID (e.g., `my-gcp-project`)  
      * `TASK_QUEUE`: `cloudgauge-scan-queue`  
@@ -412,9 +431,11 @@ gcloud run deploy ${SERVICE_NAME} \
   --allow-unauthenticated \
   --platform managed \
   --timeout=3600 \
-  --memory=1Gi \
+  --concurrency=4 \
+  --memory=2Gi \
   --set-env-vars=PROJECT_ID=${PROJECT_ID},TASK_QUEUE=${QUEUE_NAME},RESULTS_BUCKET=${BUCKET_NAME},SERVICE_ACCOUNT_EMAIL=${SA_EMAIL},LOCATION=${REGION}
 ```
+   * `--timeout=3600` and `--concurrency=4` matter for large organizations: a shard of a sharded scan may run for up to 30 minutes, and a low per-instance concurrency spreads a burst of shards over several instances (see [Scaling to Large Organizations](#scaling-to-large-organizations)). For an existing service: `gcloud run services update ${SERVICE_NAME} --region ${REGION} --timeout=3600 --concurrency=4`.
 4. **Grant Invoker & Viewer Permission**:  
    * Now that the service exists, give its SA permission to invoke it.
 ```
@@ -447,12 +468,25 @@ CloudGauge is configured entirely through environment variables on the Cloud Run
 | `WORKER_URL` | No | auto-discovered | URL that Cloud Tasks calls for `/run-scan`. By default the service discovers its own URL at startup (needs `roles/run.viewer`). Set it to override discovery, for example for a tagged canary revision. |
 | `WORKER_AUDIENCE` | No | the task URL | Audience of the OIDC token on scan tasks. Leave unset normally. For a canary, set it to the service's **main** URL: Cloud Run rejects tokens whose audience is a revision tag URL (HTTP 401). |
 | `BEST_PRACTICES_CSV_URL` | No | GitHub-hosted CSV | Source of the best-practice list used by the Organization Policies check. |
+| `SCAN_SHARD_SIZE` | No | `20` | Projects per shard. A scope with more projects than this runs as a sharded scan (see [Scaling to Large Organizations](#scaling-to-large-organizations)); up to this many, in one task as before. |
+| `SCAN_MAX_CONCURRENT_SHARDS` | No | `25` | Shards Cloud Tasks runs at a time (the queue's max concurrent dispatches). Lower it if the organization's API quotas are tight, raise it for speed. |
+| `SHARD_TIME_BUDGET_SECONDS` | No | `1200` | Time a shard gives its checks (60–1800). Checks still running when it runs out are reported as errors for that shard. |
+| `TASK_DISPATCH_DEADLINE_SECONDS` | No | `1800` | Cloud Tasks deadline for one attempt of a task (15–1800, the Cloud Tasks maximum). Keep it above the shard time budget and below the Cloud Run request timeout. |
+| `SWEEP_INTERVAL_SECONDS` | No | `1800` | How often the sweeper checks on a sharded job (at most 12 sweeps per job). |
+| `TASK_MAX_ATTEMPTS` | No | `3` | Attempts per task. Must match the queue's `maxAttempts`: a shard that fails on its last attempt records its checks as error rows instead of retrying forever. |
 | `CLOUDGAUGE_ENV` | No | `production` | `production` runs the startup checks (required variables, worker URL, queue). `development` and `testing` skip them. `synthetic` is production with a simulated data plane for load tests (see [Load Testing](#load-testing-with-a-synthetic-organization)). |
 | `SYNTHETIC_PROJECTS` | With `synthetic` | – | Number of generated projects. Required by, and only read in, the `synthetic` profile. |
 | `SYNTHETIC_SEED` | No | `42` | Seed of the generated organization. Same seed, same organization. |
 | `SYNTHETIC_LATENCY_MS` | No | `150` | Median simulated latency per API call, in milliseconds. `0` for CPU-only runs. |
 | `SYNTHETIC_ERROR_RATE` | No | `0` | Fraction (0–1) of simulated API calls that fail with HTTP 429 / `RESOURCE_EXHAUSTED`. |
 | `SYNTHETIC_DENIED_FRACTION` | No | `0.02` | Fraction (0–1) of generated projects whose APIs all answer 403 (missing permissions). |
+
+The service creates the queue with `SCAN_MAX_CONCURRENT_SHARDS` concurrent dispatches, `TASK_MAX_ATTEMPTS` attempts, and 30 s–10 min back-off. It never modifies a queue that already exists; if the limits differ it logs a warning with the command to apply them, for example:
+
+```
+gcloud tasks queues update ${QUEUE_NAME} --location ${REGION} \
+  --max-concurrent-dispatches=25 --max-attempts=3 --min-backoff=30s --max-backoff=600s
+```
 
 ## **Updating an Existing Deployment (Zero-Downtime)**
 
@@ -557,21 +591,24 @@ python tools/synthetic_scan.py --projects 100                     # 150 ms media
 python tools/synthetic_scan.py --projects 1000 --latency-ms 0     # CPU and call counts only, in seconds
 python tools/synthetic_scan.py --projects 50 --error-rate 0.02 --denied-fraction 0.1 --scope folder
 python tools/synthetic_scan.py --projects 200 --quiet --json run.json   # machine-readable, for comparing runs
+python tools/synthetic_scan.py --projects 1000 --shard-size 20 --concurrency 25   # the sharded path, in-process
 ```
 
 Reports are written to `synthetic-reports/` (or `--output-dir`). Add `--quiet` to hide the scan's own log lines.
+
+With `--shard-size`, the harness runs the job the way the deployed service runs a large scope: the dispatcher plans the shards, an in-process queue plays Cloud Tasks (named tasks created once, `--concurrency` deliveries at a time, retries up to `--max-attempts`), every shard runs its checks under `--shard-budget-seconds`, the last one triggers the aggregation, and the sweeper finds the job complete. The summary adds the dispatch time, the median and longest shard, retries, the aggregation time, and the report's coverage line. The reports of a sharded and a single-task run of the same organization contain the same checks, statuses and rows.
 
 **2. Deployed, end to end.** Deploy the normal image as a *separate* Cloud Run service (or a no-traffic tagged revision) with `CLOUDGAUGE_ENV=synthetic` and `SYNTHETIC_PROJECTS=<n>`, plus the usual required variables. Cloud Run, Cloud Tasks and the results bucket are real, so request timeouts, task deadlines and retries, memory limits and status polling behave exactly as they would for a real organization of that size, while no Google Cloud API other than the Cloud Run Admin API (worker URL discovery) is called. The scope picker lists the generated organization, folders and projects. Every page and report carries a **SYNTHETIC LOAD TEST** banner, and the mode cannot be switched on by accident: it needs both the profile *and* `SYNTHETIC_PROJECTS`, and the production profile ignores all `SYNTHETIC_*` variables.
 
 ```
 gcloud run deploy cloudgauge-loadtest --region ${REGION} --image ${IMAGE}:${TAG} \
-  --service-account ${SERVICE_ACCOUNT_EMAIL} --memory 2Gi --timeout 3600 \
+  --service-account ${SERVICE_ACCOUNT_EMAIL} --memory 2Gi --timeout 3600 --concurrency 4 \
   --set-env-vars PROJECT_ID=${PROJECT_ID},LOCATION=${REGION},TASK_QUEUE=cloudgauge-loadtest-queue,\
 RESULTS_BUCKET=${RESULTS_BUCKET},SERVICE_ACCOUNT_EMAIL=${SERVICE_ACCOUNT_EMAIL},\
 CLOUDGAUGE_ENV=synthetic,SYNTHETIC_PROJECTS=1000
 ```
 
-> **What a first run shows.** With the default 150 ms latency, 20 projects take about 8 minutes and ~3,600 API calls (≈180 per project, three quarters of them Recommender `insights.list` / `recommendations.list`), while only ~2 calls are in flight on average: most checks walk the projects one at a time. Scan time therefore grows linearly with the number of projects (≈40 minutes for 100, hours for 1,000), which is the behaviour the fan-out architecture work targets.
+> **What the runs show.** With the default 150 ms latency, 20 projects take about 8 minutes and ~3,600 API calls (≈180 per project, three quarters of them Recommender `insights.list` / `recommendations.list`), while only ~2 calls are in flight on average: most checks walk the projects one at a time, so a single task's scan time grows linearly with the number of projects (≈40 minutes for 100, hours for 1,000). Sharded (`--shard-size 20 --concurrency 25`), the same 1,000-project organization completes in **16 minutes**: 51 shards, median shard 7.8 minutes and longest 8.1 (well inside the 20-minute budget), ~490 API calls in flight at the peak, no retries, 100% coverage, and the aggregation of 1,260 intermediate objects into a 1.1 MB HTML / 11,000-line CSV report takes under a second. The peak in-flight calls is the number to compare with the organization's API quotas when choosing `SCAN_MAX_CONCURRENT_SHARDS`.
 
 ## **Troubleshooting**
 
@@ -662,6 +699,13 @@ gcloud run services update cloudgauge-service \
   --timeout=3600 \
   --region=<your-region>
 ```
+---
+
+#### **A Large Scan Reports "Partially Scanned" or Error Rows**
+
+* **Symptom**: The status page of a scan with more than `SCAN_SHARD_SIZE` projects shows *"Scanned X of Y projects (N/M shards done, K with errors)"*, and the report's **Coverage** line is amber: some projects are *partially scanned* or *not scanned*, and checks list rows such as *"Shard shard-012 failed after 3 attempts ..."* or *"Check did not finish within the shard's time budget"*.
+* **Cause**: The scan ran as a sharded scan (see [Scaling to Large Organizations](#scaling-to-large-organizations)) and a shard hit an error on every attempt, ran out of its time budget, or its task vanished (for example the instance ran out of memory, or the Cloud Run request timeout is below the 30-minute task deadline). The report is delivered anyway, with the affected checks as error rows, instead of failing the whole scan.
+* **Solution**: The row's text names the shard and the error; the shard's log lines are prefixed with the job ID and shard ID (filter the Cloud Run logs on `[<job-id>] Shard shard-012`). Typical fixes: raise the Cloud Run request timeout to `3600` and memory to `2Gi`, set `--concurrency=4`, lower `SCAN_MAX_CONCURRENT_SHARDS` if the errors are API quota errors (`429`), or raise `SHARD_TIME_BUDGET_SECONDS` (up to `1800`) if checks time out. Re-run the scan afterwards.
 ---
 
 #### **Builds Fail in a VPC Service Controls Environment**

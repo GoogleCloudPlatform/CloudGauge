@@ -41,8 +41,13 @@ ROUTES = {
     '/api/get-suggestions': ({'POST'}, 'get_suggestions', 'api.get_suggestions'),
     '/run-scan': ({'POST'}, 'run_scan_worker', 'worker.run_scan_worker'),
     '/static/<path:filename>': ({'GET'}, 'static', 'static'),
+    # New with sharded scans (app.fanout); Cloud Tasks is their only caller. No legacy endpoint.
+    '/scan-shard': ({'POST'}, None, 'worker.scan_shard_worker'),
+    '/run-aggregation': ({'POST'}, None, 'worker.run_aggregation_worker'),
+    '/sweep': ({'POST'}, None, 'worker.sweep_worker'),
 }
-NEW_ENDPOINT = {legacy: new for _, legacy, new in ROUTES.values()}
+NEW_ENDPOINT = {legacy: new for _, legacy, new in ROUTES.values() if legacy}
+NEW_RULES = {rule for rule, (_, legacy, _) in ROUTES.items() if legacy is None}
 BLUEPRINT_MODULES = {'ui': ui, 'api': api, 'worker': worker}
 
 # Requests that reach a view, one or more per rule.
@@ -108,8 +113,12 @@ def resolve(app, method, path):
 
 
 def test_url_map_is_the_legacy_url_map(legacy, testing_app):
+    """Every legacy rule exists with the same methods; the only additions are the sharded-scan worker routes."""
     legacy_map = url_map(legacy.app)
-    assert url_map(testing_app) == {key: NEW_ENDPOINT[endpoint] for key, endpoint in legacy_map.items()}
+    new_map = url_map(testing_app)
+    additions = {key: endpoint for key, endpoint in new_map.items() if key not in legacy_map}
+    assert {key: NEW_ENDPOINT[endpoint] for key, endpoint in legacy_map.items()} == {k: v for k, v in new_map.items() if k in legacy_map}
+    assert {rule for rule, _ in additions} == NEW_RULES
 
 
 def test_routes_table_is_complete(testing_app):
@@ -132,6 +141,14 @@ def test_request_reaches_the_legacy_view(method, path, legacy, testing_app):
     assert 'endpoint' in expected, expected
     expected['endpoint'] = NEW_ENDPOINT[expected['endpoint']]
     assert resolve(testing_app, method, path) == expected
+
+
+@pytest.mark.parametrize('path', sorted(NEW_RULES))
+def test_new_worker_routes_accept_post_only(path, testing_app):
+    """The sharded-scan endpoints (no legacy counterpart) are POST-only like /run-scan."""
+    assert resolve(testing_app, 'POST', path) == {'endpoint': ROUTES[path][2], 'args': {}}
+    assert resolve(testing_app, 'GET', path) == {'error': 'MethodNotAllowed', 'allowed': ['OPTIONS', 'POST']}
+    assert testing_app.test_client().get(path).status_code == 405
 
 
 @pytest.mark.parametrize('method, path', NOT_MATCHING)
@@ -187,5 +204,7 @@ def test_shim_runs_the_legacy_startup_in_production(import_shim, gcp, env, legac
     assert not shim.app.testing
     startup = legacy_import.startup
     assert gcp.discovery.run_services == startup.discovery.run_services
-    assert gcp.tasks.queues == startup.tasks.queues
+    # Same queue (the new app also sets its limits; see test_app_factory.py)
+    assert [(parent, queue['name']) for parent, queue in gcp.tasks.queues] == \
+           [(parent, queue['name']) for parent, queue in startup.tasks.queues]
     assert len(gcp.tasks.queues) == 1

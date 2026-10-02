@@ -19,9 +19,12 @@ different import styles, and this way both talk to the same fakes.
 """
 import copy
 import json
+import threading
+from datetime import timedelta
 from types import SimpleNamespace
 from urllib.parse import quote
 
+from google.api_core.exceptions import AlreadyExists, NotFound, PreconditionFailed
 from google.genai import errors as genai_errors
 
 TEST_ENV = {
@@ -45,8 +48,10 @@ class FakeBlob:
         self.bucket = bucket
         self.name = name
 
-    def upload_from_string(self, data, content_type=None):
+    def upload_from_string(self, data, content_type=None, if_generation_match=None):
         self.bucket.check()
+        if if_generation_match == 0 and self.name in self.bucket.objects:
+            raise PreconditionFailed(f'412 object {self.name} already exists')
         self.bucket.objects[self.name] = (data, content_type)
         self.bucket.uploads.append((self.name, data, content_type))
 
@@ -139,18 +144,48 @@ class FakeStorageClient:
 
 
 class FakeTasksClient:
+    """Stands in for ``tasks_v2.CloudTasksClient``.
+
+    ``tasks`` records every ``create_task`` call as ``(parent, task)``. Named
+    tasks behave like Cloud Tasks': creating a name that exists (or has already
+    run) raises ``AlreadyExists``; ``get_task`` raises ``NotFound`` once a task
+    is done. :meth:`drain` plays Cloud Tasks for end-to-end tests: it posts the
+    queued tasks to a Flask test client, retrying on 5xx with the retry-count
+    header set, until the queue is empty.
+    """
+
     def __init__(self, create_queue_error=None, on_create_queue=None):
         self.tasks = []
         self.queues = []
         self.create_queue_error = create_queue_error
         self.on_create_queue = on_create_queue
+        self.pending = []  # tasks not yet delivered by drain(), in creation order
+        self.names = set()  # every task name ever created (Cloud Tasks' de-duplication window)
+        self.done = set()  # names of delivered tasks (get_task raises NotFound for them)
+        self.queue_limits = None  # what get_queue reports; None: the limits the app expects
+        self.get_queue_error = None
+        self.deliveries = []  # (path, body, retry_count, status_code) for every drain() delivery
+        self._lock = threading.Lock()
 
     def queue_path(self, project, location, queue):
         return f'projects/{project}/locations/{location}/queues/{queue}'
 
     def create_task(self, parent, task):
-        self.tasks.append((parent, task))
-        return SimpleNamespace(name=f'{parent}/tasks/{len(self.tasks)}')
+        with self._lock:
+            name = task.get('name')
+            if name:
+                if name in self.names:
+                    raise AlreadyExists(f'Task {name} already exists')
+                self.names.add(name)
+            self.tasks.append((parent, task))
+            self.pending.append(task)
+        return SimpleNamespace(name=name or f'{parent}/tasks/{len(self.tasks)}')
+
+    def get_task(self, name):
+        with self._lock:
+            if name in self.names and name not in self.done:
+                return SimpleNamespace(name=name)
+        raise NotFound(f'Task {name} not found')
 
     def create_queue(self, parent, queue):
         self.queues.append((parent, queue))
@@ -158,6 +193,53 @@ class FakeTasksClient:
             self.on_create_queue()
         if self.create_queue_error:
             raise self.create_queue_error
+
+    def get_queue(self, name):
+        if self.get_queue_error:
+            raise self.get_queue_error
+        limits = self.queue_limits or {'max_concurrent_dispatches': 25, 'max_attempts': 3,
+                                       'min_backoff_seconds': 30, 'max_backoff_seconds': 600}
+        return SimpleNamespace(
+            name=name,
+            rate_limits=SimpleNamespace(max_concurrent_dispatches=limits['max_concurrent_dispatches']),
+            retry_config=SimpleNamespace(max_attempts=limits['max_attempts'],
+                                         min_backoff=timedelta(seconds=limits['min_backoff_seconds']),
+                                         max_backoff=timedelta(seconds=limits['max_backoff_seconds'])))
+
+    def task_ids(self):
+        """The IDs (last path segment) of every named task created, in order."""
+        return [task['name'].rsplit('/', 1)[-1] for _, task in self.tasks if task.get('name')]
+
+    def drain(self, client, max_attempts=3, skip_scheduled=False, max_deliveries=10000):
+        """Delivers the pending tasks to ``client`` (a Flask test client) until none are left.
+
+        A task answered with a 5xx is retried up to ``max_attempts`` times with
+        the ``X-CloudTasks-TaskRetryCount`` header, like Cloud Tasks does.
+        ``skip_scheduled`` leaves tasks with a ``schedule_time`` in the queue
+        (to test what happens while a sweep is still in the future).
+        Returns the number of deliveries made.
+        """
+        deliveries = 0
+        while deliveries < max_deliveries:
+            with self._lock:
+                index = next((i for i, task in enumerate(self.pending)
+                              if not (skip_scheduled and task.get('schedule_time'))), None)
+                if index is None:
+                    return deliveries
+                task = self.pending.pop(index)
+            request = task['http_request']
+            path = request['url'].split('/', 3)[-1]
+            body = json.loads(request['body'])
+            for retry_count in range(max_attempts):
+                response = client.post(f'/{path}', json=body, headers={'X-CloudTasks-TaskRetryCount': str(retry_count)})
+                self.deliveries.append((f'/{path}', body, retry_count, response.status_code))
+                deliveries += 1
+                if response.status_code < 500:
+                    break
+            with self._lock:
+                if task.get('name'):
+                    self.done.add(task['name'])
+        raise AssertionError(f'drain() made {max_deliveries} deliveries without emptying the queue')
 
 
 class FakeCredentials:

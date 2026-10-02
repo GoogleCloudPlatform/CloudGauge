@@ -26,6 +26,8 @@ so these numbers are the GCS write load a scan of that size would generate.
 import threading
 from collections import Counter
 
+from google.api_core.exceptions import PreconditionFailed
+
 from app.services.results_store import GcsResultsStore
 
 DEFAULT_BUCKET = "synthetic-results"
@@ -35,10 +37,12 @@ class MemoryBlob:
     def __init__(self, bucket, name):
         self._bucket, self.name = bucket, name
 
-    def upload_from_string(self, data, content_type=None):
+    def upload_from_string(self, data, content_type=None, if_generation_match=None):
         if isinstance(data, str):
             data = data.encode("utf-8")
         with self._bucket._lock:
+            if if_generation_match == 0 and self.name in self._bucket._objects:
+                raise PreconditionFailed(f"412 object {self.name} already exists")
             self._bucket._objects[self.name] = (data, content_type)
             self._bucket.stats["writes"] += 1
             self._bucket.stats["bytes_written"] += len(data)

@@ -152,7 +152,7 @@ def test_status_page_survives_a_signing_failure(client, gcp):
 
 def test_worker_writes_status_and_reports_that_the_ui_reads_back(client, gcp, monkeypatch):
     """/run-scan with the checks mocked: status and reports land in (fake) GCS, and the UI routes serve them."""
-    def fake_checks(scope, scope_id, job_id, progress_callback=None, *, sink):
+    def fake_checks(scope, scope_id, job_id, progress_callback=None, *, sink, projects=None):
         sink.write_finding(job_id, 'Open_Firewall_Rules', {
             'Check': 'Open Firewall Rules', 'Status': 'Action Required',
             'Finding': [{'Project': SCOPE_ID, 'Rule Name': 'allow-all', 'VPC': 'default'}]})

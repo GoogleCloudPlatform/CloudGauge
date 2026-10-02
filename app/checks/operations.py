@@ -226,13 +226,18 @@ def check_standalone_vms(scope_id, all_projects, job_id, *, sink):
     sink.write_finding(job_id, CHECK_NAME.replace(" ", "_"), result)
 
 
-def run_miscellaneous_checks_refactored(scope, scope_id, all_projects, job_id, *, sink):
+def run_miscellaneous_checks_refactored(scope, scope_id, all_projects, job_id, *, sink, org_insights=True, project_checks=True):
     """
     Runs a series of miscellaneous operational checks, such as firewall complexity,
     recent changes, and unattended projects, respecting the scan scope.
+
+    Sharded scans (``app.fanout``) split the work so the organization-level
+    insights are fetched once rather than once per shard: project shards call
+    this with ``org_insights=False``, the scope shard with ``project_checks=False``
+    (and no projects). With both flags on (the default) the behavior is the legacy one.
     """
     print("🔍 Performing Miscellaneous checks...")
-    if not all_projects:
+    if project_checks and not all_projects:
         return []
 
     # Initialize lists to hold structured data for each finding type
@@ -264,7 +269,7 @@ def run_miscellaneous_checks_refactored(scope, scope_id, all_projects, job_id, *
         sink.write_finding(job_id, "VPC_Firewall_Complexity", result)
 
     # --- Org-Level Recommender/Insight Checks (Run ONLY for organization scope) ---
-    if scope == 'organization':
+    if scope == 'organization' and org_insights:
         print("   -> Checking for organization-level insights...")
         try:
             recommender_client = gcp.recommender_client()
@@ -325,7 +330,7 @@ def run_miscellaneous_checks_refactored(scope, scope_id, all_projects, job_id, *
         return project_findings_list
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
-        results = executor.map(check_project_for_iam_changes, all_projects)
+        results = executor.map(check_project_for_iam_changes, all_projects if project_checks else [])
         for res_list in results:
             recent_change_findings.extend(res_list)
 

@@ -19,6 +19,8 @@ is misconfigured. One difference is intended: the environment is validated
 before any GCP call, where the legacy module looked up its URL first.
 """
 import json
+import logging
+from datetime import timedelta
 
 import pytest
 from google.api_core.exceptions import AlreadyExists, PermissionDenied
@@ -33,6 +35,13 @@ from helpers import import_legacy, make_settings, set_env
 REQUIRED = tuple(fakes.TEST_ENV)
 REGION = 'projects/test-project/locations/us-central1'
 QUEUE_CREATED = (REGION, {'name': f'{REGION}/queues/test-queue'})
+# New: the queue is created with the limits sharded scans rely on (the legacy code created it with defaults:
+# 1,000 concurrent dispatches and 100 attempts, i.e. a crashed scan was retried for hours).
+QUEUE_CREATED_WITH_LIMITS = (REGION, {
+    'name': f'{REGION}/queues/test-queue',
+    'rate_limits': {'max_concurrent_dispatches': 25},
+    'retry_config': {'max_attempts': 3, 'min_backoff': timedelta(seconds=30), 'max_backoff': timedelta(seconds=600)},
+})
 RUN_SERVICE = f'{REGION}/services/{fakes.K_SERVICE}'
 
 
@@ -78,7 +87,8 @@ def test_production_startup_matches_legacy(legacy_import, gcp, env):
     assert app.config['CLOUDGAUGE_PROFILE'] == 'production'
     startup = legacy_import.startup
     assert gcp.discovery.run_services == startup.discovery.run_services == [RUN_SERVICE]
-    assert gcp.tasks.queues == startup.tasks.queues == [QUEUE_CREATED]
+    assert startup.tasks.queues == [QUEUE_CREATED]
+    assert gcp.tasks.queues == [QUEUE_CREATED_WITH_LIMITS]
     assert services_of(app).worker_url == legacy_import.module.WORKER_URL == fakes.WORKER_URL
 
 
@@ -124,7 +134,7 @@ def test_worker_url_setting_replaces_the_lookup(gcp, env, monkeypatch):
     app = create_app()
     assert services_of(app).worker_url == 'https://worker.example'
     assert gcp.discovery.calls == []
-    assert gcp.tasks.queues == [QUEUE_CREATED]
+    assert gcp.tasks.queues == [QUEUE_CREATED_WITH_LIMITS]
 
 
 def test_canary_settings_send_the_task_to_the_tag_url_with_the_main_url_as_audience(gcp, env, monkeypatch):
@@ -144,10 +154,31 @@ def test_canary_settings_send_the_task_to_the_tag_url_with_the_main_url_as_audie
     assert gcp.discovery.calls == []  # WORKER_URL replaces the lookup
 
 
-def test_existing_queue_is_reused(gcp, env):
+def test_existing_queue_is_reused(gcp, env, caplog):
+    caplog.set_level(logging.INFO)
     gcp.tasks.create_queue_error = AlreadyExists('Queue already exists')
     create_app()
-    assert gcp.tasks.queues == [QUEUE_CREATED]
+    assert gcp.tasks.queues == [QUEUE_CREATED_WITH_LIMITS]
+    assert 'limits match the configuration' in caplog.text
+
+
+def test_existing_queue_with_other_limits_is_reported_not_changed(gcp, env, caplog):
+    """The queue is the operator's: a mismatch is logged with the command to fix it, and startup succeeds."""
+    gcp.tasks.create_queue_error = AlreadyExists('Queue already exists')
+    gcp.tasks.queue_limits = {'max_concurrent_dispatches': 1000, 'max_attempts': 100, 'min_backoff_seconds': 0.1, 'max_backoff_seconds': 3600}
+    create_app()
+    assert len(gcp.tasks.queues) == 1  # one create attempt, no update
+    warning = next(record.message for record in caplog.records if record.levelname == 'WARNING')
+    assert 'max_concurrent_dispatches=1000 (expected 25)' in warning and 'max_attempts=100 (expected 3)' in warning
+    assert ('gcloud tasks queues update test-queue --project test-project --location us-central1 '
+            '--max-concurrent-dispatches=25 --max-attempts=3 --min-backoff=30s --max-backoff=600s') in warning
+
+
+def test_unreadable_queue_limits_do_not_fail_startup(gcp, env, caplog):
+    gcp.tasks.create_queue_error = AlreadyExists('Queue already exists')
+    gcp.tasks.get_queue_error = PermissionDenied('The caller lacks cloudtasks.queues.get')
+    create_app()
+    assert 'Could not read the limits' in caplog.text
 
 
 @pytest.mark.parametrize('error', [PermissionDenied('The caller lacks cloudtasks.queues.create'), RuntimeError('Cloud Tasks unavailable')])

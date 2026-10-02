@@ -103,8 +103,9 @@ def test_registry_names_map_to_their_category(scope):
 def test_runner_error_names_come_from_the_registry():
     """Guards DYNAMIC_NAMES['runner.py']: the runner's error "Check" is the spec name."""
     source = pathlib.Path(runner.__file__).read_text()
-    assert 'error_result = {"Check": check_name,' in source
-    assert 'check_name = info["name"]' in source
+    assert 'return {"Check": check_name, "Finding": [{"Error": message}], "Status": "Error"}' in source
+    assert 'check_name = future_to_info[future]["name"]' in source
+    assert 'record_error(sink, job_id, check_name, str(e))' in source
 
 
 def test_categories_are_the_report_sections():

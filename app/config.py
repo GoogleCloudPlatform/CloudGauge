@@ -46,6 +46,31 @@ CHECK_RUNNER_MAX_WORKERS = 15
 # We will only update GCS if at least 2 seconds have passed since the last update.
 STATUS_UPDATE_INTERVAL_SECONDS = 2
 
+# --- Sharded scans (app.fanout) ---
+# A scan of more than SCAN_SHARD_SIZE projects is split into shards of that many
+# projects, each run by its own Cloud Tasks task; smaller scans run inline in
+# one task as before. SCAN_MAX_CONCURRENT_SHARDS bounds how many shards run at
+# once (the queue's max_concurrent_dispatches: with 15 check threads per shard
+# it caps the organization-wide API concurrency). Every task gets a Cloud Tasks
+# dispatch deadline of TASK_DISPATCH_DEADLINE_SECONDS (its maximum is 30 min) so
+# a hung request is retried instead of silently duplicated, and a shard stops
+# starting new checks after SHARD_TIME_BUDGET_SECONDS so it always answers
+# before that deadline. A sweeper task re-checks a running job every
+# SWEEP_INTERVAL_SECONDS and finishes it with error rows if shards have died.
+DEFAULT_SCAN_SHARD_SIZE = 20
+DEFAULT_SCAN_MAX_CONCURRENT_SHARDS = 25
+DEFAULT_SHARD_TIME_BUDGET_SECONDS = 20 * 60
+DEFAULT_TASK_DISPATCH_DEADLINE_SECONDS = 30 * 60
+MAX_TASK_DISPATCH_DEADLINE_SECONDS = 30 * 60  # Cloud Tasks' maximum for HTTP tasks
+DEFAULT_SWEEP_INTERVAL_SECONDS = 30 * 60
+MAX_SWEEPS = 12  # a job is force-finished after this many sweeps no matter what
+# Retry policy of the queue (created at startup if missing). Three attempts:
+# a crashed shard is re-run, a persistently failing one ends up as error rows
+# in the report instead of retrying for hours.
+QUEUE_MAX_ATTEMPTS = 3
+QUEUE_MIN_BACKOFF_SECONDS = 30
+QUEUE_MAX_BACKOFF_SECONDS = 600
+
 # Configures logging to display INFO level messages with a timestamp.
 LOG_FORMAT = '%(levelname)s: [%(asctime)s] %(message)s'
 LOG_DATEFMT = '%Y-%m-%d %H:%M:%S'
@@ -107,6 +132,13 @@ class Settings:
     vertex_location: str = DEFAULT_VERTEX_LOCATION
     best_practices_csv_url: str = BEST_PRACTICES_CSV_URL
     profile: str = DEFAULT_PROFILE
+    # Sharded scans (see the constants above and app.fanout)
+    scan_shard_size: int = DEFAULT_SCAN_SHARD_SIZE
+    scan_max_concurrent_shards: int = DEFAULT_SCAN_MAX_CONCURRENT_SHARDS
+    shard_time_budget_seconds: int = DEFAULT_SHARD_TIME_BUDGET_SECONDS
+    task_dispatch_deadline_seconds: int = DEFAULT_TASK_DISPATCH_DEADLINE_SECONDS
+    sweep_interval_seconds: int = DEFAULT_SWEEP_INTERVAL_SECONDS
+    task_max_attempts: int = QUEUE_MAX_ATTEMPTS
     # Synthetic load mode (profile 'synthetic' only; see app.synthetic)
     synthetic_projects: int = 0
     synthetic_seed: int = DEFAULT_SYNTHETIC_SEED
@@ -120,7 +152,7 @@ class Settings:
 
         Raises:
             ValueError: If ``CLOUDGAUGE_ENV`` is not one of ``PROFILES``, if a
-                synthetic setting is out of range, or if the synthetic profile
+                numeric setting is out of range, or if the synthetic profile
                 is selected without ``SYNTHETIC_PROJECTS``.
         """
         env = os.environ if environ is None else environ
@@ -143,6 +175,14 @@ class Settings:
             vertex_location=env.get('VERTEX_LOCATION') or DEFAULT_VERTEX_LOCATION,
             best_practices_csv_url=env.get('BEST_PRACTICES_CSV_URL') or BEST_PRACTICES_CSV_URL,
             profile=profile,
+            scan_shard_size=_number(env, 'SCAN_SHARD_SIZE', DEFAULT_SCAN_SHARD_SIZE, int, minimum=1),
+            scan_max_concurrent_shards=_number(env, 'SCAN_MAX_CONCURRENT_SHARDS', DEFAULT_SCAN_MAX_CONCURRENT_SHARDS, int, minimum=1, maximum=1000),
+            shard_time_budget_seconds=_number(env, 'SHARD_TIME_BUDGET_SECONDS', DEFAULT_SHARD_TIME_BUDGET_SECONDS, int, minimum=60,
+                                              maximum=MAX_TASK_DISPATCH_DEADLINE_SECONDS),
+            task_dispatch_deadline_seconds=_number(env, 'TASK_DISPATCH_DEADLINE_SECONDS', DEFAULT_TASK_DISPATCH_DEADLINE_SECONDS, int, minimum=15,
+                                                   maximum=MAX_TASK_DISPATCH_DEADLINE_SECONDS),
+            sweep_interval_seconds=_number(env, 'SWEEP_INTERVAL_SECONDS', DEFAULT_SWEEP_INTERVAL_SECONDS, int, minimum=60),
+            task_max_attempts=_number(env, 'TASK_MAX_ATTEMPTS', QUEUE_MAX_ATTEMPTS, int, minimum=1, maximum=100),
             synthetic_projects=synthetic_projects,
             synthetic_seed=_number(env, 'SYNTHETIC_SEED', DEFAULT_SYNTHETIC_SEED, int),
             synthetic_latency_ms=_number(env, 'SYNTHETIC_LATENCY_MS', DEFAULT_SYNTHETIC_LATENCY_MS, float, minimum=0),

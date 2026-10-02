@@ -127,6 +127,35 @@ class Overview:
 
 
 @dataclass(frozen=True)
+class Coverage:
+    """How much of the scope a sharded scan covered (shown above the overview cards)."""
+    total_projects: int
+    projects_scanned: int
+    scanned_pct: str  # formatted, e.g. "98"
+    projects_partial: int  # projects of shards that hit their time budget
+    projects_not_scanned: int  # projects of shards that failed or never reported
+    total_shards: int
+    shards_failed: int
+    shards_missing: int
+    scope_checks: str  # "success", "timed_out", "failed", or "missing"
+    complete: bool  # every project scanned and the scope-level checks ran
+
+    @classmethod
+    def from_dict(cls, coverage):
+        """Builds the view-model from ``app.fanout.build_coverage``'s dict."""
+        total = coverage["total_projects"]
+        scanned = coverage["projects_scanned"]
+        complete = (scanned == total and coverage["scope_checks"] == "success")
+        return cls(
+            total_projects=total, projects_scanned=scanned,
+            scanned_pct=f"{(scanned / total * 100) if total else 100:.0f}",
+            projects_partial=coverage["projects_partial"], projects_not_scanned=coverage["projects_not_scanned"],
+            total_shards=coverage["total_shards"], shards_failed=coverage["shards_failed"],
+            shards_missing=coverage["shards_missing"], scope_checks=coverage["scope_checks"], complete=complete,
+        )
+
+
+@dataclass(frozen=True)
 class ReportContext:
     scope: str
     scope_id: str
@@ -137,6 +166,8 @@ class ReportContext:
     sections: tuple  # only the sections that have checks or org policies
     # A notice rendered above the overview (the synthetic load mode sets it). None: nothing is rendered.
     banner: str | None = None
+    # Sharded scans only: what the report covers. None: nothing is rendered.
+    coverage: Coverage | None = None
 
     def template_vars(self):
         """The top-level template variables (a shallow dict of the fields)."""
@@ -244,7 +275,7 @@ def build_org_policy_summary(org_policy_data):
     return OrgPolicySummary(tuple(categories), compliant_policy_count, total_policies, status_class, icon)
 
 
-def build_report_context(scope, scope_id, job_id, all_results, banner=None):
+def build_report_context(scope, scope_id, job_id, all_results, banner=None, coverage=None):
     """
     Builds the data for the HTML report.
 
@@ -255,6 +286,7 @@ def build_report_context(scope, scope_id, job_id, all_results, banner=None):
         all_results (dict): Categorized findings, plus the optional
             ``"Organization Policies"`` entry ``(best_practices, current_policies)``.
         banner (str, optional): A notice to show at the top of the report.
+        coverage (dict, optional): A sharded scan's coverage (``app.fanout.build_coverage``).
 
     Returns:
         ReportContext: Everything the report templates display.
@@ -345,4 +377,5 @@ def build_report_context(scope, scope_id, job_id, all_results, banner=None):
         score_summary=score_summary,
         sections=tuple(sections),
         banner=banner,
+        coverage=Coverage.from_dict(coverage) if coverage else None,
     )

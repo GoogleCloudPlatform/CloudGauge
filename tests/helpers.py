@@ -34,7 +34,9 @@ BETA_V1_PATH = pathlib.Path(__file__).resolve().parent / 'legacy' / 'cloudgauge_
 # Every environment variable that the app or the legacy module reads.
 APP_ENV_VARS = (*fakes.TEST_ENV, 'K_SERVICE', 'WORKER_URL', 'WORKER_AUDIENCE', 'CLOUDGAUGE_ENV', 'GEMINI_MODEL',
                 'VERTEX_LOCATION', 'BEST_PRACTICES_CSV_URL', 'SYNTHETIC_PROJECTS', 'SYNTHETIC_SEED',
-                'SYNTHETIC_LATENCY_MS', 'SYNTHETIC_ERROR_RATE', 'SYNTHETIC_DENIED_FRACTION')
+                'SYNTHETIC_LATENCY_MS', 'SYNTHETIC_ERROR_RATE', 'SYNTHETIC_DENIED_FRACTION',
+                'SCAN_SHARD_SIZE', 'SCAN_MAX_CONCURRENT_SHARDS', 'SHARD_TIME_BUDGET_SECONDS',
+                'TASK_DISPATCH_DEADLINE_SECONDS', 'SWEEP_INTERVAL_SECONDS', 'TASK_MAX_ATTEMPTS')
 # What a deployed Cloud Run revision sees: the five required variables plus K_SERVICE.
 DEPLOYED_ENV = {**fakes.TEST_ENV, 'K_SERVICE': fakes.K_SERVICE}
 
