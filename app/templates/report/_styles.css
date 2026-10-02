@@ -100,6 +100,8 @@ h3 { margin-top: 20px; margin-bottom: 10px; color: #3c4043; }
 #row-filter { flex: 0 1 460px; padding: 9px 12px; font: inherit; font-size: 14px; color: var(--text-color); border: 1px solid var(--border-color); border-radius: 6px; background: var(--card-bg-color); }
 #row-filter:focus { outline: 2px solid var(--primary-color); outline-offset: -1px; }
 #filter-status { color: var(--light-text-color); font-size: 13px; }
+/* Pages without checks (the Overview) keep the CSV link but not the filter box. */
+.report-toolbar.no-filter #row-filter, .report-toolbar.no-filter #filter-status { display: none; }
 .toolbar-link { margin-left: auto; color: var(--primary-color); text-decoration: none; font-weight: 500; font-size: 14px; white-space: nowrap; }
 .toolbar-link:hover { text-decoration: underline; }
 .check-summary { color: var(--light-text-color); font-size: 13px; margin-top: 2px; }

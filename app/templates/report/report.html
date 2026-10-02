@@ -43,7 +43,7 @@
     <div class="main-content">
         <h1>CloudGauge Report</h1>
         <p style="color: var(--light-text-color);">Scope: {{ scope_title }} | ID: {{ scope_id }} | Report ID: {{ job_id }}</p>
-        <div class="report-toolbar">
+        <div class="report-toolbar no-filter">
             <input id="row-filter" type="search" placeholder="Filter findings by project ID, resource name, or any text" aria-label="Filter findings" oninput="scheduleRowFilter()">
             <span id="filter-status" aria-live="polite"></span>
             <a class="toolbar-link" href="{{ csv_href }}">Download CSV (all rows)</a>

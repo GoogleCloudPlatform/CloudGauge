@@ -21,6 +21,11 @@ function showSection(sectionId, clickedLinkElement = null) {
     if (targetSection) {
         targetSection.style.display = 'block';
     }
+    // The filter box acts on the checks of the page shown; the Overview has none, so it is hidden there.
+    const toolbar = document.querySelector('.report-toolbar');
+    if (toolbar) {
+        toolbar.classList.toggle('no-filter', !(targetSection && targetSection.querySelector('.checks-list')));
+    }
     document.querySelectorAll('.nav-link').forEach(link => {
         link.classList.remove('active');
     });

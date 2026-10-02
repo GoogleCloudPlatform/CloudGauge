@@ -292,6 +292,16 @@ def test_toolbar_has_the_filter_and_the_csv_download():
     assert 'href="/report/job%201/a%20b%2Fc%3Fd/csv"' in html
 
 
+def test_filter_box_is_hidden_on_the_overview():
+    """The filter acts on a category page's checks; the Overview has none, so only the CSV link shows there."""
+    html = generate_html_report('organization', '123456789', 'job-42', **SCENARIOS['sample scan'])
+    assert '<div class="report-toolbar no-filter">' in html  # the Overview is the page shown first
+    assert '.report-toolbar.no-filter #row-filter, .report-toolbar.no-filter #filter-status { display: none; }' in html
+    assert "toolbar.classList.toggle('no-filter', !(targetSection && targetSection.querySelector('.checks-list')))" in html
+    overview = re.search(r'<div id="overview-section" class="content-section">(.*?)<div id="[\w-]+-section" class="content-section"', html, re.S).group(1)
+    assert 'checks-list' not in overview and html.count('class="checks-list"') == 4  # one per category page
+
+
 def test_finding_text_is_escaped():
     """Plan item B3: finding text is inserted as text (the legacy report inserted it as raw HTML)."""
     html = generate_html_report('organization', '123456789', 'job-42', **SCENARIOS['html in findings'])
