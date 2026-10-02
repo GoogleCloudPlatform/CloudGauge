@@ -318,7 +318,7 @@ def test_offline_harness_runs_a_sharded_scan(gcp, tmp_path, capsys):
     assert code == 0
     out = capsys.readouterr().out
     assert 'RESULT: ok (status=completed)' in out and 'Sharded: 4 shards of 3, 2 at a time' in out
-    assert 'coverage: 7 of 7 projects scanned (100%) · 4 shards · scope-level checks: completed' in out
+    assert 'coverage: 7 of 7 projects scanned (100%) · organization-level checks: completed' in out
     result = json.loads(json_path.read_text())
     sharding = result['sharding']
     assert (sharding['shards'], sharding['shard_attempts'], sharding['shard_retries'], sharding['failed_shards']) == (4, 4, 0, 0)

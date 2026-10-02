@@ -22,8 +22,10 @@ organization does.
 import csv
 import io
 import json
+import re
 import threading
 import time
+from html import unescape as html_unescape
 from types import SimpleNamespace
 
 import pytest
@@ -48,6 +50,12 @@ BODY = {'scope': 'organization', 'scope_id': SCOPE_ID, 'job_id': JOB}
 
 def projects(n, prefix='p'):
     return [{'projectId': f'{prefix}-{i:03d}', 'displayName': f'Project {i}'} for i in range(n)]
+
+
+def coverage_line(html):
+    """The report's coverage note as one line of text, e.g. "3 of 3 projects scanned (100%) · organization-level checks: completed"."""
+    match = re.search(r'<strong>Coverage:</strong>(.*?)</div>', html, re.S)
+    return ' '.join(html_unescape(match.group(1)).split()) if match else None
 
 
 class Queue:
@@ -246,7 +254,7 @@ def test_run_check_plan_records_unfinished_checks_when_the_budget_runs_out():
     assert [p['progress'] for p in progress] == [50]
     assert sink.findings[0][0] == 'Quick'
     assert sink.findings[1] == ('ERROR_Slow_Check', {'Check': 'Slow Check', 'Status': 'Error', 'Finding': [
-        {'Error': "Check did not finish within the shard's time budget of 0 seconds."}]})
+        {'Error': "Check did not finish within the time budget of 0 seconds."}]})
 
 
 def test_run_check_plan_without_a_budget_waits_for_everything():
@@ -268,7 +276,7 @@ def test_dispatch_writes_the_manifest_and_enqueues_named_tasks(store, queue):
     assert queue.calls[-1] == ('/sweep', {**BODY, 'sweep': 1}, f'{JOB}-sweep-1', 900)
     status = store.read_status(JOB, SCOPE_ID)
     assert status['status'] == 'running' and status['phase'] == 'scanning' and status['progress'] == 5
-    assert status['current_task'] == 'Scanning 5 projects in 4 parallel shards (0 done)...'
+    assert status['current_task'] == 'Scanning 5 projects in parallel...'
     assert (status['total_projects'], status['total_shards'], status['completed_shards']) == (5, 4, 0)
 
 
@@ -286,7 +294,7 @@ def test_dispatch_is_idempotent_for_a_retried_dispatcher(store, queue):
     store.update_status(JOB, SCOPE_ID, 5, 'Initializing scan and listing resources...')
     fan.dispatch('organization', SCOPE_ID, JOB)
     status = store.read_status(JOB, SCOPE_ID)
-    assert status['phase'] == 'scanning' and status['current_task'] == 'Scanning 3 projects in 3 parallel shards (0 done)...'
+    assert status['phase'] == 'scanning' and status['current_task'] == 'Scanning 3 projects in parallel...'
     with pytest.raises(RuntimeError):
         make_fanout(memory_results_store(), queue).dispatch('organization', SCOPE_ID, 'other-job')
 
@@ -338,13 +346,13 @@ def test_shard_runs_its_projects_writes_a_marker_and_reports_progress(store, que
     assert [f['Check'] for f in store.read_all_findings(JOB, shard_id='shard-002')] == ['Open Firewall Rules']
     assert queue.calls == []  # 3 shards still to go: no aggregation yet
     status = store.read_status(JOB, SCOPE_ID)
-    assert status['current_task'] == 'Scanned 2 of 5 projects (1/4 shards done)'
+    assert status['current_task'] == 'Scanned 2 of 5 projects · organization-level checks: in progress'
     assert status['progress'] == 5 + int(85 * 1 / 4) and status['completed_shards'] == 1
 
     assert fan.run_shard({**BODY, 'shard_id': SCOPE_SHARD}) is True
     assert calls[-1] == ('scope-check', 'organization')
     assert store.read_org_policies(JOB, shard_id=SCOPE_SHARD)[1] == {'iam.disableServiceAccountKeyCreation': {'booleanPolicy': {'enforced': True}}}
-    assert store.read_status(JOB, SCOPE_ID)['current_task'] == 'Scanned 2 of 5 projects (2/4 shards done)'
+    assert store.read_status(JOB, SCOPE_ID)['current_task'] == 'Scanned 2 of 5 projects · organization-level checks: completed'
 
 
 def test_last_shard_triggers_the_aggregation_exactly_once(store, queue, monkeypatch):
@@ -356,7 +364,7 @@ def test_last_shard_triggers_the_aggregation_exactly_once(store, queue, monkeypa
         assert fan.run_shard({**BODY, 'shard_id': shard_id}) is True
     assert queue.calls == [('/run-aggregation', BODY, f'{JOB}-aggregate', None)]
     status = store.read_status(JOB, SCOPE_ID)
-    assert (status['progress'], status['phase'], status['current_task']) == (90, 'aggregating', 'All 3 shards finished. Merging results...')
+    assert (status['progress'], status['phase'], status['current_task']) == (90, 'aggregating', 'Scanning finished. Merging the results...')
 
     # A duplicate delivery of a finished shard re-checks the fan-in; the named task is not created again.
     writes = store.client.stats()['writes']
@@ -391,8 +399,11 @@ def test_shard_failure_is_retried_then_becomes_error_rows(store, queue, monkeypa
     names = [spec.name for spec in registry.project_check_plan('organization', SCOPE_ID, JOB, projects(2), [], [])]
     errors = store.read_all_findings(JOB, shard_id='shard-001')
     assert sorted(f['Check'] for f in errors) == sorted(names) and len(names) == 17
-    assert all(f['Status'] == 'Error' and 'Shard shard-001 failed after 3 attempts' in f['Finding'][0]['Error'] for f in errors)
-    assert store.read_status(JOB, SCOPE_ID)['current_task'] == 'Scanned 2 of 3 projects (1/3 shards done, 1 with errors)'
+    assert all(f['Status'] == 'Error' and f['Finding'][0]['Error'].startswith(
+        'Not checked for 2 projects (p-000, p-001): the scan failed after 3 attempts. Last error: ') for f in errors)
+    assert 'quota exceeded' in errors[0]['Finding'][0]['Error']
+    assert store.read_status(JOB, SCOPE_ID)['current_task'] == ('Scanned 2 of 3 projects · organization-level checks: in progress'
+                                                                ' · some checks could not run (listed as errors in the report)')
 
 
 def test_shard_of_a_finished_or_unknown_job(store, queue, monkeypatch):
@@ -447,7 +458,8 @@ def test_aggregate_merges_the_shards_into_one_report(store, queue, monkeypatch):
     assert '<strong>Open Firewall Rules</strong>' in html and 'allow-all' in html
     assert 'No firewall rules found open to 0.0.0.0/0.' not in html  # shard-002's placeholder was dropped
     assert html.count('All key contact categories are configured.') == 1
-    assert 'Coverage:</strong> 3 of 3 projects scanned (100%)' in html and '3 shards' in html and 'scope-level checks: completed' in html
+    assert coverage_line(html) == '3 of 3 projects scanned (100%) · organization-level checks: completed'
+    assert 'shard' not in html.lower()  # how the scan ran is not the reader's concern
     assert '#34a853' in html  # complete: the green note
     assert 'Disable SA key creation' in html  # the org policies came from the scope shard
     rows = csv_rows(store.read_report(JOB, SCOPE_ID, 'csv'))
@@ -469,10 +481,11 @@ def test_aggregate_records_missing_shards_as_error_rows(store, queue, monkeypatc
     fan = finished_job(store, queue, monkeypatch, skip={'shard-002', SCOPE_SHARD})
     assert fan.aggregate(BODY) is True
     html = store.read_report(JOB, SCOPE_ID, 'html')
-    assert 'Coverage:</strong> 2 of 3 projects scanned (67%), 1 not scanned' in html
-    assert '3 shards (0 with errors, 2 missing)' in html and 'scope-level checks: missing' in html and '#f9ab00' in html
-    assert 'Shard shard-002 (1 projects) did not finish; its results are missing from this report.' in html
-    assert 'Shard scope (the scope-level checks) did not finish' in html
+    assert coverage_line(html) == ('2 of 3 projects scanned (67%), 1 not scanned · organization-level checks: did not finish. '
+                                   'Checks that could not run are listed as errors in their sections.')
+    assert '#f9ab00' in html and 'shard' not in html.lower()
+    assert 'Not checked for 1 project (p-002): the scan did not finish; the results are missing from this report.' in html
+    assert 'This check did not run: the organization-level checks did not finish; the results are missing from this report.' in html
     rows = csv_rows(store.read_report(JOB, SCOPE_ID, 'csv'))
     error_checks = sorted({row[0] for row in rows if len(row) > 1 and row[1] == 'Error'})
     expected = sorted({spec.name for spec in registry.project_check_plan('organization', SCOPE_ID, JOB, projects(1), [], [])}
@@ -502,6 +515,32 @@ def test_build_coverage_counts_projects_by_outcome():
     assert build_coverage(manifest, markers) == {
         'total_projects': 7, 'projects_scanned': 2, 'projects_partial': 2, 'projects_not_scanned': 3,
         'total_shards': 5, 'shards_succeeded': 2, 'shards_failed': 2, 'shards_missing': 1, 'scope_checks': 'success'}
+
+
+def test_coverage_line_is_worded_for_the_reader():
+    """Projects and "organization-level checks", never shards; a percentage that never contradicts the counts."""
+    from app.reporting.html_report import generate_html_report
+    coverage = {'total_projects': 1000, 'projects_scanned': 996, 'projects_partial': 2, 'projects_not_scanned': 2,
+                'total_shards': 51, 'shards_succeeded': 49, 'shards_failed': 1, 'shards_missing': 1, 'scope_checks': 'timed_out'}
+    html = generate_html_report('organization', '123', JOB, coverage=coverage)
+    assert coverage_line(html) == ('996 of 1,000 projects scanned (>99%), 2 partially scanned (some checks did not finish in time), '
+                                   '2 not scanned · organization-level checks: timed out. '
+                                   'Checks that could not run are listed as errors in their sections.')
+    assert 'shard' not in html.lower()
+    folder = generate_html_report('folder', '456', JOB, coverage={**coverage, 'projects_scanned': 1000, 'projects_partial': 0,
+                                                                 'projects_not_scanned': 0, 'scope_checks': 'success'})
+    assert coverage_line(folder) == '1,000 of 1,000 projects scanned (100%) · folder-level checks: completed'
+
+
+def test_error_rows_name_projects_not_shards():
+    manifest = build_manifest('organization', SCOPE_ID, JOB, projects(30), 30)
+    assert fanout.describe_projects(projects(1)) == '1 project (p-000)'
+    assert fanout.describe_projects(projects(3)) == '3 projects (p-000, p-001, p-002)'
+    assert fanout.describe_projects(projects(30)).endswith('p-024, and 5 more)')  # 25 IDs listed
+    assert fanout.not_checked_message(manifest, 'shard-001', 'crashed on every attempt.').startswith(
+        'Not checked for 30 projects (p-000, ')
+    assert fanout.not_checked_message(manifest, SCOPE_SHARD, 'failed after 3 attempts. Last error: boom') == \
+        'This check did not run: the organization-level checks failed after 3 attempts. Last error: boom'
 
 
 # --- The sweeper ---
@@ -545,7 +584,8 @@ def test_sweep_finishes_the_job_when_a_shard_has_died(store, queue, monkeypatch)
     errors = store.read_all_findings(JOB, shard_id='shard-002')
     assert len(errors) == 17 and all(f['Status'] == 'Error' for f in errors)
     assert queue.calls == [('/run-aggregation', BODY, f'{JOB}-aggregate', None)]
-    assert store.read_status(JOB, SCOPE_ID)['current_task'] == '1 shard(s) crashed; merging the results of the others...'
+    assert store.read_status(JOB, SCOPE_ID)['current_task'] == 'The scan of 1 project failed; merging the results of the others...'
+    assert all(f['Finding'][0]['Error'] == 'Not checked for 1 project (p-002): the scan crashed on every attempt.' for f in errors)
 
 
 def test_sweep_does_not_overwrite_a_marker_written_in_the_meantime(store, queue, monkeypatch):
@@ -568,9 +608,9 @@ def test_sweep_gives_up_after_max_sweeps(store, queue, monkeypatch):
     queue.calls.clear()
     assert fan.sweep({**BODY, 'sweep': fanout.MAX_SWEEPS}) is True
     assert queue.calls == [('/run-aggregation', BODY, f'{JOB}-aggregate', None)]
-    assert store.read_status(JOB, SCOPE_ID)['current_task'] == '1 shard(s) did not finish; generating the report with the results so far...'
+    assert store.read_status(JOB, SCOPE_ID)['current_task'] == 'The scan of 1 project did not finish; generating the report with the results so far...'
     assert fan.aggregate(BODY) is True
-    assert 'Shard shard-002 (1 projects) did not finish' in store.read_report(JOB, SCOPE_ID, 'html')
+    assert 'Not checked for 1 project (p-002): the scan did not finish' in store.read_report(JOB, SCOPE_ID, 'html')
 
 
 def test_sweep_of_an_errored_job_is_a_no_op(store, queue):
@@ -658,7 +698,7 @@ def test_sharded_scan_end_to_end_matches_a_single_task_scan(gcp, monkeypatch):
     assert client.post('/run-scan', json=job).status_code == 200
     assert gcp.tasks.task_ids() == ['job-e2e-scope', 'job-e2e-shard-001', 'job-e2e-shard-002', 'job-e2e-shard-003', 'job-e2e-sweep-1']
     status_blob = gcp.bucket.blob(f'job-e2e/{ORG_ID}_status.json')
-    assert json.loads(status_blob.download_as_text())['current_task'] == 'Scanning 50 projects in 4 parallel shards (0 done)...'
+    assert json.loads(status_blob.download_as_text())['current_task'] == 'Scanning 50 projects in parallel...'
 
     deliveries = gcp.tasks.drain(client, skip_scheduled=True)  # the shards, then the aggregation
     assert deliveries == 5 and all(code == 200 for _, _, _, code in gcp.tasks.deliveries)
@@ -706,8 +746,11 @@ def test_sharded_scan_survives_a_crashing_shard(gcp, monkeypatch):
     status = json.loads(gcp.bucket.blob(f'job-crash/{ORG_ID}_status.json').download_as_text())
     assert (status['status'], status['failed_shards']) == ('completed', 1)
     html = gcp.bucket.blob(f'job-crash/{ORG_ID}_report.html').download_as_text()
-    assert 'Coverage:</strong> 30 of 50 projects scanned (60%), 20 not scanned' in html and '(1 with errors, 0 missing)' in html
-    assert 'Shard shard-002 failed after 3 attempts' in html and 'container out of memory' in html
+    assert coverage_line(html) == ('30 of 50 projects scanned (60%), 20 not scanned · organization-level checks: completed. '
+                                   'Checks that could not run are listed as errors in their sections.')
+    assert ('Not checked for 20 projects (syn-42-00020, syn-42-00021, ' in html and 'syn-42-00039): the scan failed after 3 attempts. '
+            'Last error: container out of memory' in html)
+    assert 'and 0 more' not in html and 'shard' not in html.lower()
     assert check_statuses(html)['Open Firewall Rules'] in ('Action Required', 'Error')
 
 
@@ -717,7 +760,7 @@ def test_status_page_and_api_follow_a_sharded_job(gcp, monkeypatch):
     job = {'scope': 'organization', 'scope_id': ORG_ID, 'job_id': 'job-ui'}
     assert client.post('/run-scan', json=job).status_code == 200
     status = client.get(f'/api/status/job-ui/{ORG_ID}').get_json()
-    assert status['status'] == 'running' and status['progress'] == 5 and 'parallel shards' in status['current_task']
+    assert status['status'] == 'running' and status['progress'] == 5 and status['current_task'] == 'Scanning 25 projects in parallel...'
     gcp.tasks.drain(client, skip_scheduled=True)
     status = client.get(f'/api/status/job-ui/{ORG_ID}').get_json()
     assert status['status'] == 'completed' and status['progress'] == 100

@@ -64,11 +64,9 @@
 {% if coverage %}
                 <div role="note" class="coverage-note" style="margin: 16px 0 0; padding: 10px 14px; border-left: 6px solid {{ '#34a853' if coverage.complete else '#f9ab00' }}; background: {{ '#e6f4ea' if coverage.complete else '#fef7e0' }}; color: #3c4043;">
                     <strong>Coverage:</strong> {{ "{:,}".format(coverage.projects_scanned) }} of {{ "{:,}".format(coverage.total_projects) }} projects scanned ({{ coverage.scanned_pct }}%)
-                    {%- if coverage.projects_partial %}, {{ "{:,}".format(coverage.projects_partial) }} partially scanned{% endif %}
+                    {%- if coverage.projects_partial %}, {{ "{:,}".format(coverage.projects_partial) }} partially scanned (some checks did not finish in time){% endif %}
                     {%- if coverage.projects_not_scanned %}, {{ "{:,}".format(coverage.projects_not_scanned) }} not scanned{% endif %}
-                    &middot; {{ coverage.total_shards }} shards
-                    {%- if coverage.shards_failed or coverage.shards_missing %} ({{ coverage.shards_failed }} with errors, {{ coverage.shards_missing }} missing){% endif %}
-                    &middot; scope-level checks: {{ 'completed' if coverage.scope_checks == 'success' else coverage.scope_checks.replace('_', ' ') }}
+                    &middot; {{ coverage.checks_label }}: {{ coverage.scope_checks_text }}
                     {%- if not coverage.complete %}. Checks that could not run are listed as errors in their sections.{% endif %}
                 </div>
 {% endif %}

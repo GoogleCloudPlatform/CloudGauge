@@ -169,32 +169,42 @@ class Overview:
     error_count: int
 
 
+SCOPE_CHECKS_TEXT = {"success": "completed", "timed_out": "timed out", "failed": "failed", "missing": "did not finish"}
+
+
 @dataclass(frozen=True)
 class Coverage:
-    """How much of the scope a sharded scan covered (shown above the overview cards)."""
+    """How much of the scope a sharded scan covered (shown above the overview cards).
+
+    Worded for the reader: projects and "organization-level checks", never
+    shards, which are how the scan is run, not what the reader knows. The shard
+    counts of ``app.fanout.build_coverage`` stay in the logs.
+    """
     total_projects: int
     projects_scanned: int
-    scanned_pct: str  # formatted, e.g. "98"
-    projects_partial: int  # projects of shards that hit their time budget
-    projects_not_scanned: int  # projects of shards that failed or never reported
-    total_shards: int
-    shards_failed: int
-    shards_missing: int
+    scanned_pct: str  # formatted, e.g. "98"; ">99" when it would round to 100 with projects missing
+    projects_partial: int  # projects for which some checks did not finish in time
+    projects_not_scanned: int  # projects whose scan failed or never reported
+    checks_label: str  # "organization-level checks" or "folder-level checks"
     scope_checks: str  # "success", "timed_out", "failed", or "missing"
+    scope_checks_text: str  # the same, worded for the reader
     complete: bool  # every project scanned and the scope-level checks ran
 
     @classmethod
-    def from_dict(cls, coverage):
+    def from_dict(cls, coverage, scope):
         """Builds the view-model from ``app.fanout.build_coverage``'s dict."""
         total = coverage["total_projects"]
         scanned = coverage["projects_scanned"]
         complete = (scanned == total and coverage["scope_checks"] == "success")
+        pct = f"{(scanned / total * 100) if total else 100:.0f}"
+        if pct == "100" and scanned < total:
+            pct = ">99"  # 996 of 1,000 rounds to 100, which would contradict the counts next to it
         return cls(
-            total_projects=total, projects_scanned=scanned,
-            scanned_pct=f"{(scanned / total * 100) if total else 100:.0f}",
+            total_projects=total, projects_scanned=scanned, scanned_pct=pct,
             projects_partial=coverage["projects_partial"], projects_not_scanned=coverage["projects_not_scanned"],
-            total_shards=coverage["total_shards"], shards_failed=coverage["shards_failed"],
-            shards_missing=coverage["shards_missing"], scope_checks=coverage["scope_checks"], complete=complete,
+            checks_label=f"{scope}-level checks", scope_checks=coverage["scope_checks"],
+            scope_checks_text=SCOPE_CHECKS_TEXT.get(coverage["scope_checks"], coverage["scope_checks"].replace("_", " ")),
+            complete=complete,
         )
 
 
@@ -482,6 +492,6 @@ def build_report_context(scope, scope_id, job_id, all_results, banner=None, cove
         score_summary=score_summary,
         sections=tuple(sections),
         banner=banner,
-        coverage=Coverage.from_dict(coverage) if coverage else None,
+        coverage=Coverage.from_dict(coverage, scope) if coverage else None,
         total_projects=total_projects,
     )

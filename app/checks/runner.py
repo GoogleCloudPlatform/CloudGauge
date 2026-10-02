@@ -47,7 +47,7 @@ def record_error(sink, job_id, check_name, message):
 
 
 def run_check_plan(plan, job_id, *, sink, progress_callback=None, max_workers=CHECK_RUNNER_MAX_WORKERS,
-                   time_budget_seconds=None, clock=time.monotonic):
+                   time_budget_seconds=None, clock=time.monotonic, subject=None):
     """Runs the ``CheckSpec`` entries of ``plan`` concurrently and returns a summary.
 
     Args:
@@ -60,6 +60,8 @@ def run_check_plan(plan, job_id, *, sink, progress_callback=None, max_workers=CH
             recorded as errors and the call returns without waiting for them
             (queued ones are cancelled; running ones finish in the background).
         clock: Monotonic clock (tests).
+        subject: What the plan covers, for the time-budget error row a user
+            reads, e.g. ``"20 projects (p-001, ...)"``.
 
     Returns:
         dict: ``{"checks", "completed", "failed", "unfinished": [names]}``.
@@ -101,12 +103,14 @@ def run_check_plan(plan, job_id, *, sink, progress_callback=None, max_workers=CH
 
     unfinished = []
     if timed_out:
+        for_whom = f" for {subject}" if subject else ""
         for future in pending:
             future.cancel()
             check_name = future_to_info[future]["name"]
             unfinished.append(check_name)
             print(f"⏱️ Check '{check_name}' did not finish within the {time_budget_seconds:.0f} s budget.")
-            record_error(sink, job_id, check_name, f"Check did not finish within the shard's time budget of {time_budget_seconds:.0f} seconds.")
+            record_error(sink, job_id, check_name,
+                         f"Check did not finish within the time budget of {time_budget_seconds:.0f} seconds{for_whom}.")
     # Don't block on checks that are still running after a timeout: the caller must answer Cloud Tasks.
     executor.shutdown(wait=not timed_out, cancel_futures=True)
     return {"checks": total_checks, "completed": completed_checks, "failed": failed, "unfinished": sorted(unfinished)}

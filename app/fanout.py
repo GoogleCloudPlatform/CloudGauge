@@ -134,6 +134,34 @@ def build_coverage(manifest, markers):
     }
 
 
+# What the user reads (status page, error rows, coverage line) speaks of projects
+# and "organization-level checks". Shards are how the scan is run; their IDs are
+# for the logs. README: "Scaling to Large Organizations".
+
+def describe_projects(projects, max_ids=25):
+    """``"20 projects (p-001, p-002, ...)"``: the subject of an error row a reader can act on.
+
+    A shard holds ``SCAN_SHARD_SIZE`` projects (20 by default), so the list is
+    normally complete; beyond ``max_ids`` it ends with "and N more".
+    """
+    ids = [p.get("projectId", "?") if isinstance(p, dict) else str(p) for p in projects]
+    listed = ", ".join(ids[:max_ids])
+    if len(ids) > max_ids:
+        listed += f", and {len(ids) - max_ids:,} more"
+    return f"{len(ids):,} project{'' if len(ids) == 1 else 's'} ({listed})"
+
+
+def not_checked_message(manifest, shard_id, reason):
+    """The error row for a check a shard could not run.
+
+    ``reason`` completes "the scan ..." (a project shard) or "the
+    organization-level checks ..." (the scope shard), e.g. "failed after 3 attempts."
+    """
+    if shard_id == SCOPE_SHARD:
+        return f"This check did not run: the {manifest['scope']}-level checks {reason}"
+    return f"Not checked for {describe_projects(manifest['shards'][shard_id])}: the scan {reason}"
+
+
 class FanOut:
     """Runs sharded scans. One instance per app (``Services.get_fanout()``).
 
@@ -192,11 +220,9 @@ class FanOut:
         # reporting already. It writes the status only if the first attempt never did.
         if fresh or not (self._current_status(job_id, scope_id) or {}).get("phase"):
             markers = {} if fresh else self.store.read_markers(job_id)
-            self.store.update_status(
-                job_id, scope_id, 5,
-                f"Scanning {manifest['total_projects']:,} projects in {manifest['total_shards']} parallel shards "
-                f"({len(markers)} done)...",
-                **self._status_fields(manifest, markers, phase="scanning"))
+            text = (self._progress_text(manifest, markers) if markers
+                    else f"Scanning {manifest['total_projects']:,} projects in parallel...")
+            self.store.update_status(job_id, scope_id, 5, text, **self._status_fields(manifest, markers, phase="scanning"))
         return manifest
 
     def _current_status(self, job_id, scope_id):
@@ -256,8 +282,9 @@ class FanOut:
             marker = {"shard_id": shard_id, "attempt": attempt, "projects": len(manifest["shards"][shard_id])}
             try:
                 plan = self._plan_for(manifest, shard_id)
+                subject = None if shard_id == SCOPE_SHARD else describe_projects(manifest["shards"][shard_id])
                 summary = run_check_plan(plan, job_id, sink=sink, time_budget_seconds=self.settings.shard_time_budget_seconds,
-                                         clock=self.clock)
+                                         clock=self.clock, subject=subject)
                 marker.update(status=TIMED_OUT if summary["unfinished"] else SUCCESS, checks=summary["checks"],
                               failed_checks=summary["failed"], unfinished_checks=summary["unfinished"])
             except Exception as e:
@@ -267,9 +294,9 @@ class FanOut:
                     return False  # 5xx: Cloud Tasks retries the task
                 # Final attempt: this shard's checks become error rows, and the job goes on without it.
                 names = self._check_names(manifest, shard_id)
+                message = not_checked_message(manifest, shard_id, f"failed after {attempt} attempts. Last error: {e}")
                 for name in names:
-                    record_error(sink, job_id, name,
-                                 f"Shard {shard_id} failed after {attempt} attempts; its projects were not checked. Last error: {e}")
+                    record_error(sink, job_id, name, message)
                 marker.update(status=FAILED, error=str(e), checks=len(names), failed_checks=len(names), unfinished_checks=[])
             marker["elapsed_seconds"] = round(self.clock() - started, 1)
             marker["finished_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -287,27 +314,40 @@ class FanOut:
         return {"phase": phase, "total_projects": manifest["total_projects"], "total_shards": manifest["total_shards"],
                 "completed_shards": done, "failed_shards": failed}
 
+    def _progress_text(self, manifest, markers):
+        """The status page's message while the scan runs: projects and the scope checks, not shards."""
+        shards = manifest["shards"]
+        scanned = sum(len(shards.get(shard_id, [])) for shard_id in markers)
+        text = f"Scanned {scanned:,} of {manifest['total_projects']:,} projects"
+        text += f" · {manifest['scope']}-level checks: {'completed' if SCOPE_SHARD in markers else 'in progress'}"
+        if any(marker.get("status") != SUCCESS for marker in markers.values()):
+            text += " · some checks could not run (listed as errors in the report)"
+        return text
+
+    def _subjects(self, manifest, shard_ids):
+        """``"20 projects and the organization-level checks"``: what some shards cover, for a status message."""
+        count = sum(len(manifest["shards"][shard_id]) for shard_id in shard_ids if shard_id != SCOPE_SHARD)
+        parts = [f"{count:,} project{'' if count == 1 else 's'}"] if count else []
+        if SCOPE_SHARD in shard_ids:
+            parts.append(f"the {manifest['scope']}-level checks")
+        return " and ".join(parts)
+
     def _after_shard(self, manifest, scope_id, job_id, markers):
         """The fan-in: triggers the aggregation once every shard has a marker, else reports progress."""
         total = manifest["total_shards"]
         if len(markers) >= total:
             self._trigger_aggregation(manifest, scope_id, job_id, markers)
         else:
-            shards = manifest["shards"]
-            scanned = sum(len(shards.get(shard_id, [])) for shard_id in markers)
-            fields = self._status_fields(manifest, markers, phase="scanning")
             progress = 5 + int(85 * len(markers) / total)
-            text = f"Scanned {scanned:,} of {manifest['total_projects']:,} projects ({len(markers)}/{total} shards done"
-            if fields["failed_shards"]:
-                text += f", {fields['failed_shards']} with errors"
-            self.store.update_status(job_id, scope_id, progress, text + ")", **fields)
+            self.store.update_status(job_id, scope_id, progress, self._progress_text(manifest, markers),
+                                     **self._status_fields(manifest, markers, phase="scanning"))
         return True
 
     def _trigger_aggregation(self, manifest, scope_id, job_id, markers, note=None):
         body = {"scope": manifest["scope"], "scope_id": scope_id, "job_id": job_id}
         created = self.enqueue(AGGREGATE_PATH, body, aggregate_task_id(job_id))
         if created:
-            text = note or f"All {manifest['total_shards']} shards finished. Merging results..."
+            text = note or "Scanning finished. Merging the results..."
             self.store.update_status(job_id, scope_id, 90, text, **self._status_fields(manifest, markers, phase="aggregating"))
         return created
 
@@ -333,15 +373,13 @@ class FanOut:
             markers = self.store.read_markers(job_id)
             missing = [shard_id for shard_id in manifest["shards"] if shard_id not in markers]
             fields = self._status_fields(manifest, markers, phase="aggregating")
-            self.store.update_status(job_id, scope_id, 92, f"Merging findings from {manifest['total_shards']} shards...", **fields)
+            self.store.update_status(job_id, scope_id, 92, f"Merging the findings of {manifest['total_projects']:,} projects...", **fields)
 
             findings = self.store.read_all_findings(job_id)
             for shard_id in missing:
-                projects = manifest["shards"][shard_id]
-                what = "the scope-level checks" if shard_id == SCOPE_SHARD else f"{len(projects)} projects"
+                message = not_checked_message(manifest, shard_id, "did not finish; the results are missing from this report.")
                 for name in self._check_names(manifest, shard_id):
-                    findings.append(error_finding(name, f"Shard {shard_id} ({what}) did not finish; "
-                                                        f"its results are missing from this report."))
+                    findings.append(error_finding(name, message))
             findings = merge_shard_findings(findings)
             all_results = categorize_findings(findings)
             # Also read the special-cased org policy data (written by the scope shard)
@@ -407,14 +445,15 @@ class FanOut:
                           "finished_at": datetime.now(timezone.utc).isoformat(timespec="seconds"), "swept": sweep}
                 if not self.store.write_marker(job_id, shard_id, marker, only_if_absent=True):
                     continue  # it finished after all, between our listing and now
+                message = not_checked_message(manifest, shard_id, "crashed on every attempt.")
                 for name in names:
-                    record_error(sink, job_id, name, f"Shard {shard_id} crashed on every attempt; its projects were not checked.")
+                    record_error(sink, job_id, name, message)
                 logging.warning(f"[{job_id}] Sweep {sweep}: shard {shard_id} is dead; recorded error rows.")
             markers = self.store.read_markers(job_id)
             still_pending = [shard_id for shard_id in manifest["shards"] if shard_id not in markers]
             if not still_pending:
                 self._trigger_aggregation(manifest, scope_id, job_id, markers,
-                                          note=f"{len(dead)} shard(s) crashed; merging the results of the others...")
+                                          note=f"The scan of {self._subjects(manifest, dead)} failed; merging the results of the others...")
                 return True
             if sweep < MAX_SWEEPS:
                 print(f"[{job_id}] Sweep {sweep}: {len(still_pending)} shards still queued or running; checking again later.")
@@ -425,7 +464,8 @@ class FanOut:
             logging.error(f"[{job_id}] Sweep {sweep}: {len(still_pending)} shards never finished after {MAX_SWEEPS} sweeps; "
                           f"finishing the job without them.")
             self._trigger_aggregation(manifest, scope_id, job_id, markers,
-                                      note=f"{len(still_pending)} shard(s) did not finish; generating the report with the results so far...")
+                                      note=f"The scan of {self._subjects(manifest, still_pending)} did not finish; "
+                                           f"generating the report with the results so far...")
             return True
         except Exception as e:
             print(f"[{job_id}] Sweep failed: {e}")
