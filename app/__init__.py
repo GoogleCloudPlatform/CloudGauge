@@ -54,6 +54,8 @@ def create_app(settings=None, services=None):
     resolve the worker URL, then create the Cloud Tasks queue if it's missing.
     Any failure raises, so a misconfigured Cloud Run revision fails to start with
     a clear log message. ``development`` and ``testing`` skip these steps.
+    ``synthetic`` runs them too (it is production with a simulated data plane;
+    see ``app.synthetic``) and marks every page and report with a banner.
     """
     from flask import Flask
 
@@ -71,20 +73,23 @@ def create_app(settings=None, services=None):
     app.config["TESTING"] = settings.is_testing
     app.config["CLOUDGAUGE_PROFILE"] = settings.profile
 
-    if settings.is_production:
+    if settings.startup_checks_enabled:
         # Fail fast, before any GCP call, if the deployment is missing configuration.
         settings.validate()
 
     services = services or build_services(settings)
     app.extensions[EXTENSION_KEY] = services
 
-    if settings.is_production:
+    if settings.startup_checks_enabled:
         # Deployments depend on both: Cloud Tasks calls {worker_url}/run-scan, and
         # nothing else creates the queue.
         services.get_worker_url()
         ensure_queue_if_configured(settings, client=services.get_tasks_client())
     else:
         logging.info(f"CloudGauge '{settings.profile}' profile: skipping startup checks (env validation, worker URL, task queue).")
+
+    if services.report_banner:
+        app.context_processor(lambda: {"banner": services.report_banner})
 
     register_blueprints(app)
     return app

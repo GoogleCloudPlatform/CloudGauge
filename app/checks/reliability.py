@@ -20,9 +20,8 @@ through ``app.services.gcp``.
 """
 import logging
 
-import requests
 from google.auth.transport.requests import Request as GoogleAuthRequest
-from google.cloud import asset_v1, storage
+from google.cloud import asset_v1
 from googleapiclient.errors import HttpError
 
 from app.config import SCOPES
@@ -46,7 +45,7 @@ def check_service_health_status(org_id, job_id, *, sink):
         credentials.refresh(GoogleAuthRequest())
         headers = {"Authorization": f"Bearer {credentials.token}"}
         url = f"https://servicehealth.googleapis.com/v1beta/organizations/{org_id}/locations/global/organizationEvents?filter=state=ACTIVE%20category=INCIDENT"
-        response = requests.get(url, headers=headers)
+        response = gcp.http_get(url, headers=headers)
         if response.status_code == 200:
             result = {"Check": CHECK_NAME, "Finding": [{"Status": "Enabled"}], "Status": "Compliant"}
         elif response.status_code == 403:
@@ -110,7 +109,7 @@ def check_storage_versioning(scope_id, all_projects, job_id, *, sink):
     def check_project(p):
         project_id, findings = p['projectId'], []
         try:
-            storage_client = storage.Client(project=project_id)
+            storage_client = gcp.project_storage_client(project_id)
             for bucket in storage_client.list_buckets():
                 if not bucket.versioning_enabled:
                     findings.append({"Project": project_id, "Bucket": bucket.name, "Issue": "Object versioning is not enabled."})
@@ -203,7 +202,7 @@ def check_resilience_assets(org_id, job_id, *, sink):
 
     try:
         credentials, _ = gcp.auth_default(scopes=SCOPES)
-        asset_client = asset_v1.AssetServiceClient(credentials=credentials)
+        asset_client = gcp.asset_client(credentials)
         parent = f"organizations/{org_id}"
 
         # Cloud SQL Checks

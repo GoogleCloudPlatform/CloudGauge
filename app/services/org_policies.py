@@ -21,7 +21,6 @@ import csv
 import logging
 import traceback
 
-import requests
 
 from app.config import BEST_PRACTICES_FETCH_TIMEOUT_SECONDS, get_settings, SCOPES
 from app.services import gcp
@@ -107,7 +106,7 @@ def fetch_best_practices(url=None, timeout=BEST_PRACTICES_FETCH_TIMEOUT_SECONDS)
     try:
         if url is None:
             url = get_settings().best_practices_csv_url
-        response = requests.get(url, timeout=timeout)
+        response = gcp.http_get(url, timeout=timeout)
         response.raise_for_status()
         return parse_best_practices_csv(response.text)
 

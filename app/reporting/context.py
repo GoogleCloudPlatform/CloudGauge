@@ -135,6 +135,8 @@ class ReportContext:
     overview: Overview
     score_summary: tuple
     sections: tuple  # only the sections that have checks or org policies
+    # A notice rendered above the overview (the synthetic load mode sets it). None: nothing is rendered.
+    banner: str | None = None
 
     def template_vars(self):
         """The top-level template variables (a shallow dict of the fields)."""
@@ -242,7 +244,7 @@ def build_org_policy_summary(org_policy_data):
     return OrgPolicySummary(tuple(categories), compliant_policy_count, total_policies, status_class, icon)
 
 
-def build_report_context(scope, scope_id, job_id, all_results):
+def build_report_context(scope, scope_id, job_id, all_results, banner=None):
     """
     Builds the data for the HTML report.
 
@@ -252,6 +254,7 @@ def build_report_context(scope, scope_id, job_id, all_results):
         job_id (str): The unique ID for this scan job.
         all_results (dict): Categorized findings, plus the optional
             ``"Organization Policies"`` entry ``(best_practices, current_policies)``.
+        banner (str, optional): A notice to show at the top of the report.
 
     Returns:
         ReportContext: Everything the report templates display.
@@ -341,4 +344,5 @@ def build_report_context(scope, scope_id, job_id, all_results):
         overview=Overview(action_count, investigation_count, compliant_count, error_count),
         score_summary=score_summary,
         sections=tuple(sections),
+        banner=banner,
     )

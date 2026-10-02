@@ -51,7 +51,7 @@ def render_report(context):
     return report_environment().get_template(REPORT_TEMPLATE).render(context.template_vars())
 
 
-def generate_html_report(scope, scope_id, job_id, **all_results):
+def generate_html_report(scope, scope_id, job_id, banner=None, **all_results):
     """
     Generates a dynamic and interactive HTML report from the scan results.
 
@@ -59,10 +59,12 @@ def generate_html_report(scope, scope_id, job_id, **all_results):
         scope (str): The scope of the scan (organization, folder, project).
         scope_id (str): The ID of the scanned resource.
         job_id (str): The unique ID for this scan job.
+        banner (str, optional): A notice shown at the top of the report (the
+            synthetic load mode uses it). ``None`` renders nothing.
         **all_results: The dictionary of categorized findings.
 
     Returns:
         str: A string containing the full HTML report.
     """
     print(f"[{job_id}] 📊 Generating final report for {scope}: {scope_id}...")
-    return render_report(build_report_context(scope, scope_id, job_id, all_results))
+    return render_report(build_report_context(scope, scope_id, job_id, all_results, banner=banner))

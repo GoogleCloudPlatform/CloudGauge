@@ -42,6 +42,9 @@
     <div class="main-content">
         <h1>CloudGauge Report</h1>
         <p style="color: var(--light-text-color);">Scope: {{ scope_title }} | ID: {{ scope_id }} | Report ID: {{ job_id }}</p>
+{% if banner %}
+        <div role="note" style="margin: 0 0 20px; padding: 12px 16px; border-left: 6px solid #f9ab00; background: #fef7e0; color: #5f4b00; font-weight: 500;">{{ banner }}</div>
+{% endif %}
 
         <div id="overview-section" class="content-section">
             <div class="checks-section">

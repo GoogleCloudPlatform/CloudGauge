@@ -31,7 +31,7 @@ from app.reporting.html_report import generate_html_report
 from app.utils import ThrottledProgressReporter
 
 
-def execute_scan_job(data, *, store):
+def execute_scan_job(data, *, store, banner=None):
     """
     Executes the main `run_all_checks` function and uploads the generated reports
     to Google Cloud Storage.
@@ -39,6 +39,8 @@ def execute_scan_job(data, *, store):
     Args:
         data (dict): The Cloud Tasks payload with ``scope``, ``scope_id`` and ``job_id``.
         store (GcsResultsStore): The results bucket: findings, status, and reports.
+        banner (str, optional): A notice rendered at the top of the HTML report
+            (the synthetic load mode marks its reports with one).
 
     Returns:
         bool: True if the reports were uploaded. False if the job failed; the error
@@ -73,7 +75,7 @@ def execute_scan_job(data, *, store):
         if org_policy_data[0] and org_policy_data[1]:
             all_results["Organization Policies"] = org_policy_data
 
-        html_report = generate_html_report(scope, scope_id, job_id, **all_results)
+        html_report = generate_html_report(scope, scope_id, job_id, banner=banner, **all_results)
         csv_report = generate_csv_data(all_results)
 
         store.upload_reports(job_id, scope_id, html_report, csv_report)

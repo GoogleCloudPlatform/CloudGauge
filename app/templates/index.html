@@ -37,6 +37,7 @@
 </head>
 <body>
     <div class="scan-card">
+        {% if banner %}<div role="note" style="margin: 0 0 20px; padding: 12px 16px; border-left: 6px solid #f9ab00; background: #fef7e0; color: #5f4b00; font-weight: 500; text-align: left;">{{ banner }}</div>{% endif %}
         <h1>Review Your Cloud Environment</h1>
         <p>Select a scope and resource to begin a comprehensive review.</p>
         <form action="/scan" method="post">

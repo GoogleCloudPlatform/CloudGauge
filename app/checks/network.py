@@ -24,9 +24,9 @@ module-level ``parse_network_insight_content`` (unchanged).
 import logging
 import re
 
-from google.cloud import recommender_v1
 from google.cloud.recommender_v1.types import Insight
 
+from app.services import gcp
 from app.utils import call_api_with_backoff
 
 
@@ -184,7 +184,7 @@ def run_network_insights(scope_id, all_projects, active_zones, active_regions, j
         project_id = project['projectId']
         project_findings_map = {} 
         try:
-            client = recommender_v1.RecommenderClient()
+            client = gcp.recommender_client()
             for loc in all_locations:
                 for check_name, insight_type_id in insight_type_map.items(): 
                     parent = f"projects/{project_id}/locations/{loc}/insightTypes/{insight_type_id}"

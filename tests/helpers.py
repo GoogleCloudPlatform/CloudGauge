@@ -32,8 +32,9 @@ LEGACY_PATH = pathlib.Path(__file__).resolve().parent / 'legacy' / 'cloudgauge_l
 BETA_V1_PATH = pathlib.Path(__file__).resolve().parent / 'legacy' / 'cloudgauge_beta_v1.py'
 
 # Every environment variable that the app or the legacy module reads.
-APP_ENV_VARS = (*fakes.TEST_ENV, 'K_SERVICE', 'WORKER_URL', 'CLOUDGAUGE_ENV', 'GEMINI_MODEL',
-                'VERTEX_LOCATION', 'BEST_PRACTICES_CSV_URL')
+APP_ENV_VARS = (*fakes.TEST_ENV, 'K_SERVICE', 'WORKER_URL', 'WORKER_AUDIENCE', 'CLOUDGAUGE_ENV', 'GEMINI_MODEL',
+                'VERTEX_LOCATION', 'BEST_PRACTICES_CSV_URL', 'SYNTHETIC_PROJECTS', 'SYNTHETIC_SEED',
+                'SYNTHETIC_LATENCY_MS', 'SYNTHETIC_ERROR_RATE', 'SYNTHETIC_DENIED_FRACTION')
 # What a deployed Cloud Run revision sees: the five required variables plus K_SERVICE.
 DEPLOYED_ENV = {**fakes.TEST_ENV, 'K_SERVICE': fakes.K_SERVICE}
 

@@ -278,16 +278,17 @@ def ignore_patterns(name):
 
 
 def test_build_contexts():
-    """The app image's context leaves out VCS, caches, venvs, and tests; the test image's keeps tests/."""
+    """The app image's context leaves out VCS, caches, venvs, tests and tools; the test image's keeps tests/ and tools/."""
     app_context = ignore_patterns('.dockerignore')
-    assert {'.git/', '.venv/', '**/__pycache__/', 'tests/', 'run.py'} <= app_context
+    assert {'.git/', '.venv/', '**/__pycache__/', 'tests/', 'tools/', 'run.py'} <= app_context
     for needed in ('app/', 'app', 'cloudgauge.py', 'requirements.txt', 'Dockerfile'):
         assert needed not in app_context
     test_context = ignore_patterns('Dockerfile.test.dockerignore')
     assert {'.git/', '.venv/', '**/__pycache__/'} <= test_context
-    for needed in ('tests/', 'run.py', 'pytest.ini', 'requirements-dev.txt', 'Dockerfile',
+    for needed in ('tests/', 'tools/', 'run.py', 'pytest.ini', 'requirements-dev.txt', 'Dockerfile',
                    '.dockerignore', 'Dockerfile.test.dockerignore'):
         assert needed not in test_context
+    assert 'COPY tools ./tools' in (ROOT / 'Dockerfile.test').read_text()  # test_synthetic.py imports the harness
 
 
 def test_app_needs_neither_vertexai_nor_aiplatform():

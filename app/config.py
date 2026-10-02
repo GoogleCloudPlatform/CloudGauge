@@ -51,15 +51,38 @@ LOG_FORMAT = '%(levelname)s: [%(asctime)s] %(message)s'
 LOG_DATEFMT = '%Y-%m-%d %H:%M:%S'
 
 # CLOUDGAUGE_ENV selects the profile. The app factory (Phase 4) runs the startup
-# checks (env validation, worker URL lookup, queue creation) only in production.
-PROFILES = ('production', 'development', 'testing')
+# checks (env validation, worker URL lookup, queue creation) only in production
+# and synthetic. 'synthetic' is production plus the synthetic load mode
+# (app.synthetic): the checks run against a generated organization instead of
+# Google Cloud APIs. It is opt-in by profile *and* SYNTHETIC_PROJECTS, so it
+# can't be switched on by accident on a real deployment.
+PROFILES = ('production', 'development', 'testing', 'synthetic')
 DEFAULT_PROFILE = 'production'
+SYNTHETIC_PROFILE = 'synthetic'
+DEFAULT_SYNTHETIC_SEED = 42
+DEFAULT_SYNTHETIC_LATENCY_MS = 150.0  # median simulated latency per API call
+DEFAULT_SYNTHETIC_ERROR_RATE = 0.0  # share of API calls that fail with 429
+DEFAULT_SYNTHETIC_DENIED_FRACTION = 0.02  # share of projects that answer 403 to everything
 
 
 def _gemini_model(value):
     """``GEMINI_MODEL`` as a model ID, or ``AUTO_GEMINI_MODEL`` when unset, empty, or any casing of "auto"."""
     value = (value or '').strip()
     return AUTO_GEMINI_MODEL if value.lower() in ('', AUTO_GEMINI_MODEL) else value
+
+
+def _number(env, name, default, cast, minimum=None, maximum=None):
+    """Reads a numeric environment variable, with a default and an inclusive range."""
+    raw = (env.get(name) or '').strip()
+    if not raw:
+        return default
+    try:
+        value = cast(raw)
+    except ValueError:
+        raise ValueError(f"{name} must be a number, got '{raw}'") from None
+    if (minimum is not None and value < minimum) or (maximum is not None and value > maximum):
+        raise ValueError(f"{name} must be between {minimum} and {maximum}, got {value}")
+    return value
 
 
 @dataclass(frozen=True)
@@ -84,18 +107,29 @@ class Settings:
     vertex_location: str = DEFAULT_VERTEX_LOCATION
     best_practices_csv_url: str = BEST_PRACTICES_CSV_URL
     profile: str = DEFAULT_PROFILE
+    # Synthetic load mode (profile 'synthetic' only; see app.synthetic)
+    synthetic_projects: int = 0
+    synthetic_seed: int = DEFAULT_SYNTHETIC_SEED
+    synthetic_latency_ms: float = DEFAULT_SYNTHETIC_LATENCY_MS
+    synthetic_error_rate: float = DEFAULT_SYNTHETIC_ERROR_RATE
+    synthetic_denied_fraction: float = DEFAULT_SYNTHETIC_DENIED_FRACTION
 
     @classmethod
     def from_env(cls, environ=None):
         """Reads settings from ``environ`` (default: ``os.environ``).
 
         Raises:
-            ValueError: If ``CLOUDGAUGE_ENV`` is not one of ``PROFILES``.
+            ValueError: If ``CLOUDGAUGE_ENV`` is not one of ``PROFILES``, if a
+                synthetic setting is out of range, or if the synthetic profile
+                is selected without ``SYNTHETIC_PROJECTS``.
         """
         env = os.environ if environ is None else environ
         profile = (env.get('CLOUDGAUGE_ENV') or DEFAULT_PROFILE).strip().lower()
         if profile not in PROFILES:
             raise ValueError(f"Invalid CLOUDGAUGE_ENV '{profile}'. Expected one of: {', '.join(PROFILES)}")
+        synthetic_projects = _number(env, 'SYNTHETIC_PROJECTS', 0, int, minimum=0)
+        if profile == SYNTHETIC_PROFILE and synthetic_projects < 1:
+            raise ValueError("CLOUDGAUGE_ENV=synthetic needs SYNTHETIC_PROJECTS (the number of generated projects, at least 1)")
         return cls(
             project_id=env.get('PROJECT_ID'),
             location=env.get('LOCATION'),
@@ -109,6 +143,11 @@ class Settings:
             vertex_location=env.get('VERTEX_LOCATION') or DEFAULT_VERTEX_LOCATION,
             best_practices_csv_url=env.get('BEST_PRACTICES_CSV_URL') or BEST_PRACTICES_CSV_URL,
             profile=profile,
+            synthetic_projects=synthetic_projects,
+            synthetic_seed=_number(env, 'SYNTHETIC_SEED', DEFAULT_SYNTHETIC_SEED, int),
+            synthetic_latency_ms=_number(env, 'SYNTHETIC_LATENCY_MS', DEFAULT_SYNTHETIC_LATENCY_MS, float, minimum=0),
+            synthetic_error_rate=_number(env, 'SYNTHETIC_ERROR_RATE', DEFAULT_SYNTHETIC_ERROR_RATE, float, minimum=0, maximum=1),
+            synthetic_denied_fraction=_number(env, 'SYNTHETIC_DENIED_FRACTION', DEFAULT_SYNTHETIC_DENIED_FRACTION, float, minimum=0, maximum=1),
         )
 
     @property
@@ -118,6 +157,16 @@ class Settings:
     @property
     def is_testing(self):
         return self.profile == 'testing'
+
+    @property
+    def is_synthetic(self):
+        """True in the synthetic load mode: generated organization, no Google Cloud data-plane calls."""
+        return self.profile == SYNTHETIC_PROFILE
+
+    @property
+    def startup_checks_enabled(self):
+        """Whether ``create_app`` validates the env, resolves the worker URL and ensures the queue."""
+        return self.profile in ('production', SYNTHETIC_PROFILE)
 
     def missing_required(self):
         """Returns the names of required environment variables that are unset or empty."""

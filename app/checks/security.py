@@ -21,7 +21,6 @@ through ``app.services.gcp``.
 import logging
 from datetime import datetime, timezone
 
-from google.cloud import storage
 from googleapiclient.errors import HttpError
 
 from app.config import SCOPES
@@ -256,7 +255,7 @@ def check_public_buckets(scope_id, all_projects, job_id, *, sink):
         project_id, findings = p['projectId'], []
         try:
             # Using a project-specific client can be more reliable at scale
-            storage_client_local = storage.Client(project=project_id)
+            storage_client_local = gcp.project_storage_client(project_id)
             for bucket in storage_client_local.list_buckets():
                 policy = bucket.get_iam_policy(requested_policy_version=3)
                 for binding in policy.bindings:
@@ -457,7 +456,7 @@ def check_storage_ubla(scope_id, all_projects, job_id, *, sink):
     def check_project(p):
         project_id, findings = p['projectId'], []
         try:
-            storage_client_local = storage.Client(project=project_id)
+            storage_client_local = gcp.project_storage_client(project_id)
             for bucket in storage_client_local.list_buckets():
                 if not bucket.iam_configuration.uniform_bucket_level_access_enabled:
                     findings.append({"Project": project_id, "Bucket": bucket.name, "Issue": "UBLA not enabled."})

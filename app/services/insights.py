@@ -18,6 +18,7 @@ moved here unchanged.
 """
 import logging
 
+from app.services import gcp
 from app.services.resource_manager import get_active_compute_locations, list_projects_for_scope
 
 
@@ -29,8 +30,7 @@ def run_cost_optimization_insights(scope, scope_id):
         return []
     
     active_zones, active_regions = get_active_compute_locations(all_projects)
-    from google.cloud.recommender_v1 import RecommenderClient
-    recommender_client = RecommenderClient()
+    recommender_client = gcp.recommender_client()
 
     
     global_insights = {

@@ -23,7 +23,6 @@ import logging
 import re
 
 from google.api_core import exceptions as core_exceptions
-from google.cloud import asset_v1, osconfig_v1, recommender_v1
 
 from app.config import SCOPES
 from app.services import gcp
@@ -79,7 +78,7 @@ def check_os_config_coverage(scope_id, all_projects, job_id, *, sink):
         try:
             credentials, _ = gcp.auth_default(scopes=SCOPES)
             compute = gcp.api_build('compute', 'v1', credentials=credentials)
-            osconfig = osconfig_v1.OsConfigZonalServiceClient()
+            osconfig = gcp.osconfig_client()
             vms, req = [], compute.instances().aggregatedList(project=project_id, filter='status = "RUNNING"')
             while req:
                 resp = req.execute(); req = compute.instances().aggregatedList_next(previous_request=req, previous_response=resp)
@@ -147,7 +146,7 @@ def check_monitoring_coverage(scope_id, all_projects, job_id, *, sink):
         try:
             credentials, _ = gcp.auth_default(scopes=SCOPES)
             monitor = gcp.api_build('monitoring', 'v3', credentials=credentials)
-            asset = asset_v1.AssetServiceClient(credentials=credentials)
+            asset = gcp.asset_client(credentials)
             policies = monitor.projects().alertPolicies().list(name=f"projects/{project_id}").execute().get('alertPolicies', [])
             filters = " ".join(c.get('conditionThreshold', {}).get('filter', '') for p in policies for c in p.get('conditions', [])).lower()
             
@@ -268,7 +267,7 @@ def run_miscellaneous_checks_refactored(scope, scope_id, all_projects, job_id, *
     if scope == 'organization':
         print("   -> Checking for organization-level insights...")
         try:
-            recommender_client = recommender_v1.RecommenderClient()
+            recommender_client = gcp.recommender_client()
             
             # Check for Org-Level Recent Changes
             parent_recent = f"organizations/{scope_id}/locations/global/insightTypes/google.cloud.RecentChangeInsight"
@@ -313,7 +312,7 @@ def run_miscellaneous_checks_refactored(scope, scope_id, all_projects, job_id, *
         project_id = project['projectId']
         project_findings_list = []
         try:
-            recommender_client = recommender_v1.RecommenderClient()
+            recommender_client = gcp.recommender_client()
             parent = f"projects/{project_id}/locations/global/insightTypes/google.cloud.RecentChangeInsight"
             insights = recommender_client.list_insights(parent=parent)
             for insight in insights:

@@ -25,6 +25,7 @@ Final results are delivered as an interactive **HTML report** and a **CSV file**
 * [Updating an Existing Deployment (Zero-Downtime)](#updating-an-existing-deployment-zero-downtime)
 * [How to Use](#how-to-use)
 * [Local Development & Testing](#local-development--testing)
+* [Load Testing with a Synthetic Organization](#load-testing-with-a-synthetic-organization)
 * [Troubleshooting](#troubleshooting)
 * [Cleanup Script](#cleanup-script)
 * [License & Support](#license--support)
@@ -166,8 +167,10 @@ app/
 │   └── categories.py    #   Maps check names to report categories
 ├── services/            # GCP clients, Cloud Tasks, GCS results store, Gemini, insights, org policies
 ├── reporting/           # HTML and CSV report builders
+├── synthetic/           # Synthetic load mode: a generated organization behind the GCP client seam
 └── templates/           # index.html, status.html, report/ (HTML, CSS, JS)
 tests/                   # pytest suite (see Local Development & Testing)
+tools/synthetic_scan.py  # Offline load test against the synthetic organization (see Load Testing)
 Dockerfile               # Production image
 Dockerfile.test          # Runs the test suite inside the production image
 cloudbuild.yaml          # Cloud Build: build -> test -> push
@@ -444,7 +447,12 @@ CloudGauge is configured entirely through environment variables on the Cloud Run
 | `WORKER_URL` | No | auto-discovered | URL that Cloud Tasks calls for `/run-scan`. By default the service discovers its own URL at startup (needs `roles/run.viewer`). Set it to override discovery, for example for a tagged canary revision. |
 | `WORKER_AUDIENCE` | No | the task URL | Audience of the OIDC token on scan tasks. Leave unset normally. For a canary, set it to the service's **main** URL: Cloud Run rejects tokens whose audience is a revision tag URL (HTTP 401). |
 | `BEST_PRACTICES_CSV_URL` | No | GitHub-hosted CSV | Source of the best-practice list used by the Organization Policies check. |
-| `CLOUDGAUGE_ENV` | No | `production` | `production` runs the startup checks (required variables, worker URL, queue). `development` and `testing` skip them. |
+| `CLOUDGAUGE_ENV` | No | `production` | `production` runs the startup checks (required variables, worker URL, queue). `development` and `testing` skip them. `synthetic` is production with a simulated data plane for load tests (see [Load Testing](#load-testing-with-a-synthetic-organization)). |
+| `SYNTHETIC_PROJECTS` | With `synthetic` | – | Number of generated projects. Required by, and only read in, the `synthetic` profile. |
+| `SYNTHETIC_SEED` | No | `42` | Seed of the generated organization. Same seed, same organization. |
+| `SYNTHETIC_LATENCY_MS` | No | `150` | Median simulated latency per API call, in milliseconds. `0` for CPU-only runs. |
+| `SYNTHETIC_ERROR_RATE` | No | `0` | Fraction (0–1) of simulated API calls that fail with HTTP 429 / `RESOURCE_EXHAUSTED`. |
+| `SYNTHETIC_DENIED_FRACTION` | No | `0.02` | Fraction (0–1) of generated projects whose APIs all answer 403 (missing permissions). |
 
 ## **Updating an Existing Deployment (Zero-Downtime)**
 
@@ -523,7 +531,7 @@ Scans are always executed through Cloud Tasks, which must reach a public worker 
 pytest                         # full suite
 pytest tests/test_smoke.py     # quick pre-deploy smoke tests
 # Lint: errors, undefined names, and unused/redefined imports (tests/legacy is a frozen upstream copy)
-ruff check --extend-exclude tests/legacy --select E9,F63,F7,F82,F401,F811 app tests cloudgauge.py run.py
+ruff check --extend-exclude tests/legacy --select E9,F63,F7,F82,F401,F811 app tests tools cloudgauge.py run.py
 ```
 
 **Test the container.** This is what the `test` step in `cloudbuild.yaml` runs:
@@ -535,6 +543,35 @@ docker run --rm cloudgauge-test
 ```
 
 `tests/legacy/` holds a frozen copy of the original single-file `cloudgauge.py`. The parity tests use it to check that the refactored routes, worker, and reports behave like the original.
+
+## **Load Testing with a Synthetic Organization**
+
+Few teams have a spare organization with a thousand projects, but that is the size at which a scan is most likely to hang, exhaust API quota, or run out of memory. The **synthetic load mode** scans a *generated* organization instead of Google Cloud: every data-plane API the checks call (Resource Manager, Compute, IAM, Storage, Asset Inventory, Recommender, Cloud SQL, GKE, Monitoring, Logging, OS Config, ...) is answered from a deterministic in-process model (`app/synthetic/`), with simulated latency, optional quota errors (429) and projects whose APIs are denied (403). The checks, the reports, Cloud Tasks and the results bucket are the real code paths: nothing in the scan pipeline knows it is being fed synthetic data.
+
+The organization is derived from `(seed, project index)`, so the same settings always produce the same projects, VMs, buckets, IAM bindings, findings, and so on. Project IDs look like `syn-42-00017`.
+
+**1. Offline, in-process (no Google Cloud needed).** `tools/synthetic_scan.py` runs one scan job the way the worker does, against an in-memory results bucket, and prints what matters for capacity planning: API calls per API and per method, wall-clock time versus simulated API wait, peak concurrent calls, peak memory, objects written to the bucket, and report sizes.
+
+```
+python tools/synthetic_scan.py --projects 100                     # 150 ms median API latency (realistic)
+python tools/synthetic_scan.py --projects 1000 --latency-ms 0     # CPU and call counts only, in seconds
+python tools/synthetic_scan.py --projects 50 --error-rate 0.02 --denied-fraction 0.1 --scope folder
+python tools/synthetic_scan.py --projects 200 --quiet --json run.json   # machine-readable, for comparing runs
+```
+
+Reports are written to `synthetic-reports/` (or `--output-dir`). Add `--quiet` to hide the scan's own log lines.
+
+**2. Deployed, end to end.** Deploy the normal image as a *separate* Cloud Run service (or a no-traffic tagged revision) with `CLOUDGAUGE_ENV=synthetic` and `SYNTHETIC_PROJECTS=<n>`, plus the usual required variables. Cloud Run, Cloud Tasks and the results bucket are real, so request timeouts, task deadlines and retries, memory limits and status polling behave exactly as they would for a real organization of that size, while no Google Cloud API other than the Cloud Run Admin API (worker URL discovery) is called. The scope picker lists the generated organization, folders and projects. Every page and report carries a **SYNTHETIC LOAD TEST** banner, and the mode cannot be switched on by accident: it needs both the profile *and* `SYNTHETIC_PROJECTS`, and the production profile ignores all `SYNTHETIC_*` variables.
+
+```
+gcloud run deploy cloudgauge-loadtest --region ${REGION} --image ${IMAGE}:${TAG} \
+  --service-account ${SERVICE_ACCOUNT_EMAIL} --memory 2Gi --timeout 3600 \
+  --set-env-vars PROJECT_ID=${PROJECT_ID},LOCATION=${REGION},TASK_QUEUE=cloudgauge-loadtest-queue,\
+RESULTS_BUCKET=${RESULTS_BUCKET},SERVICE_ACCOUNT_EMAIL=${SERVICE_ACCOUNT_EMAIL},\
+CLOUDGAUGE_ENV=synthetic,SYNTHETIC_PROJECTS=1000
+```
+
+> **What a first run shows.** With the default 150 ms latency, 20 projects take about 8 minutes and ~3,600 API calls (≈180 per project, three quarters of them Recommender `insights.list` / `recommendations.list`), while only ~2 calls are in flight on average: most checks walk the projects one at a time. Scan time therefore grows linearly with the number of projects (≈40 minutes for 100, hours for 1,000), which is the behaviour the fan-out architecture work targets.
 
 ## **Troubleshooting**
 

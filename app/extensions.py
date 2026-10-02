@@ -39,11 +39,14 @@ class Services:
         results_store: Findings, status, and reports (``GcsResultsStore`` or a fake).
         tasks_client: Cloud Tasks client; ``None`` means the process-wide shared client.
         worker_url: URL that Cloud Tasks calls; ``None`` means resolve it on first use.
+        report_banner: Notice rendered on the pages and reports; ``None`` means none.
+            The synthetic load mode sets it so no synthetic report can pass for a real one.
     """
     settings: Settings
     results_store: GcsResultsStore
     tasks_client: object = None
     worker_url: str | None = None
+    report_banner: str | None = None
     _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False, compare=False)
 
     def get_tasks_client(self):
@@ -62,8 +65,18 @@ class Services:
 
 
 def build_services(settings):
-    """Returns the production services for ``settings``; clients are created on first use."""
-    return Services(settings=settings, results_store=GcsResultsStore(settings.results_bucket))
+    """Returns the production services for ``settings``; clients are created on first use.
+
+    In the synthetic profile the data-plane provider is installed here too, so a
+    ``Services`` built from synthetic settings always scans the generated
+    organization and labels what it produces.
+    """
+    banner = None
+    if settings.is_synthetic:
+        from app import synthetic  # imports the checks; only needed in this profile
+
+        banner = synthetic.banner_for(synthetic.install(settings))
+    return Services(settings=settings, results_store=GcsResultsStore(settings.results_bucket), report_banner=banner)
 
 
 def get_services():

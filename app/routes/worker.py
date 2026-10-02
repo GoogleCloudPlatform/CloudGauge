@@ -31,6 +31,7 @@ def run_scan_worker():
     function and uploads the generated reports to Google Cloud Storage.
     """
     data = request.get_json(force=True)
-    if scan_job.execute_scan_job(data, store=get_services().results_store):
+    services = get_services()
+    if scan_job.execute_scan_job(data, store=services.results_store, banner=services.report_banner):
         return "Scan completed and reports uploaded.", 200
     return "Internal Server Error", 500

@@ -25,8 +25,7 @@ import logging
 
 from google.api_core import exceptions as core_exceptions
 from google.api_core.exceptions import PermissionDenied
-from google.cloud import recommender_v1
-
+from app.services import gcp
 from app.utils import call_api_with_backoff
 
 
@@ -127,7 +126,7 @@ def run_cost_recommendations(scope_id, all_projects, active_zones, active_region
         findings_map = {}
         recommender_map = COST_RECOMMENDERS
         try:
-            client = recommender_v1.RecommenderClient()
+            client = gcp.recommender_client()
             for check, (rec_id, loc_type) in recommender_map.items():
                 locations = active_zones if loc_type == "zone" else active_regions
                 for loc in locations:

@@ -21,7 +21,6 @@ import concurrent.futures
 import logging
 import traceback
 
-from google.cloud import asset_v1
 
 from app.config import SCOPES
 from app.services import gcp
@@ -53,7 +52,7 @@ def list_projects_for_scope(scope, scope_id):
 
     # --- NEW RECURSIVE LOGIC USING CLOUD ASSET API ---
     try:
-        asset_client = asset_v1.AssetServiceClient()
+        asset_client = gcp.asset_client()
 
         # Define the parent scope for the asset search
         parent_scope_map = {
@@ -189,7 +188,7 @@ def list_resources_for_scope(scope, org_id):
         InvalidScopeError: If ``scope`` is not recognized.
     """
     resources = []
-    asset_client = asset_v1.AssetServiceClient()
+    asset_client = gcp.asset_client()
     parent_scope = f"organizations/{org_id}"
 
     if scope == 'organization':

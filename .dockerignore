@@ -19,6 +19,7 @@ htmlcov/
 
 # Tests and development-only files
 tests/
+tools/
 run.py
 requirements-dev.txt
 pytest.ini

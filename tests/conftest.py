@@ -51,8 +51,10 @@ def gcp(monkeypatch):
     monkeypatch.setattr(gemini_service, 'get_client', fake.gemini.client)
     gemini_service.reset_model_cache()
     gcp_clients.reset_clients()
+    gcp_clients.reset_provider()
     yield fake
     gcp_clients.reset_clients()
+    gcp_clients.reset_provider()
     gemini_service.reset_model_cache()
 
 

@@ -12,6 +12,7 @@ USER root
 COPY requirements-dev.txt pytest.ini Dockerfile .dockerignore Dockerfile.test.dockerignore run.py ./
 RUN pip install --no-cache-dir -r requirements-dev.txt
 COPY tests ./tests
+COPY tools ./tools
 USER cloudgauge
 
 # Replaces the app image's CMD (setting ENTRYPOINT clears the inherited CMD).
