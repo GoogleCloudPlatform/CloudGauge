@@ -244,9 +244,9 @@ def test_denied_projects_and_quota_errors_do_not_break_the_scan(gcp):
 
 def test_report_banner_is_optional_and_escaped():
     plain = generate_html_report('project', 'p', 'j')
-    assert 'role="note"' not in plain
+    assert 'class="report-banner"' not in plain
     marked = generate_html_report('project', 'p', 'j', banner='Synthetic <b>data</b>')
-    assert 'role="note"' in marked and 'Synthetic &lt;b&gt;data&lt;/b&gt;' in marked and '<b>data</b>' not in marked
+    assert 'class="report-banner"' in marked and 'Synthetic &lt;b&gt;data&lt;/b&gt;' in marked and '<b>data</b>' not in marked
 
 
 # --- The app in the synthetic profile ---

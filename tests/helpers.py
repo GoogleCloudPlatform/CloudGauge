@@ -137,6 +137,10 @@ def report_facts(html):
     with its status badge, its details (table headers and rows, or text), and
     whether it has a remediation placeholder. Items are returned sorted, since
     only their order within a section changed. Values are HTML-unescaped.
+
+    ``sections`` are the category pages that list checks (with their header
+    scores in ``section_scores``): the new report also gives a category with
+    nothing to list a page, which the legacy report left out.
     """
     def text(markup):
         # Only unescape: legacy wrote some details as raw HTML (e.g. <b>allow-all</b>)
@@ -154,12 +158,17 @@ def report_facts(html):
         details = re.search(r'<div class="details">(.*?)</div>', item, re.S)
         details_text = None if (rows or details is None) else text(details.group(1))
         items.append((name, badge, headers, rows, details_text, "class='remediation-placeholder'" in item))
+    # (section id, section body) pairs; the body runs to the next section or the script.
+    parts = re.split(r'<div id="([\w-]+)-section" class="content-section"', html.split('<script', 1)[0])
+    sections = [(parts[i], parts[i + 1]) for i in range(1, len(parts) - 1, 2)]
+    listed = [(sid, body) for sid, body in sections if 'class="checks-list"' in body]
     return {
         'title': re.search(r'<title>(.*?)</title>', html).group(1),
         'header': text(re.search(r'<p style="color: var\(--light-text-color\);">(.*?)</p>', html).group(1)),
         'overview': re.findall(r'<h3>([\w ]+)</h3><p class="count">(\d+)</p>', html),
-        'scores': re.findall(r'score-badge score-(\w+)">(\d+)%', html),
-        'sections': re.findall(r'<div id="([\w-]+)-section" class="content-section"', html),
+        'scores': re.findall(r'score-badge score-(\w+)">(\d+)%</span></td>', html),  # the Review Scores table
+        'sections': [sid for sid, _ in listed],
+        'section_scores': [(sid, *re.search(r'score-badge score-(\w+)">(\d+)% Compliant', body).groups()) for sid, body in listed],
         'items': sorted(items),
         'console_link': 'active-assist/list/security/recommendations?organizationId=' in html,
     }

@@ -22,6 +22,10 @@
   after the first rows_per_page carry the hidden attribute and _script.js
   reveals them ("Show 50 more"), sorts columns, and filters rows. A table
   holds at most max_rows_per_check rows; the note under it points to the CSV.
+
+  A page is never blank: a category with nothing to list shows its
+  empty_message, and a page whose checks are all hidden by the filter shows
+  the .filter-empty note (filled in by applyRowFilter in _script.js).
 #}
 {% macro details_cell(details, rows_per_page) -%}
 {% if details is not none -%}
@@ -100,6 +104,9 @@
             {%- endfor %}
         </div>
         {% endif %}
+        {% if section.empty_message %}
+        <div class="empty-state" role="note"><span class="icon">&#10003;</span>{{ section.empty_message }}</div>
+        {% else %}
         <ul class="checks-list">
             {% if section.org_policies is not none %}
             {{ org_policy_item(section.org_policies) }}
@@ -108,6 +115,8 @@
             {{ check_item(check, rows_per_page, csv_href) }}
             {% endfor %}
         </ul>
+        <div class="empty-state filter-empty" role="status" hidden></div>
+        {% endif %}
         {% if section.footer == "cost" %}
         <div class="section-footer">
             <p class="insights-intro">For a detailed breakdown of potential savings, use the button below to query the Recommender API (this may be slow).</p>

@@ -144,9 +144,11 @@ function currentFilter() {
 }
 
 // Hides the rows (and the checks) that don't contain the filter text; an empty filter restores the paging.
+// A page whose checks are all hidden shows its .filter-empty note instead of going blank.
 function applyRowFilter() {
     const term = currentFilter();
     let matchedChecks = 0, totalChecks = 0, matchedRows = 0;
+    const matchedOnPage = new Map();
     document.querySelectorAll('.checks-list > li').forEach(item => {
         totalChecks++;
         const table = item.querySelector('table.details-table');
@@ -172,7 +174,20 @@ function applyRowFilter() {
             visible = item.textContent.toLowerCase().includes(term);
         }
         item.hidden = !visible;
-        if (visible) { matchedChecks++; }
+        if (visible) {
+            matchedChecks++;
+            const page = item.closest('.content-section');
+            matchedOnPage.set(page, (matchedOnPage.get(page) || 0) + 1);
+        }
+    });
+    const input = document.getElementById('row-filter');
+    const shownTerm = input ? input.value.trim() : term;
+    document.querySelectorAll('.filter-empty').forEach(note => {
+        const matchedHere = matchedOnPage.get(note.closest('.content-section')) || 0;
+        const elsewhere = matchedChecks - matchedHere;
+        note.hidden = !term || matchedHere > 0;
+        note.textContent = note.hidden ? '' : `No checks in this category match \u201C${shownTerm}\u201D.`
+            + (elsewhere ? ` ${elsewhere} matching ${elsewhere === 1 ? 'check is' : 'checks are'} on other pages.` : '');
     });
     const status = document.getElementById('filter-status');
     if (status) {

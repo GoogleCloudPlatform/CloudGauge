@@ -33,7 +33,10 @@ groups by project (hundreds of groups would bury the findings) and instead:
 - includes at most ``MAX_ROWS_PER_CHECK`` rows of a check's table in the page
   (the CSV always has every row) and says so under the table;
 - shows the first ``ROWS_PER_PAGE`` rows and lets the page's script reveal the
-  rest, sort columns, and filter rows by project ID or any text.
+  rest, sort columns, and filter rows by project ID or any text;
+- gives every category a page: one whose checks found nothing says so ("No
+  findings in this category — all Cost Optimization checks were compliant")
+  instead of being left out, which made its sidebar link open a blank page.
 """
 from dataclasses import dataclass, fields
 
@@ -148,8 +151,10 @@ class Section:
     score_class: str
     org_policies: OrgPolicySummary | None
     checks: tuple
-    footer: str | None  # "cost", "security", or None
+    footer: str | None  # "cost", "security", or None (also None when the section has nothing to list)
     status_counts: tuple = ()  # a StatusCount per status present among ``checks``, in DISPLAY_ORDER
+    # Shown instead of the checks list when the category has no checks and no org policies.
+    empty_message: str | None = None
 
 
 @dataclass(frozen=True)
@@ -216,7 +221,7 @@ class ReportContext:
     scope_title: str
     overview: Overview
     score_summary: tuple
-    sections: tuple  # only the sections that have checks or org policies
+    sections: tuple  # one Section per category, in REPORT_CATEGORY_ORDER (empty ones carry an empty_message)
     # A notice rendered above the overview (the synthetic load mode sets it). None: nothing is rendered.
     banner: str | None = None
     # Sharded scans only: what the report covers. None: nothing is rendered.
@@ -233,6 +238,16 @@ class ReportContext:
 
 def section_id_for(category_name):
     return category_name.lower().replace(' & ', '-').replace(' ', '-')
+
+
+def empty_category_message(category_name):
+    """What a category's page says when none of its checks reported anything.
+
+    A check that fails writes an Error result (app.checks.runner, app.fanout), so a
+    category with no results at all is one whose checks all ran and found nothing;
+    its score is 100%, and the page says so rather than showing an empty list.
+    """
+    return f"No findings in this category — all {category_name} checks were compliant."
 
 
 def score_class_for(score):
@@ -433,14 +448,14 @@ def build_report_context(scope, scope_id, job_id, all_results, banner=None, cove
 
     # --- BUILD EACH HIDDEN CATEGORY SECTION ---
     # Checks are listed by severity, then name. Remediation placeholders are numbered
-    # fix-0, fix-1, ... across all sections, in display order.
+    # fix-0, fix-1, ... across all sections, in display order. Every category gets a
+    # section (the sidebar and the score table link to all of them); one with nothing
+    # to list shows empty_message instead of a checks list, and no footer.
     finding_counter = 0
     sections = []
     for category_name in REPORT_CATEGORY_ORDER:
         grouped_data = group_findings(all_results.get(category_name, []))
         org_content_for_section = org_policy_summary if category_name == "Security & Identity" else None
-        if not grouped_data and not org_content_for_section:
-            continue
         checks = []
         for check_name, group_data in sorted(grouped_data.items(), key=lambda item: (display_rank(item[1].get("Status")), item[0])):
             status = group_data.get("Status", "Informational")
@@ -459,10 +474,11 @@ def build_report_context(scope, scope_id, job_id, all_results, banner=None, cove
                 fix_id=fix_id,
                 summary=summarize_details(details, status, total_projects),
             ))
+        has_content = bool(checks) or org_content_for_section is not None
         footer = None
-        if category_name == "Cost Optimization":
+        if has_content and category_name == "Cost Optimization":
             footer = "cost"
-        elif category_name == "Security & Identity" and scope == 'organization':
+        elif has_content and category_name == "Security & Identity" and scope == 'organization':
             footer = "security"
         score = category_scores[category_name]
         sections.append(Section(
@@ -475,6 +491,7 @@ def build_report_context(scope, scope_id, job_id, all_results, banner=None, cove
             checks=tuple(checks),
             footer=footer,
             status_counts=count_statuses(checks),
+            empty_message=None if has_content else empty_category_message(category_name),
         ))
 
     # --- THE SCORE SUMMARY TABLE ---

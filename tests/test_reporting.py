@@ -302,6 +302,72 @@ def test_filter_box_is_hidden_on_the_overview():
     assert 'checks-list' not in overview and html.count('class="checks-list"') == 4  # one per category page
 
 
+def category_pages(html):
+    """section id -> the section's markup, for the category pages (not the Overview)."""
+    parts = re.split(r'<div id="([\w-]+)-section" class="content-section"', html.split('<script', 1)[0])
+    return {parts[i]: parts[i + 1] for i in range(1, len(parts) - 1, 2) if parts[i] != 'overview'}
+
+
+def test_every_category_has_a_page():
+    """The sidebar and the score table link to all four categories, so all four exist, whatever the scan found
+    (the legacy report skipped a category without results, and its sidebar link then showed an empty page)."""
+    for name in ('no results', 'empty categories', 'org policies only', 'sample scan', 'mixed detail types'):
+        html = generate_html_report('organization', '123456789', 'job-42', **SCENARIOS[name])
+        pages = category_pages(html)
+        assert list(pages) == ['security-identity', 'cost-optimization', 'reliability-resilience', 'operational-excellence-observability'], name
+        targets = set(re.findall(r"showSection\('([\w-]+)'", html)) | set(re.findall(r'href="#([\w-]+)"', html))
+        assert targets == {'overview', *pages}, name
+
+
+def test_a_category_without_results_says_so():
+    """Instead of an empty list (or no page), the page says no check found anything; the badge agrees (100%)."""
+    html = generate_html_report('organization', '123456789', 'job-42', **SCENARIOS['mixed detail types'])  # one cost check only
+    pages = category_pages(html)
+    cost = pages['cost-optimization']
+    assert 'class="checks-list"' in cost and 'empty-state" role="note"' not in cost  # has checks: no note
+    for section_id, title in (('security-identity', 'Security &amp; Identity'), ('reliability-resilience', 'Reliability &amp; Resilience'),
+                              ('operational-excellence-observability', 'Operational Excellence &amp; Observability')):
+        page = pages[section_id]
+        assert f'<div class="empty-state" role="note"><span class="icon">&#10003;</span>No findings in this category — all {title} checks were compliant.</div>' in page
+        assert '<span class="score-badge score-high">100% Compliant</span>' in page
+        assert 'checks-list' not in page and 'section-counts' not in page and 'filter-empty' not in page
+        assert 'section-footer' not in page  # no "Get Detailed Insights" / console link without findings
+    assert 'active-assist/list/security/recommendations' not in html
+    # The security footer and the cost footer return with content.
+    html = generate_html_report('organization', '123456789', 'job-42', **SCENARIOS['sample scan'])
+    pages = category_pages(html)
+    assert 'active-assist/list/security/recommendations' in pages['security-identity'] and 'id="insights-btn"' in pages['cost-optimization']
+    assert all('empty-state" role="note"' not in page for page in pages.values())
+    # Org policies alone give Security a list; the other three are empty.
+    pages = category_pages(generate_html_report('organization', '123456789', 'job-42', **SCENARIOS['org policies only']))
+    assert 'Organization Policies (1/4 Compliant)' in pages['security-identity'] and 'empty-state" role="note"' not in pages['security-identity']
+    assert sum('No findings in this category' in page for page in pages.values()) == 3
+
+
+def test_a_page_whose_checks_the_filter_hides_says_so():
+    """Each page with checks carries a note that applyRowFilter() fills when the filter leaves nothing on that page."""
+    html = generate_html_report('organization', '123456789', 'job-42', **SCENARIOS['sample scan'])
+    assert html.count('<div class="empty-state filter-empty" role="status" hidden></div>') == 4  # one per page with checks
+    for page in category_pages(html).values():
+        assert page.index('</ul>') < page.index('class="empty-state filter-empty"')  # right under the list
+    assert "note.hidden = !term || matchedHere > 0;" in html
+    assert "`No checks in this category match \\u201C${shownTerm}\\u201D.`" in html
+    assert "matching ${elsewhere === 1 ? 'check is' : 'checks are'} on other pages." in html
+    assert '.empty-state.filter-empty { color: var(--light-text-color); font-size: 14px; }' in html
+    # A category without results has no list to filter, so no note either.
+    html = generate_html_report('organization', '123456789', 'job-42', **SCENARIOS['no results'])
+    assert 'class="empty-state filter-empty"' not in html and html.count('No findings in this category') == 4
+
+
+def test_parity_helper_ignores_the_pages_the_legacy_report_left_out(legacy_reports):
+    """report_facts compares the pages that list checks; the new report's empty pages are not a difference."""
+    results = SCENARIOS['mixed detail types']
+    facts = report_facts(generate_html_report('organization', '123456789', 'job-42', **results))
+    assert facts['sections'] == ['cost-optimization'] and facts['section_scores'] == [('cost-optimization', 'low', '0')]
+    assert facts['scores'] == [('high', '100'), ('low', '0'), ('high', '100'), ('high', '100')]  # the Review Scores table
+    assert facts == report_facts(legacy_reports.generate_html_report('organization', '123456789', 'job-42', **results))
+
+
 def test_finding_text_is_escaped():
     """Plan item B3: finding text is inserted as text (the legacy report inserted it as raw HTML)."""
     html = generate_html_report('organization', '123456789', 'job-42', **SCENARIOS['html in findings'])
