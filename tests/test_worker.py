@@ -39,7 +39,7 @@ from app.checks.categories import CATEGORY_ORDER
 from app.checks.registry import CheckSpec
 from app.extensions import EXTENSION_KEY
 from app.utils import ThrottledProgressReporter
-from helpers import assert_same_response, csv_sections, report_lines
+from helpers import assert_same_response, csv_sections, report_facts
 
 SCOPE, SCOPE_ID, JOB_ID = 'organization', '123456789', 'job-42'
 PAYLOAD = {'scope': SCOPE, 'scope_id': SCOPE_ID, 'job_id': JOB_ID}
@@ -146,7 +146,7 @@ def test_scan_job_matches_legacy(legacy_client, client, gcp, scripted_scan):
     assert sorted(run.objects) == sorted(legacy_run.objects) == sorted([REPORT_HTML, REPORT_CSV, STATUS])
     (html, html_type), (legacy_html, legacy_html_type) = run.objects[REPORT_HTML], legacy_run.objects[REPORT_HTML]
     assert html_type == legacy_html_type == 'text/html'
-    assert report_lines(html) == report_lines(legacy_html)
+    assert report_facts(html) == report_facts(legacy_html)  # same findings; the layout differs (plan item 6b)
     (csv_text, csv_type), (legacy_csv, legacy_csv_type) = run.objects[REPORT_CSV], legacy_run.objects[REPORT_CSV]
     assert csv_type == legacy_csv_type == 'text/csv'
     assert csv_sections(csv_text) == csv_sections(legacy_csv)
@@ -207,7 +207,7 @@ def test_scan_without_projects_matches_legacy(legacy_client, client, gcp, legacy
     assert run.statuses == legacy_run.statuses
     assert [status[0] for status in run.statuses] == [5, 98, 100]
     assert run.objects[REPORT_CSV] == legacy_run.objects[REPORT_CSV]  # no category sections, so same bytes
-    assert report_lines(run.objects[REPORT_HTML][0]) == report_lines(legacy_run.objects[REPORT_HTML][0])
+    assert report_facts(run.objects[REPORT_HTML][0]) == report_facts(legacy_run.objects[REPORT_HTML][0])
 
 
 def test_scan_job_with_the_real_runner(client, prod_app, gcp, monkeypatch):

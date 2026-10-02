@@ -25,6 +25,7 @@
   ``|tojson``, since HTML escaping doesn't protect a JavaScript string.
 """
 import functools
+from urllib.parse import quote
 
 from jinja2 import Environment, PackageLoader, StrictUndefined
 
@@ -36,7 +37,7 @@ REPORT_TEMPLATE = "report/report.html"
 @functools.lru_cache(maxsize=None)
 def report_environment():
     """Returns the Jinja environment for reports (created on first use)."""
-    return Environment(
+    environment = Environment(
         loader=PackageLoader("app", "templates"),
         autoescape=True,  # B3: values are text, never markup
         trim_blocks=True,
@@ -44,6 +45,9 @@ def report_environment():
         keep_trailing_newline=True,  # included CSS/JS keep their last line break
         undefined=StrictUndefined,  # a misspelled variable fails instead of rendering ""
     )
+    # One path segment of a URL (the CSV link): unlike |urlencode, "/" is encoded too.
+    environment.filters["pathsegment"] = lambda value: quote(str(value), safe="")
+    return environment
 
 
 def render_report(context):
@@ -51,7 +55,7 @@ def render_report(context):
     return report_environment().get_template(REPORT_TEMPLATE).render(context.template_vars())
 
 
-def generate_html_report(scope, scope_id, job_id, banner=None, coverage=None, **all_results):
+def generate_html_report(scope, scope_id, job_id, banner=None, coverage=None, total_projects=None, **all_results):
     """
     Generates a dynamic and interactive HTML report from the scan results.
 
@@ -63,10 +67,14 @@ def generate_html_report(scope, scope_id, job_id, banner=None, coverage=None, **
             synthetic load mode uses it). ``None`` renders nothing.
         coverage (dict, optional): A sharded scan's coverage, shown above the
             overview (``app.fanout.build_coverage``). ``None`` renders nothing.
+        total_projects (int, optional): Projects in the scope, for the checks'
+            summary lines ("312 of 1,000 projects"). Sharded scans take it
+            from ``coverage``.
         **all_results: The dictionary of categorized findings.
 
     Returns:
         str: A string containing the full HTML report.
     """
     print(f"[{job_id}] 📊 Generating final report for {scope}: {scope_id}...")
-    return render_report(build_report_context(scope, scope_id, job_id, all_results, banner=banner, coverage=coverage))
+    return render_report(build_report_context(scope, scope_id, job_id, all_results, banner=banner, coverage=coverage,
+                                              total_projects=total_projects))

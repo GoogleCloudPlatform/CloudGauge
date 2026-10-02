@@ -19,6 +19,7 @@ import csv
 import importlib.util
 import io
 import pathlib
+import re
 import sys
 import types
 from html import unescape as html_unescape
@@ -124,6 +125,44 @@ def report_lines(text):
             line = line.replace('"', "'")
         lines.append(line)
     return lines
+
+
+def report_facts(html):
+    """What a report says, independent of how it is laid out.
+
+    The enterprise layout (plan item 6b) orders checks by severity, adds summary
+    lines, hides rows past the first page, and so on, so a new report no longer
+    matches the legacy one line for line. It must still show the same facts:
+    the title, the overview counts, the category scores, and every check item
+    with its status badge, its details (table headers and rows, or text), and
+    whether it has a remediation placeholder. Items are returned sorted, since
+    only their order within a section changed. Values are HTML-unescaped.
+    """
+    def text(markup):
+        # Only unescape: legacy wrote some details as raw HTML (e.g. <b>allow-all</b>)
+        # where the new report escapes them, and both unescape to the same string.
+        return html_unescape(markup.replace('<br>', '\n')).strip()
+
+    items = []
+    for item in re.findall(r'<li class="status-[\w-]+">(.*?)</li>', html, re.S):
+        name = html_unescape(re.search(r'<strong>(.*?)</strong>', item, re.S).group(1))
+        badge = html_unescape(re.search(r'<span class="status-badge">(.*?)</span>', item, re.S).group(1))
+        headers = tuple(html_unescape(h) for h in re.findall(r'<th(?:\s[^>]*)?>(.*?)</th>', item, re.S))
+        rows = tuple(cells for cells in (
+            tuple(html_unescape(cell) for cell in re.findall(r'<td(?:\s[^>]*)?>(.*?)</td>', row, re.S))
+            for row in re.findall(r'<tr(?:\s[^>]*)?>(.*?)</tr>', item, re.S)) if cells)
+        details = re.search(r'<div class="details">(.*?)</div>', item, re.S)
+        details_text = None if (rows or details is None) else text(details.group(1))
+        items.append((name, badge, headers, rows, details_text, "class='remediation-placeholder'" in item))
+    return {
+        'title': re.search(r'<title>(.*?)</title>', html).group(1),
+        'header': text(re.search(r'<p style="color: var\(--light-text-color\);">(.*?)</p>', html).group(1)),
+        'overview': re.findall(r'<h3>([\w ]+)</h3><p class="count">(\d+)</p>', html),
+        'scores': re.findall(r'score-badge score-(\w+)">(\d+)%', html),
+        'sections': re.findall(r'<div id="([\w-]+)-section" class="content-section"', html),
+        'items': sorted(items),
+        'console_link': 'active-assist/list/security/recommendations?organizationId=' in html,
+    }
 
 
 def assert_same_response(legacy_response, response, *, html=False):

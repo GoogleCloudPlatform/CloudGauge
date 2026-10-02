@@ -28,8 +28,17 @@ Model selection (``GEMINI_MODEL``):
   If the list can't be read, or the chosen model is not served, the
   ``FALLBACK_GEMINI_MODEL`` alias is used instead.
 - anything else: used as the model ID, e.g. ``gemini-3.5-flash`` to pin a model.
+
+Prompt size (large organizations). A scan of thousands of projects can produce
+a CSV of tens of thousands of rows. The executive summary gets a condensed
+copy: at most ``SUMMARY_ROWS_PER_CHECK`` rows of each check, followed by a line
+saying how many rows (and distinct projects) were left out, and never more
+than ``SUMMARY_MAX_CHARS`` characters. A remediation finding is cut at
+``REMEDIATION_MAX_CHARS`` (the report's script already sends a sample of rows).
 """
+import csv
 import functools
+import io
 import logging
 import random
 import re
@@ -44,6 +53,10 @@ from app.config import AUTO_GEMINI_MODEL, FALLBACK_GEMINI_MODEL, get_settings
 MODEL_CACHE_TTL_SECONDS = 6 * 60 * 60
 FALLBACK_CACHE_TTL_SECONDS = 10 * 60  # retry the lookup sooner after a failure
 _STABLE_FLASH_MODEL = re.compile(r"^gemini-(\d+(?:\.\d+)*)-flash$")
+
+SUMMARY_ROWS_PER_CHECK = 25
+SUMMARY_MAX_CHARS = 400_000  # ~100k tokens; well inside the model's window, bounded in cost and latency
+REMEDIATION_MAX_CHARS = 12_000
 
 _model_cache = {}  # (project, location) -> (model, expires at, per the clock passed to resolve_model)
 _model_cache_lock = threading.Lock()
@@ -149,6 +162,8 @@ def generate_remediation_command(finding_text: str, project_id: str, *, settings
         str: A single-line gcloud command or an error message.
     """
     settings = settings or get_settings()
+    if len(finding_text) > REMEDIATION_MAX_CHARS:
+        finding_text = finding_text[:REMEDIATION_MAX_CHARS] + "\n... (finding text truncated)"
 
     # Configuration for the retry logic
     max_retries = 3
@@ -193,13 +208,66 @@ def generate_remediation_command(finding_text: str, project_id: str, *, settings
     return "Error: All retry attempts failed." # Should not be reached, but as a fallback
 
 
+def condense_csv_for_prompt(csv_data, rows_per_check=SUMMARY_ROWS_PER_CHECK, max_chars=SUMMARY_MAX_CHARS):
+    """Returns the CSV report with at most ``rows_per_check`` rows per check, for a prompt.
+
+    Each check that loses rows gets one more row in their place, e.g.
+    ``Public Buckets,Action Required,"... and 1,179 more rows not shown (312
+    distinct projects in all 1,204 rows)"``, so the model still knows the
+    scale. The Organization Policies section is kept whole. A CSV that needs
+    no condensing is returned unchanged. The result is cut at ``max_chars``
+    (at a line break) as a last resort.
+    """
+    rows = list(csv.reader(io.StringIO(csv_data)))
+    output = io.StringIO()
+    writer = csv.writer(output)
+    header, project_column = None, None
+    checks = {}  # check name -> [status, rows seen, projects seen]; the current header's block only
+    changed = False
+
+    def flush():
+        nonlocal changed
+        for check, (status, seen, projects) in checks.items():
+            if seen > rows_per_check:
+                changed = True
+                scale = f" ({len(projects):,} distinct projects in all {seen:,} rows)" if projects is not None else ""
+                writer.writerow([check, status, f"... and {seen - rows_per_check:,} more rows not shown{scale}"])
+        checks.clear()
+
+    for row in rows:
+        is_data_row = header is not None and len(row) > 1 and row[:2] != ["Check", "Status"]
+        if not is_data_row:
+            flush()
+            if row[:2] == ["Check", "Status"]:
+                header = row
+                project_column = next((i for i, name in enumerate(row) if name.strip().lower() in ("project", "project id", "project_id")), None)
+            elif len(row) <= 1:  # a title or a spacer: the next data rows need a header first
+                header = None
+            writer.writerow(row)
+            continue
+        status, seen, projects = checks.setdefault(row[0], [row[1] if len(row) > 1 else "", 0, set() if project_column is not None else None])
+        checks[row[0]][1] = seen + 1
+        if projects is not None and project_column < len(row):
+            projects.add(row[project_column])
+        if seen < rows_per_check:
+            writer.writerow(row)
+    flush()
+
+    result = output.getvalue() if changed else csv_data
+    if len(result) > max_chars:
+        cut = result.rfind("\n", 0, max_chars)
+        result = result[:cut + 1] + "... (report truncated for length)\r\n"
+    return result
+
+
 def generate_executive_summary(csv_data, *, settings=None):
     """
     Uses the Gemini model to write an executive summary of a scan's CSV report.
     Moved from the ``/api/get-summary`` route, which keeps the GCS lookup and HTTP handling.
 
     Args:
-        csv_data (str): The full CSV report.
+        csv_data (str): The full CSV report. Large reports are condensed for the
+            prompt (``condense_csv_for_prompt``).
         settings (Settings, optional): Overrides the model, project, and location read from the environment.
 
     Returns:
@@ -207,13 +275,17 @@ def generate_executive_summary(csv_data, *, settings=None):
     """
     settings = settings or get_settings()
 
+    condensed = condense_csv_for_prompt(csv_data)
+    if len(condensed) != len(csv_data):
+        logging.info(f"Condensed the CSV report for the summary prompt: {len(csv_data):,} -> {len(condensed):,} characters.")
+
     # 3. Use the optimized prompt
     prompt = f"""
         You are a strategic Google Cloud advisor specializing in security posture enhancement and cost optimization. Your task is to provide a balanced and action-oriented executive summary based on the following compliance and best practices report, which is provided in CSV format.
 
         **Report Data:**
         ```csv
-        {csv_data}
+        {condensed}
         ```
 
         **Instructions:**

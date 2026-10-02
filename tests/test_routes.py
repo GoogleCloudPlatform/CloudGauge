@@ -45,9 +45,12 @@ ROUTES = {
     '/scan-shard': ({'POST'}, None, 'worker.scan_shard_worker'),
     '/run-aggregation': ({'POST'}, None, 'worker.run_aggregation_worker'),
     '/sweep': ({'POST'}, None, 'worker.sweep_worker'),
+    # New with the enterprise report layout (plan item 6b): the report links to the complete CSV.
+    '/report/<string:job_id>/<string:scope_id>/csv': ({'GET'}, None, 'ui.download_report_csv'),
 }
 NEW_ENDPOINT = {legacy: new for _, legacy, new in ROUTES.values() if legacy}
 NEW_RULES = {rule for rule, (_, legacy, _) in ROUTES.items() if legacy is None}
+NEW_WORKER_RULES = {rule for rule in NEW_RULES if ROUTES[rule][2].startswith('worker.')}
 BLUEPRINT_MODULES = {'ui': ui, 'api': api, 'worker': worker}
 
 # Requests that reach a view, one or more per rule.
@@ -113,7 +116,7 @@ def resolve(app, method, path):
 
 
 def test_url_map_is_the_legacy_url_map(legacy, testing_app):
-    """Every legacy rule exists with the same methods; the only additions are the sharded-scan worker routes."""
+    """Every legacy rule exists with the same methods; the only additions are the sharded-scan worker routes and the CSV download."""
     legacy_map = url_map(legacy.app)
     new_map = url_map(testing_app)
     additions = {key: endpoint for key, endpoint in new_map.items() if key not in legacy_map}
@@ -143,12 +146,30 @@ def test_request_reaches_the_legacy_view(method, path, legacy, testing_app):
     assert resolve(testing_app, method, path) == expected
 
 
-@pytest.mark.parametrize('path', sorted(NEW_RULES))
+@pytest.mark.parametrize('path', sorted(NEW_WORKER_RULES))
 def test_new_worker_routes_accept_post_only(path, testing_app):
     """The sharded-scan endpoints (no legacy counterpart) are POST-only like /run-scan."""
     assert resolve(testing_app, 'POST', path) == {'endpoint': ROUTES[path][2], 'args': {}}
     assert resolve(testing_app, 'GET', path) == {'error': 'MethodNotAllowed', 'allowed': ['OPTIONS', 'POST']}
     assert testing_app.test_client().get(path).status_code == 405
+
+
+def test_csv_download_route(testing_app, gcp):
+    """New: /report/<job>/<scope_id>/csv serves the stored CSV as a download (the report page links to it)."""
+    assert resolve(testing_app, 'GET', '/report/job-1/p1/csv') == {'endpoint': 'ui.download_report_csv', 'args': {'job_id': 'job-1', 'scope_id': 'p1'}}
+    assert resolve(testing_app, 'POST', '/report/job-1/p1/csv') == {'error': 'MethodNotAllowed', 'allowed': ['GET', 'HEAD', 'OPTIONS']}
+    client = testing_app.test_client()
+    missing = client.get('/report/job-1/p1/csv')
+    assert (missing.status_code, missing.get_data(as_text=True)) == (404, 'CSV report not found or is still generating.')
+    gcp.bucket.put('job-1/p1_report.csv', 'Organization Policies\r\nCategory,Policy\r\n', 'text/csv')
+    response = client.get('/report/job-1/p1/csv')
+    assert response.status_code == 200
+    assert response.headers['Content-Type'].startswith('text/csv')
+    assert response.headers['Content-Disposition'] == 'attachment; filename="cloudgauge_p1_job-1.csv"'
+    assert response.get_data(as_text=True) == 'Organization Policies\r\nCategory,Policy\r\n'
+    # IDs that are not safe in a filename are sanitized (the lookup still uses them as given).
+    gcp.bucket.put('job 1/a b_report.csv', 'x', 'text/csv')
+    assert client.get('/report/job%201/a%20b/csv').headers['Content-Disposition'] == 'attachment; filename="cloudgauge_a_b_job_1.csv"'
 
 
 @pytest.mark.parametrize('method, path', NOT_MATCHING)

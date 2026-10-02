@@ -42,6 +42,11 @@ document.addEventListener("DOMContentLoaded", function() {
     } else {
         showSection('overview');
     }
+    // Large tables: click a column header to sort (see "Layout for large organizations" in app/reporting/context.py).
+    document.querySelectorAll('table.details-table th').forEach(th => {
+        th.title = 'Sort by this column';
+        th.addEventListener('click', () => sortTable(th));
+    });
 });
 
 function toggleSubSection(btn) {
@@ -54,6 +59,119 @@ function toggleSubSection(btn) {
             container.style.display = "none";
             btn.textContent = "View Details";
         }
+    }
+}
+
+// --- Large tables: paging, sorting, and filtering (all client-side, no requests) ---
+const ROWS_PER_PAGE = {{ rows_per_page|tojson }};
+// Rows of one check sent to Gemini for a remediation suggestion; the rest are summarized.
+const MAX_ROWS_FOR_FIX = 25;
+
+function tableRows(table) {
+    return Array.from(table.tBodies[0].rows);
+}
+
+function tableOf(element) {
+    return element.closest('.check-content').querySelector('table.details-table');
+}
+
+// Shows the first `count` rows of a table and hides the rest; keeps the "Showing N of M rows" line current.
+function setShownRows(table, count) {
+    const rows = tableRows(table);
+    const shown = Math.min(count, rows.length);
+    rows.forEach((row, i) => { row.hidden = i >= shown; });
+    table.dataset.shown = shown;
+    const controls = table.closest('.check-content').querySelector('.table-controls');
+    if (controls) {
+        controls.querySelector('.shown-count').textContent = shown.toLocaleString();
+        controls.querySelectorAll('button').forEach(button => { button.disabled = shown >= rows.length; });
+    }
+}
+
+function shownRows(table) {
+    return parseInt(table.dataset.shown, 10) || ROWS_PER_PAGE;
+}
+
+function showMoreRows(btn) {
+    const table = tableOf(btn);
+    setShownRows(table, shownRows(table) + ROWS_PER_PAGE);
+}
+
+function showAllRows(btn) {
+    const table = tableOf(btn);
+    setShownRows(table, tableRows(table).length);
+}
+
+function sortTable(th) {
+    const table = th.closest('table');
+    const index = Array.from(th.parentNode.children).indexOf(th);
+    const ascending = th.getAttribute('aria-sort') !== 'ascending';
+    const rows = tableRows(table);
+    const valueOf = row => row.cells[index] ? row.cells[index].textContent.trim() : '';
+    const numeric = rows.every(row => valueOf(row) === '' || !isNaN(parseFloat(valueOf(row))));
+    rows.sort((a, b) => {
+        const x = valueOf(a), y = valueOf(b);
+        const order = numeric ? (parseFloat(x) || 0) - (parseFloat(y) || 0)
+                              : x.localeCompare(y, undefined, { numeric: true, sensitivity: 'base' });
+        return ascending ? order : -order;
+    });
+    const body = table.tBodies[0];
+    rows.forEach(row => body.appendChild(row));
+    table.querySelectorAll('th[aria-sort]').forEach(header => header.removeAttribute('aria-sort'));
+    th.setAttribute('aria-sort', ascending ? 'ascending' : 'descending');
+    if (currentFilter()) {
+        applyRowFilter();
+    } else {
+        setShownRows(table, shownRows(table));
+    }
+}
+
+let filterTimer = null;
+
+function scheduleRowFilter() {
+    clearTimeout(filterTimer);
+    filterTimer = setTimeout(applyRowFilter, 150);
+}
+
+function currentFilter() {
+    const input = document.getElementById('row-filter');
+    return input ? input.value.trim().toLowerCase() : '';
+}
+
+// Hides the rows (and the checks) that don't contain the filter text; an empty filter restores the paging.
+function applyRowFilter() {
+    const term = currentFilter();
+    let matchedChecks = 0, totalChecks = 0, matchedRows = 0;
+    document.querySelectorAll('.checks-list > li').forEach(item => {
+        totalChecks++;
+        const table = item.querySelector('table.details-table');
+        const nameMatches = item.querySelector('strong').textContent.toLowerCase().includes(term);
+        let visible = true;
+        if (!term) {
+            if (table) { setShownRows(table, shownRows(table)); }
+        } else if (table) {
+            let matches = 0;
+            tableRows(table).forEach(row => {
+                const hit = row.textContent.toLowerCase().includes(term);
+                row.hidden = !hit;
+                if (hit) { matches++; }
+            });
+            matchedRows += matches;
+            visible = matches > 0 || nameMatches;
+            const controls = item.querySelector('.table-controls');
+            if (controls) {
+                controls.querySelector('.shown-count').textContent = matches.toLocaleString();
+                controls.querySelectorAll('button').forEach(button => { button.disabled = true; });
+            }
+        } else {
+            visible = item.textContent.toLowerCase().includes(term);
+        }
+        item.hidden = !visible;
+        if (visible) { matchedChecks++; }
+    });
+    const status = document.getElementById('filter-status');
+    if (status) {
+        status.textContent = term ? `${matchedChecks} of ${totalChecks} checks match (${matchedRows.toLocaleString()} rows)` : '';
     }
 }
 
@@ -195,6 +313,7 @@ async function getGeminiSuggestions() {
                 const rows = table.querySelectorAll('tbody tr');
                 const recommendations = [];
                 rows.forEach((row, i) => {
+                    if (i >= MAX_ROWS_FOR_FIX) { return; }  // a sample is enough for one gcloud command
                     const cells = row.querySelectorAll('td');
                     const currentProject = (projectIndex !== -1) ? cells[projectIndex].textContent.trim() : '';
                     const recommendation = cells[recommendationIndex].textContent.trim();
@@ -205,13 +324,16 @@ async function getGeminiSuggestions() {
                     let fullRecommendationText = headers.map((h, idx) => `${h}: ${cells[idx].textContent.trim()}`).join(', ');
                     recommendations.push(fullRecommendationText);
                 });
+                if (rows.length > MAX_ROWS_FOR_FIX) {
+                    recommendations.push(`... and ${rows.length - MAX_ROWS_FOR_FIX} more rows like these`);
+                }
                 findingText = recommendations.join('\n'); // Use newline to separate multiple findings
             } else {
-                findingText = detailsDiv.innerText.trim(); // Fallback if no recommendation column
+                findingText = detailsDiv.innerText.trim().slice(0, 4000); // Fallback if no recommendation column
             }
         } else {
             // Case 2: Handle simple text data (no table)
-            findingText = detailsDiv.innerText.trim();
+            findingText = detailsDiv.innerText.trim().slice(0, 4000);
         }
 
         // Extract project ID with regex as a final fallback if not found in table

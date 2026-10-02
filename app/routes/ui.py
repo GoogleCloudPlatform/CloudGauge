@@ -11,10 +11,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Pages: the landing form, scan submission, the status page, and the report viewer."""
+"""Pages: the landing form, scan submission, the status page, the report viewer, and the CSV download."""
 import uuid
 
-from flask import Blueprint, redirect, render_template, request, url_for
+from flask import Blueprint, Response, redirect, render_template, request, url_for
+from werkzeug.utils import secure_filename
 
 from app.extensions import get_services
 from app.services import tasks
@@ -84,3 +85,24 @@ def view_report(job_id, scope_id):
     except Exception as e:
         print(f"Error fetching report {job_id} from GCS: {e}")
         return "Could not retrieve report.", 500
+
+
+@bp.route('/report/<string:job_id>/<string:scope_id>/csv')
+def download_report_csv(job_id, scope_id):
+    """Serves the complete CSV report as a download.
+
+    The HTML report links here: its tables include at most
+    ``MAX_ROWS_PER_CHECK`` rows of a check, and the status page's signed CSV
+    URL expires after an hour.
+    """
+    try:
+        csv_report = get_services().results_store.read_report(job_id, scope_id, extension="csv")
+        if csv_report is None:
+            return "CSV report not found or is still generating.", 404
+        filename = f"cloudgauge_{secure_filename(scope_id) or 'report'}_{secure_filename(job_id) or 'job'}.csv"
+        return Response(csv_report, mimetype="text/csv",
+                        headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+
+    except Exception as e:
+        print(f"Error fetching CSV report {job_id} from GCS: {e}")
+        return "Could not retrieve the CSV report.", 500

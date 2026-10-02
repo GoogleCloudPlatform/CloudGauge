@@ -14,22 +14,27 @@
 """The reports: the Jinja HTML report and the CSV match the legacy generators.
 
 Both generators get the same categorized results. The HTML reports are compared
-line by line (the templates don't reproduce the legacy f-string indentation),
-with HTML entities decoded: the new report escapes the values it inserts (plan
-item B3), the legacy one didn't. The CSVs are compared byte for byte. No Flask
-app or request context is involved: reports are rendered by the worker, outside
-any request for a page.
+on what they say (``helpers.report_facts``: title, overview counts, scores, and
+every check item with its status, details and remediation placeholder) rather
+than line by line: the enterprise layout (plan item 6b) orders checks by
+severity, adds summary lines and paging, and so on, but must not lose or alter
+a finding. Entities are decoded in the comparison: the new report escapes the
+values it inserts (plan item B3), the legacy one didn't. The CSVs are compared
+byte for byte. No Flask app or request context is involved: reports are
+rendered by the worker, outside any request for a page.
 """
 import json
 import re
+from html import unescape
 
 import pytest
 from jinja2 import UndefinedError
 
 import samples
+from app.reporting.context import MAX_ROWS_PER_CHECK, ROWS_PER_PAGE
 from app.reporting.csv_report import generate_csv_data
 from app.reporting.html_report import generate_html_report, report_environment
-from helpers import csv_sections, report_lines
+from helpers import csv_sections, report_facts
 
 SECURITY, COST, RELIABILITY, OPERATIONS = ('Security & Identity', 'Cost Optimization', 'Reliability & Resilience',
                                            'Operational Excellence & Observability')
@@ -91,7 +96,7 @@ def legacy_reports(legacy):
 def test_html_report_matches_legacy(name, legacy_reports):
     results = SCENARIOS[name]
     html = generate_html_report('organization', '123456789', 'job-42', **results)
-    assert report_lines(html) == report_lines(legacy_reports.generate_html_report('organization', '123456789', 'job-42', **results))
+    assert report_facts(html) == report_facts(legacy_reports.generate_html_report('organization', '123456789', 'job-42', **results))
 
 
 @pytest.mark.parametrize('scope, scope_id', [('organization', '123456789'), ('folder', '42'), ('project', 'web-prod')])
@@ -99,7 +104,7 @@ def test_html_report_matches_legacy_for_each_scope(scope, scope_id, legacy_repor
     """The title and header use the scope; the Security section's console link is for organizations only."""
     results = SCENARIOS['sample scan']
     html = generate_html_report(scope, scope_id, 'job-42', **results)
-    assert report_lines(html) == report_lines(legacy_reports.generate_html_report(scope, scope_id, 'job-42', **results))
+    assert report_facts(html) == report_facts(legacy_reports.generate_html_report(scope, scope_id, 'job-42', **results))
     assert f'<title>CloudGauge Report: {scope.capitalize()} {scope_id}</title>' in html
     assert ('active-assist/list/security/recommendations?organizationId=' in html) is (scope == 'organization')
 
@@ -170,19 +175,121 @@ def test_grouped_check_keeps_the_most_severe_status():
 
 def test_report_is_self_contained():
     """Stored reports are served as-is long after the scan: no template syntax left, CSS and JS inline,
-    and the only calls back to the app are the three /api/get-* endpoints."""
+    and the only calls back to the app are the three /api/get-* endpoints (plus the CSV download link)."""
     html = generate_html_report('organization', '123456789', 'job-42', **SCENARIOS['sample scan'])
     for delimiter in ('{{', '{%', '{#'):
         assert delimiter not in html
     assert '<script src=' not in html and 'rel="stylesheet"' in html  # the Google Fonts link, as before
-    handlers = set(re.findall(r'onclick="(\w+)\(', html))
-    assert handlers == {'showSection', 'toggleSubSection', 'getGeminiSuggestions', 'generateAiSummary', 'fetchInsights',
-                        'renderTablePage'}  # the last one is in pagination HTML built by the script
-    for handler in handlers:  # defined in the inlined script
+    handlers = {'showSection', 'toggleSubSection', 'getGeminiSuggestions', 'generateAiSummary', 'fetchInsights',
+                'renderTablePage'}  # renderTablePage is in HTML built by the script
+    assert set(re.findall(r'onclick="(\w+)\(', html)) == handlers
+    paging = {'showMoreRows', 'showAllRows'}  # only emitted under tables longer than one page
+    long_table = {SECURITY: [{'Check': 'Public Buckets', 'Status': 'Action Required',
+                              'Finding': [{'Project': 'p1', 'Bucket': f'b{i}'} for i in range(ROWS_PER_PAGE + 10)]}]}
+    assert paging <= set(re.findall(r'onclick="(\w+)\(', generate_html_report('project', 'p1', 'job-42', **long_table)))
+    for handler in handlers | paging | {'scheduleRowFilter', 'applyRowFilter', 'sortTable'}:  # defined in the inlined script
         assert re.search(rf'function {handler}\(', html), handler
     assert sorted(set(re.findall(r"fetch\('([^']+)'", html))) == ['/api/get-insights', '/api/get-suggestions', '/api/get-summary']
     assert 'JSON.stringify({ scope_id: "123456789", job_id: "job-42" })' in html
     assert 'JSON.stringify({ scope: "organization", scope_id: "123456789" })' in html
+
+
+# --- Layout for large organizations (plan item 6b) ---
+
+def table_check(name, rows, status='Action Required'):
+    return {'Check': name, 'Status': status, 'Finding': rows}
+
+
+def check_names(html):
+    """Check titles in page order (a bare <strong> regex would also match strings in the inlined script)."""
+    return re.findall(r'<div class="check-content">\s*<strong>([^<]+)</strong>', html)
+
+
+def detail_tables(html):
+    """The details tables only: the page also has the Review Scores table and <tr> strings in the script."""
+    return re.findall(r"<table class='details-table'>.*?</table>", html)
+
+
+def test_checks_are_ordered_by_severity_then_name():
+    results = {SECURITY: [
+        {'Check': 'B Compliant', 'Status': 'Compliant', 'Finding': 'ok'},
+        {'Check': 'A Compliant', 'Status': 'Compliant', 'Finding': 'ok'},
+        {'Check': 'Z Error', 'Status': 'Error', 'Finding': [{'Error': 'quota'}]},
+        {'Check': 'M Investigation', 'Status': 'Investigation Recommended', 'Finding': 'look'},
+        {'Check': 'Y Action', 'Status': 'Action Required', 'Finding': 'fix'},
+        {'Check': 'A Action', 'Status': 'Action Required', 'Finding': 'fix'},
+        {'Check': 'N Informational', 'Status': 'Informational', 'Finding': 'fyi'},
+    ]}
+    html = generate_html_report('project', 'p1', 'job-42', **results)
+    assert check_names(html) == ['A Action', 'Y Action', 'M Investigation', 'Z Error', 'N Informational', 'A Compliant', 'B Compliant']
+    assert re.search(r'<div class="section-counts">\s*<span class="count-action-required">2 Action Required</span>\s*'
+                     r'<span class="count-investigation">1 Investigation Recommended</span>\s*<span class="count-error">1 Error</span>\s*'
+                     r'<span class="count-informational">1 Informational</span>\s*<span class="count-compliant">2 Compliant</span>', html)
+
+
+def summaries(html):
+    return [(name, unescape(summary)) for name, summary in
+            re.findall(r'<strong>([^<]+)</strong>\s*<div class="check-summary">([^<]+)</div>', html)]
+
+
+def test_check_summary_counts_findings_and_projects():
+    rows = [{'Project': f'p{i % 4}', 'Bucket': f'b{i}'} for i in range(10)]
+    results = {SECURITY: [table_check('Public Buckets', rows),
+                          table_check('One Row', [{'Project': 'p9', 'Bucket': 'b'}]),
+                          table_check('No Project Column', [{'Rule': 'r1'}, {'Rule': 'r2'}]),
+                          table_check('Broken', [{'Error': 'quota exceeded'}], status='Error'),
+                          table_check('Shard Errors', [{'Error': 'a'}, {'Error': 'b'}], status='Error'),
+                          {'Check': 'Text Details', 'Status': 'Action Required', 'Finding': ['line 1', 'line 2']}]}
+    # The share of projects needs the scope's total. Single-row tables without a project column and text details get no line.
+    html = generate_html_report('organization', '123', 'job-42', total_projects=1000, **results)
+    assert dict(summaries(html)) == {'Public Buckets': '10 findings across 4 of 1,000 projects (<1%)',
+                                     'One Row': '1 finding across 1 of 1,000 projects (<1%)',
+                                     'No Project Column': '2 findings', 'Shard Errors': '2 errors'}
+    html = generate_html_report('organization', '123', 'job-42', total_projects=5, **results)
+    assert dict(summaries(html))['Public Buckets'] == '10 findings across 4 of 5 projects (80%)'
+    # Without the total: no share.
+    html = generate_html_report('organization', '123', 'job-42', **results)
+    assert dict(summaries(html))['Public Buckets'] == '10 findings across 4 projects'
+    # A project scan: its rows are all in the one project, so no project phrase at all.
+    one_project = [{'Project': 'p1', 'Bucket': f'b{i}'} for i in range(10)]
+    html = generate_html_report('project', 'p1', 'job-42', total_projects=1, **{SECURITY: [table_check('Public Buckets', one_project)]})
+    assert dict(summaries(html))['Public Buckets'] == '10 findings'
+
+
+def test_rows_past_the_first_page_are_hidden_until_asked_for():
+    rows = [{'Project': 'p1', 'Bucket': f'b{i}'} for i in range(ROWS_PER_PAGE + 10)]
+    html = generate_html_report('project', 'p1', 'job-42', **{SECURITY: [table_check('Public Buckets', rows)]})
+    [table] = detail_tables(html)
+    assert table.count('<tr>') == ROWS_PER_PAGE + 1 and table.count('<tr hidden>') == 10  # +1: the header row
+    assert 'Showing <span class="shown-count">50</span> of 60 rows' in html
+    assert 'onclick="showMoreRows(this)">Show 50 more</button>' in html and 'onclick="showAllRows(this)">Show all</button>' in html
+    assert f'const ROWS_PER_PAGE = {ROWS_PER_PAGE};' in html
+    # A table that fits on one page has no controls and keeps the plain markup.
+    small = generate_html_report('project', 'p1', 'job-42', **{SECURITY: [table_check('Public Buckets', rows[:3])]})
+    assert 'class="table-controls"' not in small and '<tr hidden>' not in small
+
+
+def test_rows_are_capped_in_the_page_but_not_in_the_csv():
+    rows = [{'Project': f'p{i % 700}', 'Bucket': f'b{i}'} for i in range(MAX_ROWS_PER_CHECK + 100)]
+    results = {SECURITY: [table_check('Public Buckets', rows), table_check('Small', rows[:5])]}
+    html = generate_html_report('organization', '123', 'job-42', total_projects=1000, **results)
+    big, small = detail_tables(html)
+    assert big.count('<tr') == 1 + MAX_ROWS_PER_CHECK and small.count('<tr') == 1 + 5  # +1: the header rows
+    assert 'b1999' in big and 'b2000' not in html
+    assert ('Only the first 2,000 of 2,100 rows are included in this page. The complete list is in the '
+            '<a href="/report/job-42/123/csv">CSV report</a>.') in html
+    assert html.count('class="table-note"') == 1  # the small table has no note
+    assert dict(summaries(html))['Public Buckets'] == '2,100 findings across 700 of 1,000 projects (70%)'  # over all rows
+    assert generate_csv_data(results).count('Public Buckets,Action Required,') == MAX_ROWS_PER_CHECK + 100
+
+
+def test_toolbar_has_the_filter_and_the_csv_download():
+    html = generate_html_report('organization', '123456789', 'job-42', **SCENARIOS['sample scan'])
+    assert '<input id="row-filter" type="search"' in html and 'oninput="scheduleRowFilter()"' in html
+    assert '<a class="toolbar-link" href="/report/job-42/123456789/csv">Download CSV (all rows)</a>' in html
+    # The link is a URL: IDs are percent-encoded, not just HTML-escaped.
+    html = generate_html_report('project', 'a b/c?d', 'job 1', **SCENARIOS['sample scan'])
+    assert 'href="/report/job%201/a%20b%2Fc%3Fd/csv"' in html
 
 
 def test_finding_text_is_escaped():

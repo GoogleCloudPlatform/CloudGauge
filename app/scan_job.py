@@ -114,7 +114,8 @@ def execute_scan_job(data, *, store, banner=None, fanout=None):
         if org_policy_data[0] and org_policy_data[1]:
             all_results["Organization Policies"] = org_policy_data
 
-        html_report = generate_html_report(scope, scope_id, job_id, banner=banner, **all_results)
+        total_projects = 1 if scope == 'project' else (len(projects) if projects is not None else None)
+        html_report = generate_html_report(scope, scope_id, job_id, banner=banner, total_projects=total_projects, **all_results)
         csv_report = generate_csv_data(all_results)
 
         store.upload_reports(job_id, scope_id, html_report, csv_report)

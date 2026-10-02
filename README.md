@@ -163,6 +163,18 @@ A single request scanning 1,000 projects used to hang, run out of memory, or tri
 
 The sizes can be tuned per deployment (see [Configuration Reference](#configuration-reference)); `tools/synthetic_scan.py --shard-size 20` rehearses the whole flow offline (see [Load Testing](#load-testing-with-a-synthetic-organization)).
 
+### **Reports for Large Organizations**
+
+A report for 1,000 projects can hold tens of thousands of finding rows. The HTML report keeps one page per category (findings are not grouped by project, which would make hundreds of groups) and makes that page usable at scale:
+
+* **Worst first.** Within each category the checks are ordered Action Required → Investigation Recommended → Error → Informational → Compliant, then by name, and a strip under the category heading counts the checks in each status.
+* **A summary line per check.** Tables open with "1,204 findings across 312 of 1,000 projects (31%)" (the share needs the scan's project count, which organization and folder scans record), so the scale of a finding is clear before reading any rows.
+* **Paged, sortable, filterable tables.** Tables show 50 rows at a time ("Show 50 more" / "Show all"), any column header sorts, and the filter box at the top of the report keeps only the rows (and checks) that mention a project ID, bucket name, or any other text. Everything is inline, vanilla JavaScript: the report stays a single self-contained file.
+* **Bounded page size.** A table holds at most 2,000 rows in the page; a note under it says how many were left out and links to the complete list. The CSV report always has every row and can be downloaded at any time from `/report/<job_id>/<scope_id>/csv` (the signed link on the status page expires after an hour; the toolbar link in the report does not).
+* **Bounded prompts.** The AI executive summary is generated from at most 25 rows per check (plus the row counts), and a remediation prompt from the first 25 rows of a finding, so Gemini calls stay within their input limits however large the scan.
+
+The caps live in `app/reporting/context.py` (`MAX_ROWS_PER_CHECK`, `ROWS_PER_PAGE`) and `app/services/gemini.py` (`SUMMARY_ROWS_PER_CHECK`, `REMEDIATION_MAX_CHARS`).
+
 ### **Project Structure**
 
 The application is a Flask package built by an application factory (`create_app()` in `app/__init__.py`). The root `cloudgauge.py` is a thin entrypoint that exposes `app = create_app()`, so the container command (`gunicorn ... cloudgauge:app`) is the same as before the refactor.
@@ -536,7 +548,7 @@ gcloud run services update-traffic ${SERVICE_NAME} --region ${REGION} --to-revis
 3. Select the resource from the Dropdown
 4. Click "Start Scan".  
 5. You will be redirected to a status page. Wait for the scan to complete (this can take 5-15 minutes depending on org size).  
-6. Once finished, links to the **Interactive HTML Report** and **Download CSV Report** will appear.
+6. Once finished, links to the **Interactive HTML Report** and **Download CSV Report** will appear. The report itself also has a **Download CSV (all rows)** link, a filter box, and sortable, paged tables (see [Reports for Large Organizations](#reports-for-large-organizations)).
 
 > **Checks that can't run are reported, not hidden.** If a check fails (for example, a missing permission or a disabled API), the report shows it with status **Error** and the reason, in the check's own section. Errors count against that section's score, so fix the cause (see [Permission Denied on Google Cloud APIs](#permission-denied-on-google-cloud-apis)) for an accurate score. Organization scans also include the **Security Command Center Status** check.
 

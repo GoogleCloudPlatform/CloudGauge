@@ -21,7 +21,19 @@ templates in ``app/templates/report/`` only lay this data out.
 
 Values that end up in the page are formatted here with the same f-string
 expressions the legacy code used (``f"{value}"``, ``f"{score:.0f}"``), so the
-rendered report matches the legacy one line for line.
+report shows the same findings, statuses, and scores as the legacy one (the
+tests compare them with ``helpers.report_facts``).
+
+Layout for large organizations (plan item 6b). A scan of thousands of
+projects can give one check tens of thousands of rows, so the report never
+groups by project (hundreds of groups would bury the findings) and instead:
+
+- orders each section's checks by severity, then name, and gives every check a
+  summary line ("1,204 findings across 312 of 1,000 projects (31%)");
+- includes at most ``MAX_ROWS_PER_CHECK`` rows of a check's table in the page
+  (the CSV always has every row) and says so under the table;
+- shows the first ``ROWS_PER_PAGE`` rows and lets the page's script reveal the
+  rest, sort columns, and filter rows by project ID or any text.
 """
 from dataclasses import dataclass, fields
 
@@ -33,7 +45,10 @@ ORG_POLICIES_KEY = "Organization Policies"
 
 # Icons are HTML character references, so they are Markup: the report template autoescapes everything else.
 ICON_CROSS, ICON_CHECK = Markup("&#10007;"), Markup("&#10003;")
+# Which status wins when a check has several records (lower is more severe).
 STATUS_PRIORITY = {"Action Required": 0, "Investigation Recommended": 1, "Informational": 2, "Compliant": 3, "Error": 4}
+# The order of the checks within a section: what needs work first, then what could not be checked.
+DISPLAY_ORDER = {"Action Required": 0, "Investigation Recommended": 1, "Error": 2, "Informational": 3, "Compliant": 4}
 STATUS_STYLES = {
     "Action Required": {"icon": ICON_CROSS, "class": "action-required"}, "Investigation Recommended": {"icon": Markup("&#9888;"), "class": "investigation"},
     "Compliant": {"icon": ICON_CHECK, "class": "compliant"}, "Error": {"icon": Markup("&#10069;"), "class": "error"}, "Informational": {"icon": Markup("&#8505;"), "class": "informational"}
@@ -41,6 +56,16 @@ STATUS_STYLES = {
 # Checks with these statuses get a placeholder for a Gemini remediation suggestion.
 ACTIONABLE_STATUSES = ["Action Required", "Investigation Recommended"]
 FAILING_STATUSES = ["Action Required", "Investigation Recommended", "Error"]
+
+# The most rows of one check's details included in the HTML report. At ~200 bytes a
+# row and ~25 checks this bounds the page at roughly 10 MB; the CSV has every row.
+MAX_ROWS_PER_CHECK = 2000
+# Rows shown before the reader asks for more (the rest are in the page, hidden).
+ROWS_PER_PAGE = 50
+# Column names (lowercase) that hold the project a row belongs to.
+PROJECT_COLUMNS = ("project", "project id", "project_id")
+# The noun of a check's summary line, by status ("finding" otherwise).
+SUMMARY_NOUNS = {"Error": "error", "Informational": "entry"}
 
 
 @dataclass(frozen=True)
@@ -55,11 +80,19 @@ class PolicyResult:
 
 @dataclass(frozen=True)
 class Details:
-    """A check's details cell: a table if the details are dicts, otherwise lines of text."""
+    """A check's details cell: a table if the details are dicts, otherwise lines of text.
+
+    ``rows``/``lines`` hold at most ``MAX_ROWS_PER_CHECK`` entries; ``total_rows``
+    counts them all and ``omitted_rows`` how many the page leaves to the CSV.
+    """
     kind: str  # "table" or "text"
     headers: tuple = ()
     rows: tuple = ()
     lines: tuple = ()
+    total_rows: int = 0
+    omitted_rows: int = 0
+    project_column: int | None = None  # index of the project column in ``headers``
+    project_count: int | None = None  # distinct projects over all rows (None without a project column)
 
 
 @dataclass(frozen=True)
@@ -70,6 +103,15 @@ class CheckItem:
     icon: str
     details: Details | None
     fix_id: int | None  # the N of the remediation placeholder id "fix-N"
+    summary: str | None = None  # "12 findings across 3 projects"; None when it would only repeat the table
+
+
+@dataclass(frozen=True)
+class StatusCount:
+    """How many of a section's checks have a status (the strip under the section title)."""
+    status: str
+    count: int
+    status_class: str
 
 
 @dataclass(frozen=True)
@@ -107,6 +149,7 @@ class Section:
     org_policies: OrgPolicySummary | None
     checks: tuple
     footer: str | None  # "cost", "security", or None
+    status_counts: tuple = ()  # a StatusCount per status present among ``checks``, in DISPLAY_ORDER
 
 
 @dataclass(frozen=True)
@@ -168,6 +211,10 @@ class ReportContext:
     banner: str | None = None
     # Sharded scans only: what the report covers. None: nothing is rendered.
     coverage: Coverage | None = None
+    # Projects in the scanned scope, when known (summary lines then say "312 of 1,000 projects").
+    total_projects: int | None = None
+    rows_per_page: int = ROWS_PER_PAGE
+    max_rows_per_check: int = MAX_ROWS_PER_CHECK
 
     def template_vars(self):
         """The top-level template variables (a shallow dict of the fields)."""
@@ -180,6 +227,20 @@ def section_id_for(category_name):
 
 def score_class_for(score):
     return "high" if score > 90 else "medium" if score > 70 else "low"
+
+
+def display_rank(status):
+    """Where a check with ``status`` sorts within its section (unknown statuses rank with Informational)."""
+    return DISPLAY_ORDER.get(status, DISPLAY_ORDER["Informational"])
+
+
+def count_statuses(checks):
+    """A ``StatusCount`` per status present among ``checks`` (CheckItems), in display order."""
+    counts = {}
+    for check in checks:
+        counts[check.status] = counts.get(check.status, 0) + 1
+    return tuple(StatusCount(status, counts[status], STATUS_STYLES.get(status, STATUS_STYLES["Informational"])["class"])
+                 for status in sorted(counts, key=lambda s: (display_rank(s), s)))
 
 
 def group_findings(findings_list):
@@ -205,8 +266,12 @@ def group_findings(findings_list):
     return grouped
 
 
-def build_details(details_list):
-    """Returns a table if details are a list of dicts, otherwise text lines (legacy ``create_details_html``)."""
+def build_details(details_list, max_rows=MAX_ROWS_PER_CHECK):
+    """Returns a table if details are a list of dicts, otherwise text lines (legacy ``create_details_html``).
+
+    Only the first ``max_rows`` rows (or lines) go into the page; ``total_rows``
+    and ``project_count`` are computed over all of them.
+    """
     if not details_list: return None
     if isinstance(details_list[0], dict):
         try:
@@ -215,10 +280,40 @@ def build_details(details_list):
             rows = []
             for item in details_list:
                 rows.append(tuple(f"{item.get(h, '')}" for h in headers))
-            return Details(kind="table", headers=header_cells, rows=tuple(rows))
         except Exception:
-            return Details(kind="text", lines=tuple(str(d) for d in details_list))
-    return Details(kind="text", lines=tuple(str(d) for d in details_list))
+            return _text_details(details_list, max_rows)
+        project_column = next((i for i, h in enumerate(header_cells) if h.strip().lower() in PROJECT_COLUMNS), None)
+        project_count = len({row[project_column] for row in rows}) if project_column is not None else None
+        return Details(kind="table", headers=header_cells, rows=tuple(rows[:max_rows]), total_rows=len(rows),
+                       omitted_rows=max(0, len(rows) - max_rows), project_column=project_column, project_count=project_count)
+    return _text_details(details_list, max_rows)
+
+
+def _text_details(details_list, max_rows):
+    lines = tuple(str(d) for d in details_list)
+    return Details(kind="text", lines=lines[:max_rows], total_rows=len(lines), omitted_rows=max(0, len(lines) - max_rows))
+
+
+def summarize_details(details, status, total_projects=None):
+    """The one-line summary of a check's table: "1,204 findings across 312 of 1,000 projects (31%)".
+
+    Returns None for text details and for single-row tables without a project
+    column (an error message, say), where the line would only repeat the table.
+    """
+    if details is None or details.kind != "table" or (details.total_rows < 2 and details.project_column is None):
+        return None
+    noun = SUMMARY_NOUNS.get(status, "finding")
+    count = details.total_rows
+    plural = "" if count == 1 else ("ies" if noun.endswith("y") else "s")
+    text = f"{count:,} {noun[:-1] if plural == 'ies' else noun}{plural}"
+    projects = details.project_count
+    if projects and total_projects and total_projects > 1:
+        pct = projects / total_projects * 100
+        pct_text = "<1" if 0 < pct < 1 else f"{pct:.0f}"
+        text += f" across {projects:,} of {total_projects:,} projects ({pct_text}%)"
+    elif projects and (projects > 1 or total_projects != 1):
+        text += f" across {projects:,} project{'' if projects == 1 else 's'}"
+    return text
 
 
 def evaluate_org_policies(best_practices, current_policies):
@@ -275,7 +370,7 @@ def build_org_policy_summary(org_policy_data):
     return OrgPolicySummary(tuple(categories), compliant_policy_count, total_policies, status_class, icon)
 
 
-def build_report_context(scope, scope_id, job_id, all_results, banner=None, coverage=None):
+def build_report_context(scope, scope_id, job_id, all_results, banner=None, coverage=None, total_projects=None):
     """
     Builds the data for the HTML report.
 
@@ -287,10 +382,16 @@ def build_report_context(scope, scope_id, job_id, all_results, banner=None, cove
             ``"Organization Policies"`` entry ``(best_practices, current_policies)``.
         banner (str, optional): A notice to show at the top of the report.
         coverage (dict, optional): A sharded scan's coverage (``app.fanout.build_coverage``).
+        total_projects (int, optional): Projects in the scope; the summary lines
+            then give the share of projects a check found something in.
+            Defaults to the coverage's total for sharded scans.
 
     Returns:
         ReportContext: Everything the report templates display.
     """
+    if total_projects is None and coverage:
+        total_projects = coverage["total_projects"]
+
     # --- CALCULATE SCORES AND DATA FOR ALL SECTIONS ---
     org_policy_summary = None
     if all_results.get(ORG_POLICIES_KEY):
@@ -321,7 +422,8 @@ def build_report_context(scope, scope_id, job_id, all_results, banner=None, cove
         action_count += (org_policy_summary.total - org_policy_summary.compliant)
 
     # --- BUILD EACH HIDDEN CATEGORY SECTION ---
-    # Remediation placeholders are numbered fix-0, fix-1, ... across all sections, in display order.
+    # Checks are listed by severity, then name. Remediation placeholders are numbered
+    # fix-0, fix-1, ... across all sections, in display order.
     finding_counter = 0
     sections = []
     for category_name in REPORT_CATEGORY_ORDER:
@@ -330,20 +432,22 @@ def build_report_context(scope, scope_id, job_id, all_results, banner=None, cove
         if not grouped_data and not org_content_for_section:
             continue
         checks = []
-        for check_name, group_data in sorted(grouped_data.items()):
+        for check_name, group_data in sorted(grouped_data.items(), key=lambda item: (display_rank(item[1].get("Status")), item[0])):
             status = group_data.get("Status", "Informational")
             status_info = STATUS_STYLES.get(status, STATUS_STYLES["Informational"])
             fix_id = None
             if status in ACTIONABLE_STATUSES:
                 fix_id = finding_counter
                 finding_counter += 1
+            details = build_details(group_data.get('details', []))
             checks.append(CheckItem(
                 check_name=f"{check_name}",
                 status=f"{status}",
                 status_class=status_info['class'],
                 icon=status_info['icon'],
-                details=build_details(group_data.get('details', [])),
+                details=details,
                 fix_id=fix_id,
+                summary=summarize_details(details, status, total_projects),
             ))
         footer = None
         if category_name == "Cost Optimization":
@@ -360,6 +464,7 @@ def build_report_context(scope, scope_id, job_id, all_results, banner=None, cove
             org_policies=org_content_for_section,
             checks=tuple(checks),
             footer=footer,
+            status_counts=count_statuses(checks),
         ))
 
     # --- THE SCORE SUMMARY TABLE ---
@@ -378,4 +483,5 @@ def build_report_context(scope, scope_id, job_id, all_results, banner=None, cove
         sections=tuple(sections),
         banner=banner,
         coverage=Coverage.from_dict(coverage) if coverage else None,
+        total_projects=total_projects,
     )

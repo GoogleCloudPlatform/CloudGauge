@@ -11,12 +11,17 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""GEMINI_MODEL=auto: model discovery, caching, and fallback (new; the legacy code hardcoded a model)."""
+"""GEMINI_MODEL=auto: model discovery, caching, and fallback (new; the legacy code hardcoded a model).
+Also the prompt-size caps for large organizations (plan item 6b)."""
+import csv
+import io
+
 import pytest
 from google.genai import errors as genai_errors
 
 import fakes
 from app.config import AUTO_GEMINI_MODEL, FALLBACK_GEMINI_MODEL, Settings, _gemini_model
+from app.reporting.csv_report import generate_csv_data
 from app.services import gemini as gemini_service
 from app.services.gemini import FALLBACK_CACHE_TTL_SECONDS, MODEL_CACHE_TTL_SECONDS, newest_stable_flash_model
 
@@ -165,3 +170,65 @@ def test_get_client_targets_vertex_ai(monkeypatch):
         assert created == [{'vertexai': True, 'project': 'p', 'location': 'global'}]
     finally:
         gemini_service.get_client.cache_clear()
+
+
+# --- Prompt size for large organizations (plan item 6b) ---
+
+def big_csv(rows_per_check):
+    """A CSV report like generate_csv_data's: org policies, then sections with a header per check."""
+    results = {
+        'Organization Policies': ({'Security': [{'policyId': f'p{i}', 'displayName': f'Policy {i}', 'expectedValue': 'true'} for i in range(40)]},
+                                  {f'p{i}': {'booleanPolicy': {'enforced': True}} for i in range(40)}),
+        'Security & Identity': [
+            {'Check': 'Public Buckets', 'Status': 'Action Required',
+             'Finding': [{'Project': f'p{i % 7}', 'Bucket': f'b{i}'} for i in range(rows_per_check)]},
+            {'Check': 'Open Firewall Rules', 'Status': 'Compliant', 'Finding': 'All firewall rules are restricted.'},
+        ],
+        'Cost Optimization': [{'Check': 'Idle Disks', 'Status': 'Investigation Recommended',
+                               'Finding': [{'Disk': f'd{i}', 'Size': i} for i in range(rows_per_check)]}],  # no project column
+    }
+    return generate_csv_data(results)
+
+
+def test_small_csv_is_passed_to_the_prompt_unchanged():
+    csv_data = big_csv(rows_per_check=gemini_service.SUMMARY_ROWS_PER_CHECK)
+    assert gemini_service.condense_csv_for_prompt(csv_data) is csv_data
+
+
+def test_large_csv_is_condensed_per_check():
+    csv_data = big_csv(rows_per_check=1000)
+    condensed = gemini_service.condense_csv_for_prompt(csv_data)
+    rows = list(csv.reader(io.StringIO(condensed)))
+    assert sum(1 for row in rows if row[:1] == ['Public Buckets']) == gemini_service.SUMMARY_ROWS_PER_CHECK + 1
+    assert ['Public Buckets', 'Action Required', '... and 975 more rows not shown (7 distinct projects in all 1,000 rows)'] in rows
+    assert ['Idle Disks', 'Investigation Recommended', '... and 975 more rows not shown'] in rows
+    assert ['Public Buckets', 'Action Required', 'p0', 'b0'] in rows and ['Public Buckets', 'Action Required', 'p4', 'b25'] not in rows
+    assert ['Open Firewall Rules', 'Compliant', 'All firewall rules are restricted.'] in rows  # one-row checks are untouched
+    assert sum(1 for row in rows if row[:1] == ['Security']) == 40  # the org policies are kept whole
+    assert rows[:2] == [['Organization Policies'], ['Category', 'Policy', 'Expected Value', 'Current Value', 'Status']]
+    assert len(condensed) < len(csv_data) / 10
+
+
+def test_condensed_csv_is_cut_at_the_character_limit():
+    csv_data = big_csv(rows_per_check=1000)
+    condensed = gemini_service.condense_csv_for_prompt(csv_data, max_chars=1500)
+    assert len(condensed) <= 1500 + len('... (report truncated for length)\r\n')
+    assert condensed.endswith('\r\n... (report truncated for length)\r\n')
+    assert condensed.count('\r\n... (report truncated') == 1 and condensed.rsplit('\r\n', 3)[-3] in csv_data  # cut at a line break
+
+
+def test_summary_prompt_gets_the_condensed_csv(gcp):
+    csv_data = big_csv(rows_per_check=1000)
+    gcp.gemini.reply = 'summary'
+    assert gemini_service.generate_executive_summary(csv_data, settings=AUTO) == 'summary'
+    (_, prompt), = gcp.gemini.prompts
+    assert '... and 975 more rows not shown (7 distinct projects in all 1,000 rows)' in prompt
+    assert 'b999' not in prompt and 'b24' in prompt
+
+
+def test_remediation_finding_text_is_capped(gcp):
+    gcp.gemini.reply = 'gcloud x'
+    gemini_service.generate_remediation_command('x' * 50_000, 'p1', settings=AUTO)
+    (_, prompt), = gcp.gemini.prompts
+    assert 'x' * gemini_service.REMEDIATION_MAX_CHARS + '\n... (finding text truncated)' in prompt
+    assert 'x' * (gemini_service.REMEDIATION_MAX_CHARS + 1) not in prompt

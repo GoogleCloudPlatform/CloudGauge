@@ -19,6 +19,7 @@
   Variables come from app.reporting.context.ReportContext; logic belongs there.
 #}
 {% from "report/_macros.html" import category_section %}
+{% set csv_href = "/report/" ~ (job_id|pathsegment) ~ "/" ~ (scope_id|pathsegment) ~ "/csv" %}
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -42,6 +43,11 @@
     <div class="main-content">
         <h1>CloudGauge Report</h1>
         <p style="color: var(--light-text-color);">Scope: {{ scope_title }} | ID: {{ scope_id }} | Report ID: {{ job_id }}</p>
+        <div class="report-toolbar">
+            <input id="row-filter" type="search" placeholder="Filter findings by project ID, resource name, or any text" aria-label="Filter findings" oninput="scheduleRowFilter()">
+            <span id="filter-status" aria-live="polite"></span>
+            <a class="toolbar-link" href="{{ csv_href }}">Download CSV (all rows)</a>
+        </div>
 {% if banner %}
         <div role="note" style="margin: 0 0 20px; padding: 12px 16px; border-left: 6px solid #f9ab00; background: #fef7e0; color: #5f4b00; font-weight: 500;">{{ banner }}</div>
 {% endif %}
@@ -90,7 +96,7 @@
             </div>
         </div>
         {% for section in sections %}
-        {{ category_section(section, scope_id) }}
+        {{ category_section(section, scope_id, rows_per_page, csv_href) }}
         {% endfor %}
     </div>
     <script>

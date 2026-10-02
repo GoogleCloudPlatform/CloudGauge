@@ -17,11 +17,16 @@
   Building blocks of the report's category sections. Tables are emitted on a
   single line, as the legacy report did; getGeminiSuggestions() in _script.js
   reads the details tables and the fix-N placeholders.
+
+  Large scans (app.reporting.context, "Layout for large organizations"): rows
+  after the first rows_per_page carry the hidden attribute and _script.js
+  reveals them ("Show 50 more"), sorts columns, and filters rows. A table
+  holds at most max_rows_per_check rows; the note under it points to the CSV.
 #}
-{% macro details_cell(details) -%}
+{% macro details_cell(details, rows_per_page) -%}
 {% if details is not none -%}
 {% if details.kind == "table" -%}
-<table class='details-table'><thead><tr>{% for header in details.headers %}<th>{{ header }}</th>{% endfor %}</tr></thead><tbody>{% for row in details.rows %}<tr>{% for cell in row %}<td>{{ cell }}</td>{% endfor %}</tr>{% endfor %}</tbody></table>
+<table class='details-table'><thead><tr>{% for header in details.headers %}<th>{{ header }}</th>{% endfor %}</tr></thead><tbody>{% for row in details.rows %}<tr{% if loop.index > rows_per_page %} hidden{% endif %}>{% for cell in row %}<td>{{ cell }}</td>{% endfor %}</tr>{% endfor %}</tbody></table>
 {%- else -%}
 {{ details.lines|join("<br>"|safe) }}
 {%- endif %}
@@ -56,12 +61,23 @@
 </li>
 {% endmacro %}
 
-{% macro check_item(check) %}
+{% macro check_item(check, rows_per_page, csv_href) %}
 <li class="status-{{ check.status_class }}">
     <span class="icon">{{ check.icon }}</span>
     <div class="check-content">
         <strong>{{ check.check_name }}</strong>
-        <div class="details">{{ details_cell(check.details) }}</div>
+        {% if check.summary %}
+        <div class="check-summary">{{ check.summary }}</div>
+        {% endif %}
+        <div class="details">{{ details_cell(check.details, rows_per_page) }}</div>
+        {% if check.details is not none and check.details.kind == "table" and check.details.rows|length > rows_per_page %}
+        <div class="table-controls">Showing <span class="shown-count">{{ "{:,}".format(rows_per_page) }}</span> of {{ "{:,}".format(check.details.rows|length) }} rows
+            <button class="link-btn" onclick="showMoreRows(this)">Show {{ rows_per_page }} more</button>
+            <button class="link-btn" onclick="showAllRows(this)">Show all</button></div>
+        {% endif %}
+        {% if check.details is not none and check.details.omitted_rows %}
+        <div class="table-note">Only the first {{ "{:,}".format(check.details.total_rows - check.details.omitted_rows) }} of {{ "{:,}".format(check.details.total_rows) }} rows are included in this page. The complete list is in the <a href="{{ csv_href }}">CSV report</a>.</div>
+        {% endif %}
         {% if check.fix_id is not none %}
         <div class='remediation-placeholder' id='fix-{{ check.fix_id }}'></div>
         {% endif %}
@@ -70,19 +86,26 @@
 </li>
 {% endmacro %}
 
-{% macro category_section(section, scope_id) %}
+{% macro category_section(section, scope_id, rows_per_page, csv_href) %}
 <div id="{{ section.section_id }}-section" class="content-section" style="display: none;">
     <div class="checks-section">
         <div class="section-header">
             <h2>{{ section.title }}</h2>
             <span class="score-badge score-{{ section.score_class }}">{{ section.score_display }}% Compliant</span>
         </div>
+        {% if section.status_counts %}
+        <div class="section-counts">
+            {%- for item in section.status_counts %}
+            <span class="count-{{ item.status_class }}">{{ item.count }} {{ item.status }}</span>
+            {%- endfor %}
+        </div>
+        {% endif %}
         <ul class="checks-list">
             {% if section.org_policies is not none %}
             {{ org_policy_item(section.org_policies) }}
             {% endif %}
             {% for check in section.checks %}
-            {{ check_item(check) }}
+            {{ check_item(check, rows_per_page, csv_href) }}
             {% endfor %}
         </ul>
         {% if section.footer == "cost" %}
