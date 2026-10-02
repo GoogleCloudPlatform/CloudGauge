@@ -50,6 +50,7 @@ MARKERS_DIR = "markers"
 SHARDS_DIR = "shards"
 ORG_POLICY_FILES = ("best_practices.json", "current_policies.json")
 READ_WORKERS = 16  # parallel downloads when reading a job's findings back
+DELETE_WORKERS = 16  # parallel deletions when cleaning a job's intermediate files up
 
 
 class GcsResultsStore:
@@ -263,7 +264,12 @@ class GcsResultsStore:
         return signed_csv_url
 
     def cleanup_intermediate(self, job_id, shard_id=None):
-        """Deletes all intermediate files for the job (or one shard) and returns how many were deleted."""
+        """Deletes all intermediate files for the job (or one shard) and returns how many were deleted.
+
+        One request per object, ``DELETE_WORKERS`` at a time: a job of 1,000
+        projects leaves over a thousand objects, and the bucket may be far from
+        the service. An object that is already gone is skipped, not an error.
+        """
         what = f"shard {shard_id}" if shard_id else "intermediate"
         print(f"[{job_id}] Cleaning up {what} files from GCS...")
         try:
@@ -271,7 +277,10 @@ class GcsResultsStore:
             prefix_to_delete = self.intermediate_prefix(job_id, shard_id)
             blobs_to_delete = list(bucket.list_blobs(prefix=prefix_to_delete))
             if blobs_to_delete:
-                bucket.delete_blobs(blobs_to_delete)
+                workers = min(DELETE_WORKERS, len(blobs_to_delete))
+                chunks = [blobs_to_delete[i::workers] for i in range(workers)]
+                with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+                    list(executor.map(lambda chunk: bucket.delete_blobs(chunk, on_error=lambda blob: None), chunks))
                 print(f"[{job_id}] Deleted {len(blobs_to_delete)} {what} files.")
             return len(blobs_to_delete)
         except Exception as e:

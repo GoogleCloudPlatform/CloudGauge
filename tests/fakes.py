@@ -99,9 +99,10 @@ class FakeBucket:
         self.check()
         return [FakeBlob(self, name) for name in list(self.objects) if name.startswith(prefix)]
 
-    def delete_blobs(self, blobs):
+    def delete_blobs(self, blobs, on_error=None):
         for blob in blobs:
-            self.objects.pop(blob.name, None)
+            if self.objects.pop(blob.name, None) is None and on_error is not None:
+                on_error(blob)
             self.deleted.append(blob.name)
 
     def put(self, name, text, content_type='text/plain'):

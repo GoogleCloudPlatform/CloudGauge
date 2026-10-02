@@ -74,11 +74,13 @@ class MemoryBucket:
             names = [name for name in self._objects if name.startswith(prefix)]
         return [MemoryBlob(self, name) for name in names]
 
-    def delete_blobs(self, blobs):
+    def delete_blobs(self, blobs, on_error=None):
         with self._lock:
             for blob in blobs:
                 if self._objects.pop(blob.name, None) is not None:
                     self.stats["deletes"] += 1
+                elif on_error is not None:
+                    on_error(blob)
 
     def object_names(self, prefix=""):
         with self._lock:

@@ -81,7 +81,7 @@ def run_both(legacy_client, client, bucket, **request):
             statuses=[(doc['progress'], doc['current_task'], doc['status'], content_type)
                       for doc, content_type in bucket.status_updates(JOB_ID, SCOPE_ID)],
             uploads=without_uuids(name for name, _, _ in bucket.uploads),
-            deleted=without_uuids(bucket.deleted),
+            deleted=sorted(without_uuids(bucket.deleted)),  # deleted in parallel: the order is not part of the contract
         ))
         bucket.objects.clear()
         bucket.uploads.clear()
