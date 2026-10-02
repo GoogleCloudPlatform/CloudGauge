@@ -8,8 +8,8 @@ ARG APP_IMAGE=cloudgauge
 FROM ${APP_IMAGE}
 
 USER root
-# Dockerfile and the ignore files are copied only so test_packaging.py can inspect them.
-COPY requirements-dev.txt pytest.ini Dockerfile .dockerignore Dockerfile.test.dockerignore run.py ./
+# The Dockerfiles and the ignore files are copied only so test_packaging.py can inspect them.
+COPY requirements-dev.txt pytest.ini Dockerfile Dockerfile.test .dockerignore Dockerfile.test.dockerignore run.py ./
 RUN pip install --no-cache-dir -r requirements-dev.txt
 COPY tests ./tests
 COPY tools ./tools
