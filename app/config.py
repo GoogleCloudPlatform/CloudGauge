@@ -63,7 +63,16 @@ DEFAULT_SHARD_TIME_BUDGET_SECONDS = 20 * 60
 DEFAULT_TASK_DISPATCH_DEADLINE_SECONDS = 30 * 60
 MAX_TASK_DISPATCH_DEADLINE_SECONDS = 30 * 60  # Cloud Tasks' maximum for HTTP tasks
 DEFAULT_SWEEP_INTERVAL_SECONDS = 30 * 60
-MAX_SWEEPS = 12  # a job is force-finished after this many sweeps no matter what
+# A job's *time limit*: when it has run this long, the sweeper finishes it with
+# the results it has (the rest become error rows). It is computed per job from
+# its size, so a large organization is never cut off while its shards are still
+# queued: the queue runs the shards in waves of SCAN_MAX_CONCURRENT_SHARDS, and
+# the limit is JOB_TIME_LIMIT_FACTOR times the time all the waves take if every
+# shard uses its full dispatch deadline (the factor leaves room for retries), and
+# never less than MIN_JOB_TIME_LIMIT_SECONDS. SCAN_TIME_LIMIT_SECONDS replaces
+# the computed limit (see app.fanout.job_time_limit_seconds).
+MIN_JOB_TIME_LIMIT_SECONDS = 6 * 60 * 60
+JOB_TIME_LIMIT_FACTOR = 2
 # Retry policy of the queue (created at startup if missing). Three attempts:
 # a crashed shard is re-run, a persistently failing one ends up as error rows
 # in the report instead of retrying for hours.
@@ -138,6 +147,7 @@ class Settings:
     shard_time_budget_seconds: int = DEFAULT_SHARD_TIME_BUDGET_SECONDS
     task_dispatch_deadline_seconds: int = DEFAULT_TASK_DISPATCH_DEADLINE_SECONDS
     sweep_interval_seconds: int = DEFAULT_SWEEP_INTERVAL_SECONDS
+    scan_time_limit_seconds: int = 0  # 0: computed per job (app.fanout.job_time_limit_seconds)
     task_max_attempts: int = QUEUE_MAX_ATTEMPTS
     # Synthetic load mode (profile 'synthetic' only; see app.synthetic)
     synthetic_projects: int = 0
@@ -182,6 +192,7 @@ class Settings:
             task_dispatch_deadline_seconds=_number(env, 'TASK_DISPATCH_DEADLINE_SECONDS', DEFAULT_TASK_DISPATCH_DEADLINE_SECONDS, int, minimum=15,
                                                    maximum=MAX_TASK_DISPATCH_DEADLINE_SECONDS),
             sweep_interval_seconds=_number(env, 'SWEEP_INTERVAL_SECONDS', DEFAULT_SWEEP_INTERVAL_SECONDS, int, minimum=60),
+            scan_time_limit_seconds=_number(env, 'SCAN_TIME_LIMIT_SECONDS', 0, int, minimum=0),
             task_max_attempts=_number(env, 'TASK_MAX_ATTEMPTS', QUEUE_MAX_ATTEMPTS, int, minimum=1, maximum=100),
             synthetic_projects=synthetic_projects,
             synthetic_seed=_number(env, 'SYNTHETIC_SEED', DEFAULT_SYNTHETIC_SEED, int),

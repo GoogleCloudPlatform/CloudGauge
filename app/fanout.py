@@ -37,7 +37,10 @@ user's point of view nothing changed but the speed.
   are still queued or running. Shards whose task is gone (crashed on every
   attempt) get error rows and a marker; when nothing is left the report is
   produced with what there is. A shard that fails for good writes error rows
-  itself, so a bad shard costs that shard's rows, never the whole report.
+  itself, so a bad shard costs that shard's rows, never the whole report. A job
+  that is still running at its *time limit* (``job_time_limit_seconds``: sized
+  from its number of shards, so a large organization is never cut off while its
+  shards are queued) is finished with the results it has.
 
 Shards are idempotent: a retried shard first deletes what its previous attempt
 wrote. Cloud Tasks may deliver a task more than once; a shard whose marker
@@ -55,7 +58,7 @@ from datetime import datetime, timezone
 from app.checks.categories import categorize_findings, merge_shard_findings
 from app.checks.registry import project_check_plan, scope_check_plan, shard_check_names
 from app.checks.runner import error_finding, record_error, run_check_plan
-from app.config import MAX_SWEEPS
+from app.config import JOB_TIME_LIMIT_FACTOR, MIN_JOB_TIME_LIMIT_SECONDS
 from app.reporting.csv_report import generate_csv_data
 from app.reporting.html_report import generate_html_report
 from app.services.resource_manager import get_active_compute_locations
@@ -69,6 +72,9 @@ RETRY_COUNT_HEADER = "X-CloudTasks-TaskRetryCount"
 # (those are error rows already); "timed_out" means some checks were cut off by
 # the time budget; "failed" means the shard as a whole failed on its last attempt.
 SUCCESS, TIMED_OUT, FAILED = "success", "timed_out", "failed"
+# The sweeper's next check comes after SWEEP_INTERVAL_SECONDS, or sooner when the
+# job's time limit is closer than that; never sooner than this.
+MIN_SWEEP_DELAY_SECONDS = 60
 
 
 def shard_task_id(job_id, shard_id):
@@ -90,7 +96,24 @@ def plan_shards(projects, shard_size):
     return {f"shard-{i + 1:0{width}d}": projects[i * shard_size:(i + 1) * shard_size] for i in range(count)}
 
 
-def build_manifest(scope, scope_id, job_id, projects, shard_size, now=None):
+def job_time_limit_seconds(settings, total_shards):
+    """How long a job may run before the sweeper finishes it with the results it has.
+
+    ``SCAN_TIME_LIMIT_SECONDS`` if set. Otherwise the queue runs the shards in
+    waves of ``SCAN_MAX_CONCURRENT_SHARDS``; the limit is ``JOB_TIME_LIMIT_FACTOR``
+    times the time the waves take if every shard uses its full dispatch deadline
+    (the factor leaves room for retried shards), and at least
+    ``MIN_JOB_TIME_LIMIT_SECONDS``. With the defaults (25 concurrent, 30-minute
+    deadline): up to 150 shards (~3,000 projects) keep the 6-hour minimum; 501
+    shards (10,000 projects) get 21 waves, 21 hours.
+    """
+    if settings.scan_time_limit_seconds:
+        return settings.scan_time_limit_seconds
+    waves = math.ceil(total_shards / settings.scan_max_concurrent_shards)
+    return max(MIN_JOB_TIME_LIMIT_SECONDS, JOB_TIME_LIMIT_FACTOR * waves * settings.task_dispatch_deadline_seconds)
+
+
+def build_manifest(scope, scope_id, job_id, projects, shard_size, now=None, time_limit_seconds=None):
     """The job's shard plan: the project shards plus the scope shard (which has no projects)."""
     shards = plan_shards(projects, shard_size)
     shards[SCOPE_SHARD] = []
@@ -99,6 +122,7 @@ def build_manifest(scope, scope_id, job_id, projects, shard_size, now=None):
         "shard_size": shard_size, "total_projects": len(projects), "total_shards": len(shards),
         "shards": shards,
         "created_at": (now or datetime.now(timezone.utc)).isoformat(timespec="seconds"),
+        "time_limit_seconds": time_limit_seconds,
     }
 
 
@@ -174,15 +198,17 @@ class FanOut:
             still on the queue; ``None`` if unknown. Default: always unknown.
         banner: Notice rendered on the report (synthetic mode).
         clock: Monotonic clock for time budgets (tests).
+        now: Wall clock, ``now() -> datetime`` (UTC), for the job's time limit (tests).
     """
 
-    def __init__(self, settings, store, *, enqueue, task_exists=None, banner=None, clock=time.monotonic):
+    def __init__(self, settings, store, *, enqueue, task_exists=None, banner=None, clock=time.monotonic, now=None):
         self.settings = settings
         self.store = store
         self.enqueue = enqueue
         self.task_exists = task_exists or (lambda task_id: None)
         self.banner = banner
         self.clock = clock
+        self.now = now or (lambda: datetime.now(timezone.utc))
 
     # --- Dispatch -----------------------------------------------------------------
 
@@ -205,7 +231,8 @@ class FanOut:
         if fresh:
             if projects is None:
                 raise RuntimeError(f"[{job_id}] No manifest and no projects to plan shards from.")
-            manifest = build_manifest(scope, scope_id, job_id, projects, self.settings.scan_shard_size)
+            manifest = build_manifest(scope, scope_id, job_id, projects, self.settings.scan_shard_size, now=self.now())
+            manifest["time_limit_seconds"] = job_time_limit_seconds(self.settings, manifest["total_shards"])
             self.store.write_manifest(job_id, manifest)
         body = {"scope": scope, "scope_id": scope_id, "job_id": job_id}
         # The scope shard first: its checks (org policies, resilience assets) tend to be the slowest.
@@ -213,9 +240,9 @@ class FanOut:
         created = sum(1 for shard_id in shard_ids
                       if self.enqueue(SHARD_PATH, {**body, "shard_id": shard_id}, shard_task_id(job_id, shard_id)))
         self.enqueue(SWEEP_PATH, {**body, "sweep": 1}, sweep_task_id(job_id, 1),
-                     schedule_delay_seconds=self.settings.sweep_interval_seconds)
+                     schedule_delay_seconds=self._sweep_delay(manifest, elapsed=0))
         print(f"[{job_id}] Dispatched {manifest['total_projects']} projects in {manifest['total_shards']} shards "
-              f"({created} tasks created).")
+              f"({created} tasks created); time limit {self._time_limit(manifest) / 3600:.1f} h.")
         # A retried dispatcher must not move the progress backwards: the shards may be
         # reporting already. It writes the status only if the first attempt never did.
         if fresh or not (self._current_status(job_id, scope_id) or {}).get("phase"):
@@ -231,6 +258,24 @@ class FanOut:
         except Exception as e:
             print(f"[{job_id}] Could not read the job's status ({e}).")
             return None
+
+    # --- Time limit ---------------------------------------------------------------
+
+    def _time_limit(self, manifest):
+        """The job's time limit in seconds: as planned at dispatch, else computed from the manifest."""
+        return manifest.get("time_limit_seconds") or job_time_limit_seconds(self.settings, manifest["total_shards"])
+
+    def _elapsed_seconds(self, manifest):
+        """Wall-clock seconds since the job was dispatched (the manifest's ``created_at``)."""
+        created = datetime.fromisoformat(manifest["created_at"])
+        if created.tzinfo is None:
+            created = created.replace(tzinfo=timezone.utc)
+        return max(0.0, (self.now() - created).total_seconds())
+
+    def _sweep_delay(self, manifest, elapsed):
+        """Seconds until the next sweep: the usual interval, or less so the time limit is checked on time."""
+        remaining = self._time_limit(manifest) - elapsed
+        return int(min(self.settings.sweep_interval_seconds, max(remaining, MIN_SWEEP_DELAY_SECONDS)))
 
     # --- Shards -------------------------------------------------------------------
 
@@ -455,14 +500,16 @@ class FanOut:
                 self._trigger_aggregation(manifest, scope_id, job_id, markers,
                                           note=f"The scan of {self._subjects(manifest, dead)} failed; merging the results of the others...")
                 return True
-            if sweep < MAX_SWEEPS:
-                print(f"[{job_id}] Sweep {sweep}: {len(still_pending)} shards still queued or running; checking again later.")
+            elapsed, limit = self._elapsed_seconds(manifest), self._time_limit(manifest)
+            if elapsed < limit:
+                print(f"[{job_id}] Sweep {sweep}: {len(still_pending)} shards still queued or running after {elapsed / 3600:.1f} h "
+                      f"(time limit {limit / 3600:.1f} h); checking again later.")
                 self.enqueue(SWEEP_PATH, {"scope": scope, "scope_id": scope_id, "job_id": job_id, "sweep": sweep + 1},
-                             sweep_task_id(job_id, sweep + 1), schedule_delay_seconds=self.settings.sweep_interval_seconds)
+                             sweep_task_id(job_id, sweep + 1), schedule_delay_seconds=self._sweep_delay(manifest, elapsed))
                 return True
-            # Give up waiting: the aggregation records the missing shards as error rows.
-            logging.error(f"[{job_id}] Sweep {sweep}: {len(still_pending)} shards never finished after {MAX_SWEEPS} sweeps; "
-                          f"finishing the job without them.")
+            # The time limit is up: the aggregation records the missing shards as error rows.
+            logging.error(f"[{job_id}] Sweep {sweep}: {len(still_pending)} shards still not finished after {elapsed / 3600:.1f} h, "
+                          f"the job's time limit of {limit / 3600:.1f} h; finishing the job without them.")
             self._trigger_aggregation(manifest, scope_id, job_id, markers,
                                       note=f"The scan of {self._subjects(manifest, still_pending)} did not finish; "
                                            f"generating the report with the results so far...")

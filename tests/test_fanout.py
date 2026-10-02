@@ -25,6 +25,7 @@ import json
 import re
 import threading
 import time
+from datetime import datetime, timedelta
 from html import unescape as html_unescape
 from types import SimpleNamespace
 
@@ -602,15 +603,90 @@ def test_sweep_does_not_overwrite_a_marker_written_in_the_meantime(store, queue,
     assert all(f['Status'] != 'Error' for f in store.read_all_findings(JOB, shard_id='shard-002'))
 
 
-def test_sweep_gives_up_after_max_sweeps(store, queue, monkeypatch):
+def test_job_time_limit_scales_with_the_shard_count():
+    """Defaults: 25 concurrent shards, 30-minute deadline, factor 2, at least 6 hours."""
+    settings = make_settings()
+    assert fanout.job_time_limit_seconds(settings, 4) == 6 * 3600
+    assert fanout.job_time_limit_seconds(settings, 150) == 6 * 3600  # 6 waves × 30 min × 2 = the minimum
+    assert fanout.job_time_limit_seconds(settings, 151) == 7 * 3600
+    assert fanout.job_time_limit_seconds(settings, 501) == 21 * 3600  # 10,000 projects in shards of 20
+    assert fanout.job_time_limit_seconds(make_settings(SCAN_MAX_CONCURRENT_SHARDS='100'), 501) == 6 * 3600
+    assert fanout.job_time_limit_seconds(make_settings(TASK_DISPATCH_DEADLINE_SECONDS='900'), 501) == 21 * 1800
+    # An explicit limit replaces the computed one, whatever the size.
+    assert fanout.job_time_limit_seconds(make_settings(SCAN_TIME_LIMIT_SECONDS='3600'), 501) == 3600
+
+
+def test_dispatch_records_the_time_limit_and_times_the_first_sweep(store, queue):
+    manifest = make_fanout(store, queue).dispatch('organization', SCOPE_ID, JOB, projects(5))
+    assert manifest['time_limit_seconds'] == 6 * 3600 and store.read_manifest(JOB)['time_limit_seconds'] == 6 * 3600
+    assert queue.calls[-1][3] == 1800  # the first sweep after the usual interval
+    # A limit shorter than the interval is checked when it is up.
+    queue = Queue()
+    manifest = make_fanout(store, queue, SCAN_TIME_LIMIT_SECONDS='600').dispatch('organization', SCOPE_ID, 'job-short', projects(5))
+    assert manifest['time_limit_seconds'] == 600 and queue.calls[-1] == ('/sweep', {**BODY, 'job_id': 'job-short', 'sweep': 1}, 'job-short-sweep-1', 600)
+
+
+def hours_later(fan, hours):
+    """Moves the FanOut's wall clock to ``hours`` after the job was dispatched."""
+    created = datetime.fromisoformat(fan.store.read_manifest(JOB)['created_at'])
+    fan.now = lambda: created + timedelta(hours=hours)
+
+
+def test_sweep_waits_for_a_large_job_past_six_hours(store, queue, monkeypatch):
+    """14 projects in shards of 2, one shard at a time: 8 shards, 8 waves of 30 minutes, limit 2 × 4 h = 8 h."""
+    fake_plans(monkeypatch, [])
+    fan = make_fanout(store, queue, SCAN_MAX_CONCURRENT_SHARDS='1')
+    manifest = fan.dispatch('organization', SCOPE_ID, JOB, projects(14))
+    assert manifest['total_shards'] == 8 and manifest['time_limit_seconds'] == 8 * 3600
+    fan.run_shard({**BODY, 'shard_id': 'shard-001'})
+    queue.alive = None  # liveness unknown: the shards count as queued
+    queue.calls.clear()
+
+    hours_later(fan, 7)  # the old fixed wall would have given up here
+    assert fan.sweep({**BODY, 'sweep': 14}) is True
+    assert queue.calls == [('/sweep', {**BODY, 'sweep': 15}, f'{JOB}-sweep-15', 1800)]
+    hours_later(fan, 7.9)  # 6 minutes to the limit: the next sweep lands on it, not 30 minutes later
+    queue.calls.clear()
+    assert fan.sweep({**BODY, 'sweep': 15}) is True
+    assert queue.calls[0][3] == 360
+
+    hours_later(fan, 8.01)
+    queue.calls.clear()
+    assert fan.sweep({**BODY, 'sweep': 16}) is True
+    assert queue.calls == [('/run-aggregation', BODY, f'{JOB}-aggregate', None)]
+    assert store.read_status(JOB, SCOPE_ID)['current_task'] == ('The scan of 12 projects and the organization-level checks did not finish; '
+                                                                'generating the report with the results so far...')
+
+
+def test_sweep_gives_up_at_the_time_limit(store, queue, monkeypatch):
     fan = finished_job(store, queue, monkeypatch, skip={'shard-002'})
     queue.alive = {f'{JOB}-shard-002': True}
     queue.calls.clear()
-    assert fan.sweep({**BODY, 'sweep': fanout.MAX_SWEEPS}) is True
+    hours_later(fan, 5.99)
+    assert fan.sweep({**BODY, 'sweep': 12}) is True
+    assert queue.calls[0][2] == f'{JOB}-sweep-13'  # still within the 6-hour minimum: wait
+    queue.calls.clear()
+    hours_later(fan, 6)
+    assert fan.sweep({**BODY, 'sweep': 13}) is True
     assert queue.calls == [('/run-aggregation', BODY, f'{JOB}-aggregate', None)]
     assert store.read_status(JOB, SCOPE_ID)['current_task'] == 'The scan of 1 project did not finish; generating the report with the results so far...'
     assert fan.aggregate(BODY) is True
     assert 'Not checked for 1 project (p-002): the scan did not finish' in store.read_report(JOB, SCOPE_ID, 'html')
+
+
+def test_sweep_computes_the_limit_for_a_manifest_without_one(store, queue, monkeypatch):
+    """A job dispatched by a revision that did not record the limit (an upgrade in flight) still terminates."""
+    fan = finished_job(store, queue, monkeypatch, skip={'shard-002'})
+    manifest = store.read_manifest(JOB)
+    del manifest['time_limit_seconds']
+    store.write_manifest(JOB, manifest)
+    queue.alive = {f'{JOB}-shard-002': True}
+    queue.calls.clear()
+    hours_later(fan, 1)
+    assert fan.sweep({**BODY, 'sweep': 2}) is True and queue.calls[0][2] == f'{JOB}-sweep-3'
+    queue.calls.clear()
+    hours_later(fan, 6)
+    assert fan.sweep({**BODY, 'sweep': 3}) is True and queue.calls == [('/run-aggregation', BODY, f'{JOB}-aggregate', None)]
 
 
 def test_sweep_of_an_errored_job_is_a_no_op(store, queue):
@@ -781,6 +857,7 @@ def test_services_build_the_fanout_from_the_app_configuration(prod_app):
     ('TASK_DISPATCH_DEADLINE_SECONDS', '3600', 'between 15 and 1800'),
     ('SHARD_TIME_BUDGET_SECONDS', '10', 'between 60'),
     ('SCAN_MAX_CONCURRENT_SHARDS', 'many', 'must be a number'),
+    ('SCAN_TIME_LIMIT_SECONDS', '-1', 'between 0'),
 ])
 def test_fanout_settings_are_validated(name, value, message):
     with pytest.raises(ValueError, match=message):
@@ -789,7 +866,10 @@ def test_fanout_settings_are_validated(name, value, message):
 
 def test_fanout_settings_are_read():
     settings = make_settings(SCAN_SHARD_SIZE='50', SCAN_MAX_CONCURRENT_SHARDS='10', SHARD_TIME_BUDGET_SECONDS='300',
-                             TASK_DISPATCH_DEADLINE_SECONDS='900', SWEEP_INTERVAL_SECONDS='120', TASK_MAX_ATTEMPTS='5')
+                             TASK_DISPATCH_DEADLINE_SECONDS='900', SWEEP_INTERVAL_SECONDS='120', TASK_MAX_ATTEMPTS='5',
+                             SCAN_TIME_LIMIT_SECONDS='7200')
     assert (settings.scan_shard_size, settings.scan_max_concurrent_shards, settings.shard_time_budget_seconds,
-            settings.task_dispatch_deadline_seconds, settings.sweep_interval_seconds, settings.task_max_attempts) == (50, 10, 300, 900, 120, 5)
+            settings.task_dispatch_deadline_seconds, settings.sweep_interval_seconds, settings.task_max_attempts,
+            settings.scan_time_limit_seconds) == (50, 10, 300, 900, 120, 5, 7200)
     assert SimpleNamespace(**make_settings().__dict__).scan_shard_size == 20
+    assert make_settings().scan_time_limit_seconds == 0  # computed per job
