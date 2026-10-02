@@ -36,7 +36,11 @@ groups by project (hundreds of groups would bury the findings) and instead:
   rest, sort columns, and filter rows by project ID or any text;
 - gives every category a page: one whose checks found nothing says so ("No
   findings in this category — all Cost Optimization checks were compliant")
-  instead of being left out, which made its sidebar link open a blank page.
+  instead of being left out, which made its sidebar link open a blank page;
+- shows, on each category page, the projects its checks could not cover as one
+  "Projects not checked" item (``app.checks.not_checked``): an Error-status
+  table of project, skipped check, and reason, so a check that skipped projects
+  is not mistaken for a compliant one. Its summary line counts skipped checks.
 """
 from dataclasses import dataclass, fields
 
@@ -67,8 +71,11 @@ MAX_ROWS_PER_CHECK = 2000
 ROWS_PER_PAGE = 50
 # Column names (lowercase) that hold the project a row belongs to.
 PROJECT_COLUMNS = ("project", "project id", "project_id")
-# The noun of a check's summary line, by status ("finding" otherwise).
+# The noun of a check's summary line, by status ("finding" otherwise)...
 SUMMARY_NOUNS = {"Error": "error", "Informational": "entry"}
+# ...or by check name: the projects a check could not cover (app.checks.not_checked)
+# are listed as "12 skipped checks across 4 of 1,000 projects".
+SUMMARY_NOUNS_BY_CHECK = {"Projects not checked": "skipped check"}
 
 
 @dataclass(frozen=True)
@@ -319,7 +326,7 @@ def _text_details(details_list, max_rows):
     return Details(kind="text", lines=lines[:max_rows], total_rows=len(lines), omitted_rows=max(0, len(lines) - max_rows))
 
 
-def summarize_details(details, status, total_projects=None):
+def summarize_details(details, status, total_projects=None, check_name=None):
     """The one-line summary of a check's table: "1,204 findings across 312 of 1,000 projects (31%)".
 
     Returns None for text details and for single-row tables without a project
@@ -327,7 +334,7 @@ def summarize_details(details, status, total_projects=None):
     """
     if details is None or details.kind != "table" or (details.total_rows < 2 and details.project_column is None):
         return None
-    noun = SUMMARY_NOUNS.get(status, "finding")
+    noun = SUMMARY_NOUNS_BY_CHECK.get(check_name) or SUMMARY_NOUNS.get(status, "finding")
     count = details.total_rows
     plural = "" if count == 1 else ("ies" if noun.endswith("y") else "s")
     text = f"{count:,} {noun[:-1] if plural == 'ies' else noun}{plural}"
@@ -472,7 +479,7 @@ def build_report_context(scope, scope_id, job_id, all_results, banner=None, cove
                 icon=status_info['icon'],
                 details=details,
                 fix_id=fix_id,
-                summary=summarize_details(details, status, total_projects),
+                summary=summarize_details(details, status, total_projects, check_name),
             ))
         has_content = bool(checks) or org_content_for_section is not None
         footer = None

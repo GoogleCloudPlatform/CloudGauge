@@ -24,6 +24,7 @@ from datetime import datetime, timezone
 from googleapiclient.errors import HttpError
 
 from app.config import SCOPES
+from app.checks.not_checked import NotChecked
 from app.services import gcp
 from app.services.org_policies import fetch_best_practices, get_effective_org_policies
 
@@ -129,6 +130,7 @@ def check_project_iam_policy(scope_id, projects, job_id, *, sink):
         result = {"Check": "Project IAM Hygiene", "Finding": [{"Error": "Could not list projects."}], "Status": "Error"}
         sink.write_finding(job_id, CHECK_NAME.replace(" ", "_"), result)
         return
+    skipped = NotChecked(CHECK_NAME)
     
     def check_single_project(p):
         project_id, findings = p['projectId'], []
@@ -140,7 +142,7 @@ def check_project_iam_policy(scope_id, projects, job_id, *, sink):
                 if b.get('role') in ['roles/owner', 'roles/editor']:
                     for member in b.get('members', []):
                         findings.append({'Project': project_id, 'Principal': member, 'Role': b.get('role')})
-        except Exception as e: logging.warning(f"Could not check {CHECK_NAME} for {project_id}: {e}")
+        except Exception as e: skipped.add(project_id, e)
         return findings
 
     all_findings = []
@@ -152,6 +154,7 @@ def check_project_iam_policy(scope_id, projects, job_id, *, sink):
     else:
         result = {"Check": CHECK_NAME, "Finding": [{"Status": "No projects found with Owner or Editor roles."}], "Status": "Compliant"}
     sink.write_finding(job_id, CHECK_NAME.replace(" ", "_"), result)
+    skipped.write(sink, job_id)
 
 
 def check_sa_key_rotation(scope_id, all_projects, job_id, *, sink):
@@ -250,6 +253,7 @@ def check_public_buckets(scope_id, all_projects, job_id, *, sink):
     """
     CHECK_NAME = "Public GCS Buckets"
     print(f"🪣 [{job_id}] Checking for {CHECK_NAME}...")
+    skipped = NotChecked(CHECK_NAME)
     
     def check_project(p):
         project_id, findings = p['projectId'], []
@@ -262,8 +266,8 @@ def check_public_buckets(scope_id, all_projects, job_id, *, sink):
                     if 'allUsers' in binding['members'] or 'allAuthenticatedUsers' in binding['members']:
                         findings.append({"Project": project_id, "Bucket": bucket.name, "Issue": f"Publicly accessible via role {binding['role']}."})
                         break # No need to check other bindings for this bucket
-        except Exception:
-            pass # Silently fail for projects where API is disabled or permissions lack
+        except Exception as e:
+            skipped.add(project_id, e)  # API disabled or permissions lacking: reported, not silently dropped
         return findings
 
     all_findings = []
@@ -278,6 +282,7 @@ def check_public_buckets(scope_id, all_projects, job_id, *, sink):
         result = {"Check": CHECK_NAME, "Finding": [{"Status": "No publicly accessible buckets found."}], "Status": "Compliant"}
     
     sink.write_finding(job_id, CHECK_NAME.replace(" ", "_"), result)
+    skipped.write(sink, job_id)
 
 
 def check_organization_policies(scope, scope_id, job_id, *, sink):
@@ -312,6 +317,7 @@ def check_open_firewall_rules(scope_id, all_projects, job_id, *, sink):
     """
     CHECK_NAME = "Open Firewall Rules"
     print(f"🔥 [{job_id}] Checking for Open Firewall Rules in parallel...")
+    skipped = NotChecked(CHECK_NAME, resource_apis=("compute.googleapis.com",))
     
     def check_project(p):
         project_id, open_rules = p['projectId'], []
@@ -321,7 +327,7 @@ def check_open_firewall_rules(scope_id, all_projects, job_id, *, sink):
             for rule in compute.firewalls().list(project=project_id).execute().get('items', []):
                 if not rule.get('disabled', False) and '0.0.0.0/0' in rule.get('sourceRanges', []):
                     open_rules.append({"Project": project_id, "Rule Name": rule['name'], "VPC": rule['network'].split('/')[-1]})
-        except Exception as e: logging.warning(f"Could not check {CHECK_NAME} for {project_id}: {e}")
+        except Exception as e: skipped.add(project_id, e)
         return open_rules
 
     all_findings = []
@@ -335,6 +341,7 @@ def check_open_firewall_rules(scope_id, all_projects, job_id, *, sink):
     else:
         result = {"Check": CHECK_NAME, "Finding": [{"Status": "No firewall rules found open to 0.0.0.0/0."}], "Status": "Compliant"}
     sink.write_finding(job_id, "Open_Firewall_Rules", result) # Using a simplified filename
+    skipped.write(sink, job_id)
 
 
 # --- Checks added in upstream beta v1 ---
@@ -352,6 +359,7 @@ def check_cloud_sql_security(scope_id, all_projects, job_id, *, sink):
     """
     CHECK_NAME = "Cloud SQL Security"
     print(f"🛡️  [{job_id}] Checking {CHECK_NAME}...")
+    skipped = NotChecked(CHECK_NAME, resource_apis=("sqladmin.googleapis.com",))
     
     def check_project(p):
         project_id, findings = p['projectId'], []
@@ -376,7 +384,7 @@ def check_cloud_sql_security(scope_id, all_projects, job_id, *, sink):
                     findings.append({"Project": project_id, "Instance": name, "Issue": "SSL not enforced."})
 
         except Exception as e:
-            logging.warning(f"Could not check {CHECK_NAME} for {project_id}: {e}")
+            skipped.add(project_id, e)
         return findings
 
     all_findings = []
@@ -390,6 +398,7 @@ def check_cloud_sql_security(scope_id, all_projects, job_id, *, sink):
     else:
         result = {"Check": CHECK_NAME, "Finding": [{"Status": "All Cloud SQL instances have Public IP disabled and SSL enforced."}], "Status": "Compliant"}
     sink.write_finding(job_id, CHECK_NAME.replace(" ", "_"), result)
+    skipped.write(sink, job_id)
 
 
 def check_vpc_configuration(scope_id, all_projects, job_id, *, sink):
@@ -403,6 +412,7 @@ def check_vpc_configuration(scope_id, all_projects, job_id, *, sink):
     """
     CHECK_NAME = "VPC Configuration"
     print(f"🕸️  [{job_id}] Checking {CHECK_NAME}...")
+    skipped = NotChecked(CHECK_NAME, resource_apis=("compute.googleapis.com",))
 
     def check_project(p):
         project_id, findings = p['projectId'], []
@@ -425,7 +435,7 @@ def check_vpc_configuration(scope_id, all_projects, job_id, *, sink):
                         findings.append({"Project": project_id, "Subnet": subnet['name'], "Issue": "Private Google Access disabled."})
 
         except Exception as e:
-            logging.warning(f"Could not check {CHECK_NAME} for {project_id}: {e}")
+            skipped.add(project_id, e)
         return findings
 
     all_findings = []
@@ -439,6 +449,7 @@ def check_vpc_configuration(scope_id, all_projects, job_id, *, sink):
     else:
         result = {"Check": CHECK_NAME, "Finding": [{"Status": "No default VPCs found and all subnets have Private Google Access."}], "Status": "Compliant"}
     sink.write_finding(job_id, CHECK_NAME.replace(" ", "_"), result)
+    skipped.write(sink, job_id)
 
 
 def check_storage_ubla(scope_id, all_projects, job_id, *, sink):
@@ -452,6 +463,7 @@ def check_storage_ubla(scope_id, all_projects, job_id, *, sink):
     """
     CHECK_NAME = "GCS Uniform Bucket-Level Access"
     print(f"🪣 [{job_id}] Checking {CHECK_NAME}...")
+    skipped = NotChecked(CHECK_NAME)
 
     def check_project(p):
         project_id, findings = p['projectId'], []
@@ -461,7 +473,7 @@ def check_storage_ubla(scope_id, all_projects, job_id, *, sink):
                 if not bucket.iam_configuration.uniform_bucket_level_access_enabled:
                     findings.append({"Project": project_id, "Bucket": bucket.name, "Issue": "UBLA not enabled."})
         except Exception as e:
-            logging.warning(f"Could not check {CHECK_NAME} for {project_id}: {e}")
+            skipped.add(project_id, e)
         return findings
 
     all_findings = []
@@ -475,6 +487,7 @@ def check_storage_ubla(scope_id, all_projects, job_id, *, sink):
     else:
         result = {"Check": CHECK_NAME, "Finding": [{"Status": "All buckets have Uniform Bucket-Level Access enabled."}], "Status": "Compliant"}
     sink.write_finding(job_id, CHECK_NAME.replace(" ", "_"), result)
+    skipped.write(sink, job_id)
 
 
 def check_vm_external_ips(scope_id, all_projects, job_id, *, sink):
@@ -488,6 +501,7 @@ def check_vm_external_ips(scope_id, all_projects, job_id, *, sink):
     """
     CHECK_NAME = "VM External IPs"
     print(f"🖥️  [{job_id}] Checking {CHECK_NAME}...")
+    skipped = NotChecked(CHECK_NAME, resource_apis=("compute.googleapis.com",))
 
     def check_project(p):
         project_id, findings = p['projectId'], []
@@ -507,7 +521,7 @@ def check_vm_external_ips(scope_id, all_projects, job_id, *, sink):
                 req = compute.instances().aggregatedList_next(previous_request=req, previous_response=resp)
 
         except Exception as e:
-            logging.warning(f"Could not check {CHECK_NAME} for {project_id}: {e}")
+            skipped.add(project_id, e)
         return findings
 
     all_findings = []
@@ -521,3 +535,4 @@ def check_vm_external_ips(scope_id, all_projects, job_id, *, sink):
     else:
         result = {"Check": CHECK_NAME, "Finding": [{"Status": "No VMs with external IP addresses found."}], "Status": "Compliant"}
     sink.write_finding(job_id, CHECK_NAME.replace(" ", "_"), result)
+    skipped.write(sink, job_id)

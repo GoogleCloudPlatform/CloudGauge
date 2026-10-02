@@ -16,6 +16,9 @@
 Each check runs in the frozen beta v1 module and in ``app.checks.security``
 against the same fake Cloud SQL Admin, Compute, and Storage APIs, and both
 must write the same finding. Explicit expectations document what they report.
+The one intended difference: a project the check could not read is also
+written as a "Projects not checked" record (``app.checks.not_checked``), where
+beta v1 only logged it.
 """
 from types import SimpleNamespace
 
@@ -141,19 +144,32 @@ def run_beta(beta, name, projects, monkeypatch):
     return writes
 
 
+def split_not_checked(writes):
+    """``(the check's own writes, the "Projects not checked" writes)``."""
+    skipped = [w for w in writes if w[1].startswith('NOT_CHECKED_')]
+    return [w for w in writes if w not in skipped], skipped
+
+
 @pytest.mark.parametrize('projects', [[WEB, LAKE, BROKEN], [LAKE], [BROKEN], []], ids=['findings', 'compliant', 'errors only', 'no projects'])
 @pytest.mark.parametrize('name', CHECKS)
 def test_check_matches_beta_v1(name, projects, apis, beta, monkeypatch):
-    new = run_new(name, projects)
+    """The check's own record is beta v1's; the projects it could not check are a second record (beta had none)."""
+    new, skipped = split_not_checked(run_new(name, projects))
     assert new == run_beta(beta, name, projects, monkeypatch)
     check_name, file_name = CHECKS[name]
     ((job_id, written_name, finding),) = new
     assert (job_id, written_name, finding['Check']) == (JOB_ID, file_name, check_name)
     assert finding['Status'] == ('Action Required' if WEB in projects else 'Compliant')
+    if BROKEN in projects:
+        assert skipped == [(JOB_ID, f'NOT_CHECKED_{file_name}', {
+            'Check': 'Projects not checked', 'Category': 'Security & Identity', 'Status': 'Error',
+            'Finding': [{'Project': 'locked-down', 'Skipped check': check_name, 'Reason': '403 The caller does not have permission'}]})]
+    else:
+        assert skipped == []
 
 
 def findings_of(name, projects=(WEB, LAKE, BROKEN)):
-    ((_, _, finding),) = run_new(name, list(projects))
+    ((_, _, finding),), _ = split_not_checked(run_new(name, list(projects)))
     return finding['Finding']
 
 
@@ -197,11 +213,14 @@ def test_vm_external_ips_findings_across_pages(apis):
 
 
 @pytest.mark.parametrize('name', CHECKS)
-def test_a_project_that_fails_is_logged_and_skipped(name, apis, caplog):
-    """As in beta v1: the error is only logged, and the other projects' results still count."""
+def test_a_project_that_fails_is_logged_skipped_and_reported(name, apis, caplog):
+    """As in beta v1, the error is logged and the other projects' results still count;
+    unlike beta v1, the skipped project is reported instead of passing as compliant."""
     check_name, _ = CHECKS[name]
     assert findings_of(name, [BROKEN, LAKE]) == findings_of(name, [LAKE])
     assert f'Could not check {check_name} for locked-down: 403 The caller does not have permission' in caplog.text
+    _, skipped = split_not_checked(run_new(name, [BROKEN, LAKE]))
+    assert [row['Project'] for (_, _, record) in skipped for row in record['Finding']] == ['locked-down']
 
 
 def test_findings_are_reported_under_security():

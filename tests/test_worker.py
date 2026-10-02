@@ -226,7 +226,7 @@ def test_scan_job_with_the_real_runner(client, prod_app, gcp, monkeypatch):
     plan = [CheckSpec('Security & Identity', 'Open Firewall Rules', open_firewall_rules, (SCOPE_ID, PROJECTS, JOB_ID)),
             CheckSpec('Reliability & Resilience', 'GKE Hygiene', gke_hygiene, (SCOPE_ID, PROJECTS, JOB_ID))]
     monkeypatch.setattr(runner, 'list_projects_for_scope', lambda scope, scope_id: PROJECTS)
-    monkeypatch.setattr(runner, 'get_active_compute_locations', lambda all_projects: ([], ['global']))
+    monkeypatch.setattr(runner, 'get_active_compute_locations', lambda all_projects, on_error=None: ([], ['global']))
     monkeypatch.setattr(runner, 'build_check_plan', lambda *args: plan)
     monkeypatch.setattr(scan_job, 'ThrottledProgressReporter', functools.partial(ThrottledProgressReporter, clock=lambda: 1000.0))
 
@@ -260,7 +260,7 @@ class RecordingSink:
 @pytest.fixture
 def one_project(monkeypatch):
     monkeypatch.setattr(runner, 'list_projects_for_scope', lambda scope, scope_id: PROJECTS[:1])
-    monkeypatch.setattr(runner, 'get_active_compute_locations', lambda all_projects: ([], ['global']))
+    monkeypatch.setattr(runner, 'get_active_compute_locations', lambda all_projects, on_error=None: ([], ['global']))
 
 
 BETA_V1_CHECKS = ['check_cloud_sql_security', 'check_vpc_configuration', 'check_storage_ubla', 'check_vm_external_ips']
@@ -294,17 +294,20 @@ def test_runner_runs_the_beta_v1_check_plan(scope, scope_id, beta, monkeypatch):
         monkeypatch.setattr(registry, name, recorder('new', name))
     for module in (beta, runner):
         monkeypatch.setattr(module, 'list_projects_for_scope', lambda scope, scope_id: PROJECTS)
-        monkeypatch.setattr(module, 'get_active_compute_locations', lambda all_projects: (zones, regions))
+        monkeypatch.setattr(module, 'get_active_compute_locations', lambda all_projects, on_error=None: (zones, regions))
 
     beta_progress, progress = [], []
     assert beta.run_all_checks(scope, scope_id, JOB_ID, progress_callback=lambda **kw: beta_progress.append(kw)) is True
     assert runner.run_all_checks(scope, scope_id, JOB_ID, progress_callback=lambda **kw: progress.append(kw), sink=sink) is True
 
     assert set(calls['new']) == set(calls['beta']) == set(names)
+    # The two location-based checks take one argument more than in beta v1: the projects whose
+    # locations could not be discovered (none here), which they report as not checked.
     for name in names:
         beta_args, beta_kwargs = calls['beta'][name]
         args, kwargs = calls['new'][name]
-        assert (args, beta_kwargs, kwargs) == (beta_args, {}, {'sink': sink}), name
+        assert (args[:len(beta_args)], beta_kwargs, kwargs) == (beta_args, {}, {'sink': sink}), name
+        assert args[len(beta_args):] == (({},) if name in ('run_cost_recommendations', 'run_network_insights') else ()), name
     # Checks finish in any order, so compare progress as sets of values and messages.
     assert [p['progress'] for p in progress] == [p['progress'] for p in beta_progress]
     assert {p['current_task'].split(' Finished: ')[1] for p in progress} == {p['current_task'].split(' Finished: ')[1] for p in beta_progress}
@@ -317,6 +320,22 @@ def test_check_plan_is_the_legacy_plan_plus_the_beta_v1_checks(scope, legacy):
     names = [spec.func.__name__ for spec in registry.build_check_plan(scope, SCOPE_ID, JOB_ID, PROJECTS, [], ['global'])]
     legacy_names = set(legacy.run_all_checks.__code__.co_names)
     assert [name for name in names if name not in legacy_names] == BETA_V1_CHECKS
+
+
+def test_runner_passes_location_discovery_failures_to_the_plan(monkeypatch):
+    """A project whose locations could not be discovered reaches the location-based checks, which report it
+    as not checked (app.checks.not_checked); without this the cost check could pass it silently."""
+    seen, error = [], RuntimeError('403 The caller does not have permission')
+
+    def discovery(all_projects, on_error=None):
+        on_error(all_projects[0]['projectId'], error)
+        return [], ['global']
+
+    monkeypatch.setattr(runner, 'list_projects_for_scope', lambda scope, scope_id: PROJECTS)
+    monkeypatch.setattr(runner, 'get_active_compute_locations', discovery)
+    monkeypatch.setattr(runner, 'build_check_plan', lambda *args: (seen.append(args), [])[1])
+    assert runner.run_all_checks('organization', SCOPE_ID, JOB_ID, sink=RecordingSink()) is True
+    assert seen == [('organization', SCOPE_ID, JOB_ID, PROJECTS, [], ['global'], {'web-prod': error})]
 
 
 def test_runner_runs_checks_concurrently(one_project, monkeypatch):

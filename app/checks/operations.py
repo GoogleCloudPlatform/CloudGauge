@@ -19,12 +19,12 @@ through ``sink.write_finding(...)``, and GCP auth and discovery calls go
 through ``app.services.gcp``.
 """
 import concurrent.futures
-import logging
 import re
 
 from google.api_core import exceptions as core_exceptions
 
 from app.config import SCOPES
+from app.checks.not_checked import NotChecked
 from app.services import gcp
 from app.utils import call_api_with_backoff
 
@@ -72,6 +72,7 @@ def check_os_config_coverage(scope_id, all_projects, job_id, *, sink):
     CHECK_NAME = "OS Config Agent Coverage"
     print(f"🤖 [{job_id}] Checking for {CHECK_NAME} in parallel...")
     if not all_projects: return []
+    skipped = NotChecked(CHECK_NAME, resource_apis=("compute.googleapis.com",))
 
     def check_single_project(project):
         project_id = project['projectId']
@@ -98,7 +99,7 @@ def check_os_config_coverage(scope_id, all_projects, job_id, *, sink):
             if missing: return {"Project": project_id, "VMs Not Reporting": ", ".join(sorted(missing))}
         except core_exceptions.FailedPrecondition:
             return {"Project": project_id, "Issue": "OS inventory management disabled."}
-        except Exception as e: logging.warning(f"Could not check {CHECK_NAME} for {project_id}: {e}")
+        except Exception as e: skipped.add(project_id, e)
         return None
 
     def _is_os_reporting(client, project, vm):
@@ -124,6 +125,7 @@ def check_os_config_coverage(scope_id, all_projects, job_id, *, sink):
     else:
         result = {"Check": CHECK_NAME, "Finding": results, "Status": "Action Required"}
     sink.write_finding(job_id, CHECK_NAME.replace(" ", "_"), result)
+    skipped.write(sink, job_id)
 
 
 def check_monitoring_coverage(scope_id, all_projects, job_id, *, sink):
@@ -140,6 +142,7 @@ def check_monitoring_coverage(scope_id, all_projects, job_id, *, sink):
     CHECK_NAME = "Monitoring Alert Coverage"
     print(f"📊 [{job_id}] Checking {CHECK_NAME} in parallel...")
     if not all_projects: return []
+    skipped = NotChecked(CHECK_NAME)
     
     def check_project(project):
         project_id, issues = project['projectId'], []
@@ -156,7 +159,7 @@ def check_monitoring_coverage(scope_id, all_projects, job_id, *, sink):
                     issues.append({"Project": project_id, "Issue": f"Missing alert policy for {name}"})
             if "serviceruntime.googleapis.com/quota" not in filters:
                 issues.append({"Project": project_id, "Issue": "Missing Quota alerting policy"})
-        except Exception as e: logging.warning(f"Could not check {CHECK_NAME} for {project_id}: {e}")
+        except Exception as e: skipped.add(project_id, e)
         return issues
         
     results = []
@@ -172,6 +175,7 @@ def check_monitoring_coverage(scope_id, all_projects, job_id, *, sink):
     else:
         result = {"Check": CHECK_NAME, "Finding": results, "Status": "Action Required"}
     sink.write_finding(job_id, CHECK_NAME.replace(" ", "_"), result)
+    skipped.write(sink, job_id)
 
 
 def check_standalone_vms(scope_id, all_projects, job_id, *, sink):
@@ -188,6 +192,7 @@ def check_standalone_vms(scope_id, all_projects, job_id, *, sink):
     """
     CHECK_NAME = "Standalone VMs (Not in MIGs)"
     print(f"🖥️  [{job_id}] Checking for {CHECK_NAME}...")
+    skipped = NotChecked(CHECK_NAME, resource_apis=("compute.googleapis.com",))
 
     def check_project(p):
         project_id = p['projectId']
@@ -210,7 +215,7 @@ def check_standalone_vms(scope_id, all_projects, job_id, *, sink):
             
             if standalone:
                 return {"Project": project_id, "Standalone VMs": ", ".join(sorted(standalone))}
-        except Exception as e: logging.warning(f"Could not check {CHECK_NAME} for {project_id}: {e}")
+        except Exception as e: skipped.add(project_id, e)
         return None
 
     all_findings = []
@@ -224,6 +229,7 @@ def check_standalone_vms(scope_id, all_projects, job_id, *, sink):
     else:
         result = {"Check": CHECK_NAME, "Finding": [{"Status": "No running standalone, unmanaged VMs found."}], "Status": "Compliant"}
     sink.write_finding(job_id, CHECK_NAME.replace(" ", "_"), result)
+    skipped.write(sink, job_id)
 
 
 def run_miscellaneous_checks_refactored(scope, scope_id, all_projects, job_id, *, sink, org_insights=True, project_checks=True):
@@ -247,6 +253,9 @@ def run_miscellaneous_checks_refactored(scope, scope_id, all_projects, job_id, *
 
 
     # --- Check 1: Firewall Rules (Runs for all scopes) ---
+    FIREWALL_CHECK_NAME = "VPC Firewall Complexity (>150 Rules)"
+    firewall_skipped = NotChecked(FIREWALL_CHECK_NAME, resource_apis=("compute.googleapis.com",))
+
     def check_firewall_rules_count(project):
         project_id = project['projectId']
         try:
@@ -255,7 +264,7 @@ def run_miscellaneous_checks_refactored(scope, scope_id, all_projects, job_id, *
             rules = compute_service.firewalls().list(project=project_id).execute().get('items', [])
             if len(rules) > 150:
                 return {"Project": project_id, "Rule Count": len(rules), "Recommendation": f"Project has {len(rules)} firewall rules."}
-        except Exception as e: logging.warning(f"Could not check firewall_rule_count for {project_id}: {e}")
+        except Exception as e: firewall_skipped.add(project_id, e)
         return None
 
     firewall_findings = []
@@ -265,8 +274,9 @@ def run_miscellaneous_checks_refactored(scope, scope_id, all_projects, job_id, *
             firewall_findings.append(finding)
 
     if firewall_findings:
-        result = {"Check": "VPC Firewall Complexity (>150 Rules)", "Finding": firewall_findings, "Status": "Investigation Recommended"}
+        result = {"Check": FIREWALL_CHECK_NAME, "Finding": firewall_findings, "Status": "Investigation Recommended"}
         sink.write_finding(job_id, "VPC_Firewall_Complexity", result)
+    firewall_skipped.write(sink, job_id)
 
     # --- Org-Level Recommender/Insight Checks (Run ONLY for organization scope) ---
     if scope == 'organization' and org_insights:
@@ -359,6 +369,7 @@ def run_service_limit_checks_refactored(scope_id, all_projects, job_id, *, sink)
     """
     CHECK_NAME = "Quota Utilization (>80%)"
     print(f"🚦 [{job_id}] Performing Service Limit (Quota) checks...")
+    skipped = NotChecked(CHECK_NAME, resource_apis=("compute.googleapis.com",))
     
     def check_project_quotas(project):
         project_id = project['projectId']
@@ -382,8 +393,8 @@ def run_service_limit_checks_refactored(scope_id, all_projects, job_id, *, sink)
                             "Usage": f"{usage/limit:.1%}",
                             "Details": f"{int(usage)}/{int(limit)}"
                         })
-        except Exception:
-            pass 
+        except Exception as e:
+            skipped.add(project_id, e)
         return exceeded_quotas # Return the list of findings (will be empty if none)
 
     all_findings = []
@@ -402,3 +413,4 @@ def run_service_limit_checks_refactored(scope_id, all_projects, job_id, *, sink)
     else:
         result = {"Check": CHECK_NAME, "Finding": all_findings, "Status": "Action Required"}
     sink.write_finding(job_id, "Quota_Utilization", result)
+    skipped.write(sink, job_id)

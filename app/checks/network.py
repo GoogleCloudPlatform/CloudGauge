@@ -21,11 +21,12 @@ through ``app.services.gcp``.
 The insight parser that was nested in ``run_network_insights`` is now the
 module-level ``parse_network_insight_content`` (unchanged).
 """
-import logging
 import re
 
 from google.cloud.recommender_v1.types import Insight
 
+from app.checks.not_checked import (LOCATION_DISCOVERY_APIS, NotChecked, describe_parts, failures_by_reason, is_request_error,
+                                    location_detail)
 from app.services import gcp
 from app.utils import call_api_with_backoff
 
@@ -159,16 +160,19 @@ def parse_network_insight_content(insight_dict, description, project_id, check_n
     return parsed_findings_list
 
 
-def run_network_insights(scope_id, all_projects, active_zones, active_regions, job_id, *, sink):
+def run_network_insights(scope_id, all_projects, active_zones, active_regions, job_id, location_errors=None, *, sink):
     """
     Fetches and parses Network Analyzer insights across all projects.
     Normalizes various insight types into a consistent, table-friendly format.
 
     Args:
-        org_id (str): The organization ID.
+        scope_id (str): The organization, folder, or project ID being scanned.
         all_projects (list): A list of project dictionaries.
         active_zones (list): A list of active GCP zones.
         active_regions (list): A list of active GCP regions.
+        location_errors (dict): Project ID -> the error that stopped location discovery
+            for it (``get_active_compute_locations``); such a project is reported as
+            not checked, having been queried only at other projects' locations.
 
     Returns:
         list: A list of finding dictionaries, grouped by insight type.
@@ -177,12 +181,24 @@ def run_network_insights(scope_id, all_projects, active_zones, active_regions, j
     if not all_projects: return []
     
     all_locations = active_zones + active_regions
+    location_errors = location_errors or {}
 
     insight_type_map = NETWORK_INSIGHT_TYPES
+    # Skips are reported under the check's display name (app.checks.registry); the
+    # rows say which insight types could not be queried for the project.
+    skipped = NotChecked("Network Insights")
 
     def check_project(project):
         project_id = project['projectId']
         project_findings_map = {} 
+        failed = {}  # insight name -> the first error that stopped it in this project
+
+        def note_failure(check_name, error):
+            # Every insight type is queried in every zone and region; an invalid
+            # argument or not-found there is a location mismatch, not a skipped project.
+            if not is_request_error(error):
+                failed.setdefault(check_name, error)
+
         try:
             client = gcp.recommender_client()
             for loc in all_locations:
@@ -191,7 +207,8 @@ def run_network_insights(scope_id, all_projects, active_zones, active_regions, j
                     try:
                         api_call = lambda: client.list_insights(parent=parent)
                         context = f"'{check_name}' in {project_id} at {loc}"
-                        for insight in call_api_with_backoff(api_call,context_message=context):
+                        on_error = lambda error, name=check_name: note_failure(name, error)
+                        for insight in call_api_with_backoff(api_call, context_message=context, on_error=on_error):
                             parsed_data_list = []
                             try:
                                 insight_dict = Insight.to_dict(insight)
@@ -208,10 +225,18 @@ def run_network_insights(scope_id, all_projects, active_zones, active_regions, j
 
                             project_findings_map[check_name].extend(parsed_data_list)
                             
-                    except Exception:
-                        pass 
+                    except Exception as e:
+                        note_failure(check_name, e)
         except Exception as e:
-            logging.warning(f"Could not check network insights for {project_id}: {e}")
+            skipped.add(project_id, e)
+            return project_findings_map
+        for error, names in failures_by_reason(failed):
+            skipped.add(project_id, error, detail=describe_parts(names, len(insight_type_map), "insight type"))
+        # A project whose locations could not be discovered, unless every insight type
+        # failed for it anyway (the rows above already say it was not checked).
+        if project_id in location_errors and len(failed) < len(insight_type_map):
+            skipped.add(project_id, location_errors[project_id], resource_apis=LOCATION_DISCOVERY_APIS,
+                        detail=location_detail(bool(all_locations), len(insight_type_map), "insight type"))
         return project_findings_map
         
 
@@ -234,3 +259,4 @@ def run_network_insights(scope_id, all_projects, active_zones, active_regions, j
         if all_findings:
             result = {"Check": check_name, "Finding": all_findings, "Status": "Action Required"}
             sink.write_finding(job_id, check_name.replace(" ", "_"), result)
+    skipped.write(sink, job_id)

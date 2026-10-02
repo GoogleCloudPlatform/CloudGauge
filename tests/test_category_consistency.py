@@ -20,6 +20,7 @@ source, so a new check or error path with an unmapped name fails here.
 """
 import ast
 import pathlib
+from types import SimpleNamespace
 
 import pytest
 
@@ -32,6 +33,7 @@ DYNAMIC_NAMES = {
     ('cost.py', 'check_name'): cost.COST_RECOMMENDERS,
     ('network.py', 'check_name'): network.NETWORK_INSIGHT_TYPES,
     ('runner.py', 'check_name'): None,  # the registry display names (test_registry_names_...)
+    ('not_checked.py', 'NOT_CHECKED'): None,  # carries its own "Category" (test_not_checked_record_...)
 }
 # The registry's "Special" category is the Organization Policies check, shown under Security.
 REGISTRY_CATEGORY = {'Special': 'Security & Identity'}
@@ -127,3 +129,26 @@ def test_categories_are_the_report_sections():
 def test_error_and_scc_findings_are_categorized(check, category):
     finding = {'Check': check, 'Finding': [{'Error': 'permission denied'}], 'Status': 'Error'}
     assert categorize_findings([finding])[category] == [finding]
+
+
+# --- "Projects not checked": one name, the record's own category ---
+
+def test_not_checked_record_is_categorized_by_its_own_category():
+    """Guards DYNAMIC_NAMES['not_checked.py']: the record is not in CATEGORY_MAP; its "Category" decides."""
+    from app.checks.not_checked import NOT_CHECKED, NotChecked
+
+    assert NOT_CHECKED not in CATEGORY_MAP
+    records = []
+    for check_name in ('Open Firewall Rules', 'Cost-Saving Recommendations', 'GKE Hygiene', 'Network Insights'):
+        skipped = NotChecked(check_name)
+        skipped.add('p-1', RuntimeError('403 denied'))
+        skipped.write(SimpleNamespace(write_finding=lambda job, name, record: records.append(record)), 'job')
+    by_category = categorize_findings(records)
+    assert [r['Finding'][0]['Skipped check'] for r in by_category['Security & Identity']] == ['Open Firewall Rules']
+    assert [r['Finding'][0]['Skipped check'] for r in by_category['Cost Optimization']] == ['Cost-Saving Recommendations']
+    assert [r['Finding'][0]['Skipped check'] for r in by_category['Reliability & Resilience']] == ['GKE Hygiene']
+    assert [r['Finding'][0]['Skipped check'] for r in by_category['Operational Excellence & Observability']] == ['Network Insights']
+    # A record with a category the report does not have is dropped, like an unmapped name.
+    assert all(v == [] for v in categorize_findings([{**records[0], 'Category': 'Nowhere'}]).values())
+    with pytest.raises(KeyError):
+        NotChecked('Not a check name')

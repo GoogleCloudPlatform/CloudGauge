@@ -19,6 +19,8 @@ The scans here run with zero simulated latency, so the whole module takes a
 few seconds. The provider is installed in the process-wide seam
 (``app.services.gcp``); the ``gcp`` fixture resets it after every test.
 """
+import csv
+import io
 import json
 import logging
 
@@ -235,11 +237,24 @@ def test_organization_scan_covers_every_section_and_org_check(gcp):
 
 
 def test_denied_projects_and_quota_errors_do_not_break_the_scan(gcp):
-    """Every project answers 403 and 5% of calls answer 429: the scan still completes with a report."""
-    ok, store, scope_id = scan(SyntheticGcp(8, latency_ms=0, denied_fraction=1.0, error_rate=0.05))
+    """Every project answers 403 and 5% of calls answer 429: the scan still completes with a report,
+    and the report says which projects its checks could not cover instead of calling them compliant."""
+    provider = SyntheticGcp(8, latency_ms=0, denied_fraction=1.0, error_rate=0.05)
+    ok, store, scope_id = scan(provider)
     assert ok is True
     assert store.read_status('syn-job', scope_id)['status'] == 'completed'
-    assert BANNER_MARK in store.read_report('syn-job', scope_id, 'html')
+    html = store.read_report('syn-job', scope_id, 'html')
+    assert BANNER_MARK in html
+    assert html.count('<strong>Projects not checked</strong>') == 4  # one item on each category page
+    assert 'No findings in this category' not in html
+    rows = [row for row in csv.reader(io.StringIO(store.read_report('syn-job', scope_id, 'csv'))) if row[:2] == ['Projects not checked', 'Error']]
+    assert {row[2] for row in rows} == {p.project_id for p in provider.world.projects()}  # every project, by ID
+    # Location discovery fails for every project too, so no zone or region is found and the cost
+    # recommenders are never queried: the project is reported with the discovery error rather
+    # than passing as compliant. Network Insights always queries 'global', so its queries fail.
+    assert {'Open Firewall Rules', 'GKE Hygiene', 'Network Insights (all 8 insight types)', 'Quota Utilization (>80%)',
+            'Cost-Saving Recommendations (all 8 recommenders: no zones or regions were discovered to query)'} <= {row[3] for row in rows}
+    assert all('(synthetic)' in row[4] for row in rows)  # the reason is the API's message
 
 
 def test_report_banner_is_optional_and_escaped():

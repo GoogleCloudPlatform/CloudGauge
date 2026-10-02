@@ -91,13 +91,17 @@ def categorize_findings(findings):
     This is the categorization half of the legacy ``_read_all_findings_from_gcs``:
     every category is present (possibly empty), findings keep their input order,
     and findings whose check name is not in ``CATEGORY_MAP`` are dropped.
+
+    A record that carries its own ``"Category"`` goes there instead: the
+    ``"Projects not checked"`` record (``app.checks.not_checked``) is written
+    under that one name in whichever category the skipped check belongs to.
     """
     categorized_results = {cat: [] for cat in CATEGORY_ORDER}
     for data in findings:
         # The check name is stored inside the JSON object itself
         check_name = data.get("Check")
-        category = CATEGORY_MAP.get(check_name)
-        if category:
+        category = data.get("Category") or CATEGORY_MAP.get(check_name)
+        if category in categorized_results:
             categorized_results[category].append(data)
     return categorized_results
 
@@ -123,7 +127,8 @@ def merge_shard_findings(findings):
 
     Records keep their input order (a joined record sits where its first part
     was) and are never shared with the input (the join copies the rows). A
-    single shard's findings pass through unchanged.
+    single shard's findings pass through unchanged. Records that carry their
+    own ``"Category"`` (``"Projects not checked"``) join only within it.
     """
     checks_with_findings = {f.get("Check") for f in findings if f.get("Status") != "Compliant"}
     merged, by_key, seen = [], {}, set()
@@ -135,12 +140,13 @@ def merge_shard_findings(findings):
         if identity in seen:
             continue
         seen.add(identity)
-        rows, first = finding.get("Finding"), by_key.get((check_name, status))
+        key = (check_name, status, finding.get("Category"))
+        rows, first = finding.get("Finding"), by_key.get(key)
         if first is not None and isinstance(rows, list) and isinstance(first.get("Finding"), list):
             first["Finding"].extend(rows)
             continue
         if isinstance(rows, list):
             finding = {**finding, "Finding": list(rows)}
-            by_key.setdefault((check_name, status), finding)
+            by_key.setdefault(key, finding)
         merged.append(finding)
     return merged

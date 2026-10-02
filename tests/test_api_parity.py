@@ -240,7 +240,7 @@ def insight_scope(legacy, monkeypatch):
     projects = list(INSIGHT_PROJECTS)
     for module in (legacy, insights_service):
         monkeypatch.setattr(module, 'list_projects_for_scope', lambda scope, scope_id: projects)
-        monkeypatch.setattr(module, 'get_active_compute_locations', lambda all_projects: INSIGHT_LOCATIONS)
+        monkeypatch.setattr(module, 'get_active_compute_locations', lambda all_projects, on_error=None: INSIGHT_LOCATIONS)
     return projects
 
 

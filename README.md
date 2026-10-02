@@ -189,7 +189,8 @@ A report for 1,000 projects can hold tens of thousands of finding rows. The HTML
 * **Worst first.** Within each category the checks are ordered Action Required → Investigation Recommended → Error → Informational → Compliant, then by name, and a strip under the category heading counts the checks in each status.
 * **A summary line per check.** Tables open with "1,204 findings across 312 of 1,000 projects (31%)" (the share needs the scan's project count, which organization and folder scans record), so the scale of a finding is clear before reading any rows.
 * **Paged, sortable, filterable tables.** Tables show 50 rows at a time ("Show 50 more" / "Show all"), any column header sorts, and the filter box at the top of each category page keeps only the rows (and checks) that mention a project ID, bucket name, or any other text (the Overview has no findings to filter, so it shows only the CSV link). Everything is inline, vanilla JavaScript: the report stays a single self-contained file.
-* **No blank pages.** Every category has a page, whatever the scan found. A category none of whose checks reported anything says "No findings in this category — all Cost Optimization checks were compliant" (its score is 100%), and a page whose checks are all hidden by the filter says so and how many matching checks are on other pages. A check that fails is listed as an error in its category, so an empty category is one whose checks all ran and found nothing.
+* **No blank pages.** Every category has a page, whatever the scan found. A category none of whose checks reported anything says "No findings in this category — all Cost Optimization checks were compliant" (its score is 100%), and a page whose checks are all hidden by the filter says so and how many matching checks are on other pages. A check that fails outright is listed as an error in its category, and a check that could not cover some projects says so (next bullet), so an empty category is one whose checks all ran everywhere and found nothing.
+* **"Projects not checked" instead of silent passes.** A per-project check skips a project whose API call fails (a missing role, a disabled API, a quota, a transient error) rather than stop the scan. Those skips are not silent: each category page lists at most one **Projects not checked** item, with status Error, holding a `Project | Skipped check | Reason` table of every project a check of that category could not cover and the API's message (filterable by project ID like any other table; the CSV has the same rows). A project in which the API that owns the resources is not enabled (no Compute Engine API, so no firewall rules or VMs) has nothing to check and is left out; a disabled Recommender or Monitoring API is reported, since the project may well have the resources. Cost-Saving Recommendations and Network Insights are queried at the zones and regions discovered from the scanned projects' compute resources, so a project whose discovery failed is reported too: "all 8 recommenders: no zones or regions were discovered to query" when nothing could be queried for it, or "queried only in zones and regions found in other projects" when it was. When the item is present, a Compliant check on that page is compliant for the projects it could read; the projects in this table were not looked at by the check named next to them.
 * **Bounded page size.** A table holds at most 2,000 rows in the page; a note under it says how many were left out and links to the complete list. The CSV report always has every row and can be downloaded at any time from `/report/<job_id>/<scope_id>/csv` (the signed link on the status page expires after an hour; the toolbar link in the report does not).
 * **Bounded prompts.** The AI executive summary is generated from at most 25 rows per check (plus the row counts), and a remediation prompt from the first 25 rows of a finding, so Gemini calls stay within their input limits however large the scan.
 
@@ -215,7 +216,8 @@ app/
 ├── checks/              # Checks grouped by pillar: security, cost, reliability, operations, network
 │   ├── registry.py      #   The check plan: which checks run, and in what order
 │   ├── runner.py        #   Runs the plan concurrently (ThreadPoolExecutor) and reports progress
-│   └── categories.py    #   Maps check names to report categories
+│   ├── categories.py    #   Maps check names to report categories
+│   └── not_checked.py   #   The projects a check could not cover, reported as "Projects not checked"
 ├── services/            # GCP clients, Cloud Tasks, GCS results store, Gemini, insights, org policies
 ├── reporting/           # HTML and CSV report builders
 ├── synthetic/           # Synthetic load mode: a generated organization behind the GCP client seam
@@ -229,7 +231,7 @@ requirements.txt         # Production dependencies (pinned)
 requirements-dev.txt     # Adds pytest and ruff
 ```
 
-**Adding a check:** write the function in the matching `app/checks/` module, add a `CheckSpec` entry to `app/checks/registry.py`, and map the names it reports to a category in `app/checks/categories.py`.
+**Adding a check:** write the function in the matching `app/checks/` module, add a `CheckSpec` entry to `app/checks/registry.py`, and map the names it reports to a category in `app/checks/categories.py`. If it skips projects whose API calls fail, collect them in a `NotChecked` from `app/checks/not_checked.py` and write it after the check's own record, so the report says which projects it did not cover.
 
 ## **Deployment Instructions** 
 

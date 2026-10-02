@@ -143,11 +143,16 @@ def test_scope_and_project_plans_partition_the_full_plan(scope):
 
 
 def test_project_plan_passes_the_shard_projects_and_locations():
-    plist = projects(2)
-    for spec in registry.project_check_plan('folder', '42', JOB, plist, ['us-central1-a'], ['us-central1']):
+    plist, errors = projects(2), {'p-1': RuntimeError('403')}
+    plan = registry.project_check_plan('folder', '42', JOB, plist, ['us-central1-a'], ['us-central1'], errors)
+    for spec in plan:
         assert plist in spec.args
-        if len(spec.args) == 5:
-            assert spec.args[2:4] == (['us-central1-a'], ['us-central1'])
+    # The location-based checks also get the locations and the projects whose discovery failed.
+    by_location = [spec.name for spec in plan if ['us-central1-a'] in spec.args]
+    assert by_location == ['Cost-Saving Recommendations', 'Network Insights']
+    for spec in plan:
+        has_locations = len(spec.args) == 6 and spec.args[2:4] == (['us-central1-a'], ['us-central1']) and spec.args[5] is errors
+        assert has_locations == (spec.name in by_location), spec.name
 
 
 # --- Merging ---
@@ -178,6 +183,18 @@ def test_merge_joins_a_checks_rows_from_several_shards_in_order():
     # One item per check and status, its rows in shard order; a different status stays its own item.
     assert merged == [{**a, 'Finding': a['Finding'] + b['Finding']}, other, err]
     assert a['Finding'] == [{'Project': 'p-001', 'Bucket': 'b1', 'Issue': 'public'}]  # the input is left alone
+
+
+def test_merge_joins_not_checked_records_per_category():
+    """The one "Projects not checked" name is written in every category; shards' records join only within one."""
+    def not_checked(category, project, check):
+        return {'Check': 'Projects not checked', 'Category': category, 'Status': 'Error',
+                'Finding': [{'Project': project, 'Skipped check': check, 'Reason': '403 denied'}]}
+
+    sec_1, cost_1 = not_checked('Security & Identity', 'p-001', 'Open Firewall Rules'), not_checked('Cost Optimization', 'p-001', 'Cost-Saving Recommendations')
+    sec_2, cost_2 = not_checked('Security & Identity', 'p-021', 'VM External IPs'), not_checked('Cost Optimization', 'p-021', 'Cost-Saving Recommendations')
+    merged = merge_shard_findings([sec_1, cost_1, sec_2, cost_2])
+    assert merged == [{**sec_1, 'Finding': sec_1['Finding'] + sec_2['Finding']}, {**cost_1, 'Finding': cost_1['Finding'] + cost_2['Finding']}]
 
 
 # --- The store's shard layout ---
@@ -322,12 +339,12 @@ def fake_plans(monkeypatch, calls, fail_for=()):
         sink.write_finding(job_id, 'Essential_Contacts', {'Check': 'Essential Contacts', 'Status': 'Compliant',
                                                           'Finding': [{'Status': 'All key contact categories are configured.'}]})
 
-    def project_plan(scope, scope_id, job_id, plist, zones, regions):
+    def project_plan(scope, scope_id, job_id, plist, zones, regions, location_errors=None):
         if plist and plist[0]['projectId'] in fail_for:
             raise RuntimeError('compute.googleapis.com quota exceeded')
         return [CheckSpec('Security & Identity', 'Open Firewall Rules', check, (scope_id, plist, job_id))]
 
-    monkeypatch.setattr(fanout, 'get_active_compute_locations', lambda plist: (calls.append(('locations', len(plist))), ([], ['global']))[1])
+    monkeypatch.setattr(fanout, 'get_active_compute_locations', lambda plist, on_error=None: (calls.append(('locations', len(plist))), ([], ['global']))[1])
     monkeypatch.setattr(fanout, 'project_check_plan', project_plan)
     monkeypatch.setattr(fanout, 'scope_check_plan', lambda scope, scope_id, job_id: [
         CheckSpec('Reliability & Resilience', 'Essential Contacts', scope_check, (scope, scope_id, job_id))])
@@ -354,6 +371,26 @@ def test_shard_runs_its_projects_writes_a_marker_and_reports_progress(store, que
     assert calls[-1] == ('scope-check', 'organization')
     assert store.read_org_policies(JOB, shard_id=SCOPE_SHARD)[1] == {'iam.disableServiceAccountKeyCreation': {'booleanPolicy': {'enforced': True}}}
     assert store.read_status(JOB, SCOPE_ID)['current_task'] == 'Scanned 2 of 5 projects · organization-level checks: completed'
+
+
+def test_shard_passes_its_location_discovery_failures_to_the_plan(store, queue, monkeypatch):
+    """Each shard discovers its own locations, so a shard whose projects all fail discovery finds none and
+    the cost check would query nothing; the failures reach the location-based checks, which report them."""
+    calls = []
+    fake_plans(monkeypatch, calls)
+    seen, error = [], RuntimeError('403 The caller does not have permission')
+
+    def discovery(plist, on_error=None):
+        on_error(plist[0]['projectId'], error)
+        return [], ['global']
+
+    real_plan = fanout.project_check_plan
+    monkeypatch.setattr(fanout, 'get_active_compute_locations', discovery)
+    monkeypatch.setattr(fanout, 'project_check_plan', lambda *args: (seen.append(args), real_plan(*args))[1])
+    fan = make_fanout(store, queue)
+    fan.dispatch('organization', SCOPE_ID, JOB, projects(5))
+    assert fan.run_shard({**BODY, 'shard_id': 'shard-002'}) is True
+    assert [(args[3], args[4:]) for args in seen] == [(projects(5)[2:4], ([], ['global'], {'p-002': error}))]
 
 
 def test_last_shard_triggers_the_aggregation_exactly_once(store, queue, monkeypatch):
@@ -697,7 +734,7 @@ def test_sweep_of_an_errored_job_is_a_no_op(store, queue):
 
 def test_small_scopes_run_inline_and_create_no_tasks(client, prod_app, gcp, monkeypatch):
     monkeypatch.setattr(runner, 'list_projects_for_scope', lambda scope, scope_id: projects(20))
-    monkeypatch.setattr(runner, 'get_active_compute_locations', lambda plist: ([], ['global']))
+    monkeypatch.setattr(runner, 'get_active_compute_locations', lambda plist, on_error=None: ([], ['global']))
     monkeypatch.setattr(runner, 'build_check_plan', lambda *args: [])
     assert client.post('/run-scan', json=BODY).status_code == 200
     assert gcp.tasks.tasks == [] and json.loads(gcp.bucket.blob(f'{JOB}/{SCOPE_ID}_status.json').download_as_text())['status'] == 'completed'
@@ -731,7 +768,7 @@ def test_completed_jobs_are_not_scanned_again(client, prod_app, gcp, monkeypatch
 
 def test_execute_scan_job_without_a_fanout_never_shards(gcp, monkeypatch):
     monkeypatch.setattr(runner, 'list_projects_for_scope', lambda scope, scope_id: projects(500))
-    monkeypatch.setattr(runner, 'get_active_compute_locations', lambda plist: ([], []))
+    monkeypatch.setattr(runner, 'get_active_compute_locations', lambda plist, on_error=None: ([], []))
     monkeypatch.setattr(runner, 'build_check_plan', lambda *args: [])
     store = memory_results_store()
     assert scan_job.execute_scan_job(BODY, store=store) is True
@@ -809,10 +846,10 @@ def test_sharded_scan_survives_a_crashing_shard(gcp, monkeypatch):
     job = {'scope': 'organization', 'scope_id': ORG_ID, 'job_id': 'job-crash'}
     real_plan = fanout.project_check_plan
 
-    def crashing_plan(scope, scope_id, job_id, plist, zones, regions):
+    def crashing_plan(scope, scope_id, job_id, plist, zones, regions, location_errors=None):
         if plist[0]['projectId'] == 'syn-42-00020':  # shard-002
             raise MemoryError('container out of memory')
-        return real_plan(scope, scope_id, job_id, plist, zones, regions)
+        return real_plan(scope, scope_id, job_id, plist, zones, regions, location_errors)
 
     monkeypatch.setattr(fanout, 'project_check_plan', crashing_plan)
     assert client.post('/run-scan', json=job).status_code == 200

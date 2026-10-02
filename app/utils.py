@@ -46,13 +46,18 @@ def configure_logging(level=logging.INFO):
 
 # --- Helper function for backoff ---
 
-def call_api_with_backoff(api_call_func, context_message="API call"):
+def call_api_with_backoff(api_call_func, context_message="API call", on_error=None):
     """
     Wraps a Google Cloud API list call with exponential backoff to handle 429 rate limit errors.
 
     Args:
         api_call_func: A lambda or function that executes the actual API call
                        (e.g., lambda: client.list_recommendations(parent=parent)).
+        context_message: Names the call in the log lines.
+        on_error: Called with the exception when the call fails for good (any
+                  error other than a 429, or a 429 after the last retry), right
+                  before the empty result is returned. The checks use it to
+                  record the project as not checked (``app.checks.not_checked``).
 
     Returns:
         The results of the API call, or an empty list if all retries fail.
@@ -76,10 +81,14 @@ def call_api_with_backoff(api_call_func, context_message="API call"):
                 time.sleep(delay)
             else:
                 logging.error(f"API rate limit exceeded for {context_message} after {max_retries} attempts. Error: {e}")
+                if on_error:
+                    on_error(e)
                 return [] # Return empty list after final failure
         except Exception as e:
             # For any other error, don't retry, just log it and move on.
             logging.error(f"An unexpected API error occurred for {context_message}: {e}")
+            if on_error:
+                on_error(e)
             return []
     return [] # Should not be reached, but as a fallback
 

@@ -18,13 +18,12 @@ check takes a keyword-only ``sink`` (a ``GcsResultsStore``) and writes
 through ``sink.write_finding(...)``, and GCP auth and discovery calls go
 through ``app.services.gcp``.
 """
-import logging
-
 from google.auth.transport.requests import Request as GoogleAuthRequest
 from google.cloud import asset_v1
 from googleapiclient.errors import HttpError
 
 from app.config import SCOPES
+from app.checks.not_checked import NotChecked
 from app.services import gcp
 
 
@@ -105,6 +104,7 @@ def check_storage_versioning(scope_id, all_projects, job_id, *, sink):
     """
     CHECK_NAME = "Cloud Storage Versioning"
     print(f"🔄 [{job_id}] Checking for {CHECK_NAME}...")
+    skipped = NotChecked(CHECK_NAME)
 
     def check_project(p):
         project_id, findings = p['projectId'], []
@@ -113,7 +113,7 @@ def check_storage_versioning(scope_id, all_projects, job_id, *, sink):
             for bucket in storage_client.list_buckets():
                 if not bucket.versioning_enabled:
                     findings.append({"Project": project_id, "Bucket": bucket.name, "Issue": "Object versioning is not enabled."})
-        except Exception as e: logging.warning(f"Could not check {CHECK_NAME} for {project_id}: {e}")
+        except Exception as e: skipped.add(project_id, e)
         return findings
 
     all_findings = []
@@ -127,6 +127,7 @@ def check_storage_versioning(scope_id, all_projects, job_id, *, sink):
     else:
         result = {"Check": CHECK_NAME, "Finding": [{"Status": "Object versioning is enabled on all buckets."}], "Status": "Compliant"}
     sink.write_finding(job_id, CHECK_NAME.replace(" ", "_"), result)
+    skipped.write(sink, job_id)
 
 
 def check_gke_hygiene(scope_id, all_projects, job_id, *, sink):
@@ -143,6 +144,7 @@ def check_gke_hygiene(scope_id, all_projects, job_id, *, sink):
     """
     CHECK_NAME = "GKE Hygiene"
     print(f"🚢 [{job_id}] Checking {CHECK_NAME} in parallel...")
+    skipped = NotChecked(CHECK_NAME, resource_apis=("container.googleapis.com",))
     
     def check_project(p):
         project_id, issues = p['projectId'], []
@@ -167,7 +169,7 @@ def check_gke_hygiene(scope_id, all_projects, job_id, *, sink):
                 for reco in reco_req.execute().get('recommendations', []):
                     issues.append({"Project": project_id, "Cluster": name, "Recommendation": reco.get('description')})
         except Exception as e:
-            logging.warning(f"Could not check GKE hygiene for {project_id}: {e}")
+            skipped.add(project_id, e)
         return issues
 
     all_findings = []
@@ -181,6 +183,7 @@ def check_gke_hygiene(scope_id, all_projects, job_id, *, sink):
     else:
         result = {"Check": CHECK_NAME, "Finding": [{"Status": "All checked GKE clusters seem to follow best practices."}], "Status": "Compliant"}
     sink.write_finding(job_id, CHECK_NAME.replace(" ", "_"), result)
+    skipped.write(sink, job_id)
 
 
 def check_resilience_assets(org_id, job_id, *, sink):

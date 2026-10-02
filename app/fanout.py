@@ -289,8 +289,9 @@ class FanOut:
             return scope_check_plan(scope, scope_id, job_id)
         projects = manifest["shards"][shard_id]
         print(f"📍 [{job_id}] {shard_id}: discovering active locations of {len(projects)} projects...")
-        active_zones, active_regions = get_active_compute_locations(projects)
-        return project_check_plan(scope, scope_id, job_id, projects, active_zones, active_regions)
+        location_errors = {}  # project ID -> why its locations could not be discovered; the location checks report these
+        active_zones, active_regions = get_active_compute_locations(projects, on_error=location_errors.__setitem__)
+        return project_check_plan(scope, scope_id, job_id, projects, active_zones, active_regions, location_errors)
 
     def run_shard(self, data, retry_count=0):
         """Body of ``/scan-shard``.

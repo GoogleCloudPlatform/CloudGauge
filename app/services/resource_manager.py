@@ -92,15 +92,19 @@ def list_projects_for_scope(scope, scope_id):
         return []
 
 
-def get_active_compute_locations(all_projects):
+def get_active_compute_locations(all_projects, on_error=None):
     """
     Discovers active GCP zones and regions by scanning for various compute resources
     across all projects in the organization. This helps focus subsequent checks
     on relevant locations.
 
     Args:
-        org_id (str): The ID of the organization.
         all_projects (list): A list of project dictionaries.
+        on_error (callable): Called as ``on_error(project_id, error)`` for a project
+            whose resources could not be listed. Such a project adds no locations, so
+            the location-based checks query it only at the locations found in other
+            projects, or nowhere; given the failures, they report it as not checked
+            (see ``app.checks.not_checked``).
 
     Returns:
         tuple: A tuple containing two lists: (active_zones, active_regions).
@@ -146,6 +150,8 @@ def get_active_compute_locations(all_projects):
 
         except Exception as e:
             logging.warning(f"Could not scan locations for project {project_id}: {e}")
+            if on_error is not None:
+                on_error(project_id, e)
     
     with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
         executor.map(scan_project, all_projects)

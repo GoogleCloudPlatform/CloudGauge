@@ -344,6 +344,42 @@ def test_a_category_without_results_says_so():
     assert sum('No findings in this category' in page for page in pages.values()) == 3
 
 
+def test_projects_a_check_could_not_cover_are_one_error_item_per_category():
+    """The "Projects not checked" records (app.checks.not_checked) of a category merge into one Error item: after
+    what needs work, before the compliant checks, with a project | skipped check | reason table that counts
+    against the score. A page with nothing but skips is not "all compliant"."""
+    def not_checked(category, rows):
+        return {'Check': 'Projects not checked', 'Category': category, 'Status': 'Error', 'Finding': rows}
+
+    results = {
+        SECURITY: [table_check('Open Firewall Rules', [{'Project': 'p1', 'Rule Name': 'allow-all', 'VPC': 'default'}]),
+                   {'Check': 'VM External IPs', 'Status': 'Compliant', 'Finding': [{'Status': 'No VMs with external IP addresses found.'}]},
+                   not_checked(SECURITY, [{'Project': 'p2', 'Skipped check': 'Open Firewall Rules', 'Reason': '403 The caller does not have permission'}]),
+                   not_checked(SECURITY, [{'Project': 'p2', 'Skipped check': 'VM External IPs', 'Reason': '403 The caller does not have permission'},
+                                          {'Project': 'p3', 'Skipped check': 'VM External IPs', 'Reason': '503 Policy checks are unavailable'}])],
+        COST: [not_checked(COST, [{'Project': 'p2', 'Skipped check': 'Cost-Saving Recommendations (all 8 recommenders)',
+                                   'Reason': '403 Cloud Recommender API has not been used in project 2 before or it is disabled.'}])],
+    }
+    html = generate_html_report('organization', '123', 'job-42', total_projects=10, **results)
+    pages = category_pages(html)
+    security, cost = pages['security-identity'], pages['cost-optimization']
+    assert check_names(security) == ['Open Firewall Rules', 'Projects not checked', 'VM External IPs']
+    assert check_names(cost) == ['Projects not checked']
+    assert dict(summaries(security))['Projects not checked'] == '3 skipped checks across 2 of 10 projects (20%)'
+    assert dict(summaries(cost))['Projects not checked'] == '1 skipped check across 1 of 10 projects (10%)'
+    assert security.count('<span class="status-badge">Error</span>') == 1 and cost.count('<span class="status-badge">Error</span>') == 1
+    assert ('<th>Project</th><th>Skipped check</th><th>Reason</th>' in security
+            and '<tr><td>p3</td><td>VM External IPs</td><td>503 Policy checks are unavailable</td></tr>' in security)
+    assert 'remediation-placeholder' not in cost  # an Error item gets no Gemini remediation box
+    # The score counts the item as one failing check: Security 1 of 3, Cost 0 of 1.
+    assert '<span class="score-badge score-low">33% Compliant</span>' in security and '<span class="score-badge score-low">0% Compliant</span>' in cost
+    assert 'No findings in this category' not in cost and 'class="checks-list"' in cost
+    assert html.count('No findings in this category') == 2  # Reliability and Operations, which have no records at all
+    csv = generate_csv_data(results)
+    assert 'Check,Status,Project,Skipped check,Reason\r\n' in csv
+    assert csv.count('Projects not checked,Error,') == 4 and 'Projects not checked,Error,p3,VM External IPs,503 Policy checks are unavailable' in csv
+
+
 def test_a_page_whose_checks_the_filter_hides_says_so():
     """Each page with checks carries a note that applyRowFilter() fills when the filter leaves nothing on that page."""
     html = generate_html_report('organization', '123456789', 'job-42', **SCENARIOS['sample scan'])

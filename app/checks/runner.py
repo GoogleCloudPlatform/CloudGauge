@@ -143,10 +143,11 @@ def run_all_checks(scope, scope_id, job_id, progress_callback=None, *, sink, max
 
     # --- RUN LOCATION SCAN ONCE HERE ---
     print("📍 Discovering all active locations (running once)...")
-    active_zones, active_regions = get_active_compute_locations(all_projects)
+    location_errors = {}  # project ID -> why its locations could not be discovered; the location checks report these
+    active_zones, active_regions = get_active_compute_locations(all_projects, on_error=location_errors.__setitem__)
     print(f"✅ Discovery complete. Found {len(active_zones)} zones and {len(active_regions)} regions.")
 
     # The registry lists every check as (Category, Friendly Name, function_to_run, (tuple_of_arguments,))
-    all_checks_to_run = build_check_plan(scope, scope_id, job_id, all_projects, active_zones, active_regions)
+    all_checks_to_run = build_check_plan(scope, scope_id, job_id, all_projects, active_zones, active_regions, location_errors)
     run_check_plan(all_checks_to_run, job_id, sink=sink, progress_callback=progress_callback, max_workers=max_workers)
     return True

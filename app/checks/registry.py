@@ -62,14 +62,20 @@ class CheckSpec(NamedTuple):
     args: tuple
 
 
-def build_check_plan(scope, scope_id, job_id, all_projects, active_zones, active_regions):
+def build_check_plan(scope, scope_id, job_id, all_projects, active_zones, active_regions, location_errors=None):
     """
     Returns the ordered list of checks to run for a scan, as ``CheckSpec`` entries.
     The 18 common and 6 organization-only checks, their order, and their arguments
     are the same as in upstream beta v1's ``run_all_checks``: the legacy plan plus
     four Security checks at the end of the common list. The runner calls each one as
     ``func(*args, sink=...)``.
+
+    The two checks that query by location (Cost-Saving Recommendations, Network
+    Insights) take one argument more than in beta v1: ``location_errors``, project ID
+    -> the error that stopped location discovery for that project, which they report
+    as "Projects not checked" (see ``app.checks.not_checked``).
     """
+    location_errors = location_errors or {}
     # --- This structured list is the key to accurate progress reporting ---
     # Format: (Category, Friendly Name, function_to_run, (tuple_of_arguments,))
     all_checks_to_run = [
@@ -78,13 +84,13 @@ def build_check_plan(scope, scope_id, job_id, all_projects, active_zones, active
         CheckSpec("Security & Identity", "Service Account Key Rotation", check_sa_key_rotation, (scope_id, all_projects, job_id)),
         CheckSpec("Security & Identity", "Public GCS Buckets", check_public_buckets, (scope_id, all_projects, job_id)),
         CheckSpec("Security & Identity", "Open Firewall Rules", check_open_firewall_rules, (scope_id, all_projects, job_id)),
-        CheckSpec("Cost Optimization", "Cost-Saving Recommendations", run_cost_recommendations, (scope_id, all_projects, active_zones, active_regions, job_id)),
+        CheckSpec("Cost Optimization", "Cost-Saving Recommendations", run_cost_recommendations, (scope_id, all_projects, active_zones, active_regions, job_id, location_errors)),
         CheckSpec("Reliability & Resilience", "GCS Bucket Versioning", check_storage_versioning, (scope_id, all_projects, job_id)),
         CheckSpec("Reliability & Resilience", "GKE Hygiene", check_gke_hygiene, (scope_id, all_projects, job_id)),
         CheckSpec("Operational Excellence & Observability", "OS Config Agent Coverage", check_os_config_coverage, (scope_id, all_projects, job_id)),
         CheckSpec("Operational Excellence & Observability", "Monitoring Alert Coverage", check_monitoring_coverage, (scope_id, all_projects, job_id)),
         CheckSpec("Operational Excellence & Observability", "Standalone VMs", check_standalone_vms, (scope_id, all_projects, job_id)),
-        CheckSpec("Operational Excellence & Observability", "Network Insights", run_network_insights, (scope_id, all_projects, active_zones, active_regions, job_id)),
+        CheckSpec("Operational Excellence & Observability", "Network Insights", run_network_insights, (scope_id, all_projects, active_zones, active_regions, job_id, location_errors)),
         CheckSpec("Operational Excellence & Observability", "Miscellaneous Checks", run_miscellaneous_checks_refactored, (scope, scope_id, all_projects, job_id)),
         CheckSpec("Operational Excellence & Observability", "Service Quota Limits", run_service_limit_checks_refactored, (scope_id, all_projects, job_id)),
         CheckSpec("Security & Identity", "Cloud SQL Security", check_cloud_sql_security, (scope_id, all_projects, job_id)),
@@ -131,10 +137,10 @@ def scope_check_plan(scope, scope_id, job_id):
     return plan
 
 
-def project_check_plan(scope, scope_id, job_id, projects, active_zones, active_regions):
+def project_check_plan(scope, scope_id, job_id, projects, active_zones, active_regions, location_errors=None):
     """The project-level checks of :func:`build_check_plan`, over ``projects`` only."""
     plan = []
-    for spec in build_check_plan(scope, scope_id, job_id, projects, active_zones, active_regions):
+    for spec in build_check_plan(scope, scope_id, job_id, projects, active_zones, active_regions, location_errors):
         if spec.name in SCOPE_LEVEL_CHECKS:
             continue
         if spec.name == MISCELLANEOUS_CHECK:

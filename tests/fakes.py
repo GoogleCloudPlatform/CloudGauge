@@ -397,11 +397,14 @@ def insight(target_resource, description):
 
 
 class FakeRecommender:
-    """Replaces ``recommender_v1.RecommenderClient``: insights (or errors) by insight-type id."""
+    """Replaces ``recommender_v1.RecommenderClient``: insights (or errors) by insight-type id,
+    recommendations by recommender id, and ``project_errors`` (project id -> error) for every call about a project."""
 
     def __init__(self):
         self.insights = {}
+        self.recommendations = {}
         self.errors = {}
+        self.project_errors = {}
         self.parents = []
 
     @property
@@ -412,12 +415,19 @@ class FakeRecommender:
             def __init__(self, *args, **kwargs):
                 pass
 
-            def list_insights(self, parent):
+            def _answer(self, parent, by_id):
                 recommender.parents.append(parent)
-                insight_type = parent.rsplit('/', 1)[-1]
-                if insight_type in recommender.errors:
-                    raise recommender.errors[insight_type]
-                return list(recommender.insights.get(insight_type, []))
+                project_id, type_id = parent.split('/')[1], parent.rsplit('/', 1)[-1]
+                error = recommender.project_errors.get(project_id) or recommender.errors.get(type_id)
+                if error is not None:
+                    raise error
+                return list(by_id.get(type_id, []))
+
+            def list_insights(self, parent):
+                return self._answer(parent, recommender.insights)
+
+            def list_recommendations(self, parent):
+                return self._answer(parent, recommender.recommendations)
 
         return FakeRecommenderClient
 
