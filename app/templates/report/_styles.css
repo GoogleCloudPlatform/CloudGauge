@@ -62,11 +62,12 @@ h3 { margin-top: 20px; margin-bottom: 10px; color: #3c4043; }
 .status-compliant .status-badge { background-color: var(--success-color); }
 .status-action-required .status-badge { background-color: var(--error-color); }
 .status-investigation .status-badge { background-color: var(--warning-color); }
+.status-error .status-badge, .status-informational .status-badge { background-color: var(--info-color); }  /* white on white before v14.1 */
 .styled-table, .details-table { width: 100%; border-collapse: collapse; margin-top: 10px; }
 .styled-table th, .styled-table td, .details-table th, .details-table td { padding: 12px 15px; text-align: left; border-bottom: 1px solid var(--border-color); }
 .details-table { border: 1px solid var(--border-color); border-radius: 4px; font-size: 14px; }
 .details-table th { background-color: #f8f9fa; }
-.details-table td { font-size: 13px; word-break: break-all; }
+.details-table td { font-size: 13px; word-break: normal; overflow-wrap: break-word; vertical-align: top; }
 .styled-table a { color: var(--primary-color); text-decoration: none; font-weight: 500; }
 .styled-table a:hover { text-decoration: underline; }
 .styled-table th { background-color: #f8f9fa; font-weight: 500; }
@@ -124,11 +125,37 @@ h3 { margin-top: 20px; margin-bottom: 10px; color: #3c4043; }
 .details-table th:hover { background-color: #f1f3f4; }
 .details-table th[aria-sort="ascending"]::after { content: " \25B2"; font-size: 10px; color: var(--primary-color); }
 .details-table th[aria-sort="descending"]::after { content: " \25BC"; font-size: 10px; color: var(--primary-color); }
+/* Cells (app/reporting/layouts.py): short columns never wrap; long content sits behind a disclosure or a
+   three-line clamp instead of being cut. A table wider than the page scrolls sideways rather than squeezing. */
+.check-content .details { overflow-x: auto; }
+.details-table td.nowrap { white-space: nowrap; }
+.details-table .muted, .fix-block .muted { color: var(--light-text-color); font-weight: 400; }
+.details-table .state-active { color: var(--error-color); font-weight: 500; }
+.details-table .cell-title { color: var(--text-color); font-weight: 500; }
+.details-table .cell-secondary { display: block; color: var(--light-text-color); font-size: 12px; margin-top: 4px; line-height: 1.45; }
+.details-table details.cell-more { display: inline; }
+.details-table details.cell-more summary { display: inline; cursor: pointer; color: var(--primary-color); font-weight: 500; list-style: none; }
+.details-table details.cell-more summary::-webkit-details-marker { display: none; }
+.details-table details.cell-more summary::after { content: " \25B8"; font-size: 11px; }
+.details-table details.cell-more[open] summary::after { content: " \25BE"; }
+.details-table details.cell-more .more-body { display: block; margin-top: 6px; color: var(--text-color); line-height: 1.5; }
+.details-table ul.cell-list { margin: 0; padding-left: 16px; line-height: 1.5; }
+.details-table ul.cell-list li { display: list-item; padding: 0; border: 0; margin: 0 0 2px; }  /* not a .checks-list li */
+.details-table .clamp { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; white-space: pre-line; line-height: 1.45; margin-top: 4px; }
+.details-table .clamp.open { display: block; -webkit-line-clamp: unset; }
+.clamp-toggle { display: block; margin-top: 2px; padding: 0; }
+.clamp-toggle::after { content: attr(data-more); }
+.clamp.open + .clamp-toggle::after { content: attr(data-less); }
+/* One remediation block per failing finding: the check's own fix when it knows one (fix-block), Gemini's
+   suggestion otherwise (filled into the remediation placeholder by getGeminiSuggestions). */
+.fix-block { margin-top: 10px; color: var(--text-color); }
+.fix-block pre, .remediation-placeholder pre { background-color: #f1f3f4; padding: 10px; border-radius: 4px; margin: 6px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12.5px; }
 @media print {
     body { display: block; background: white; }
-    .sidebar, .report-toolbar, .btn, .table-controls, .section-footer button { display: none !important; }
+    .sidebar, .report-toolbar, .btn, .table-controls, .section-footer button, .clamp-toggle { display: none !important; }
     .main-content { margin: 0; width: auto; padding: 0; }
     .content-section { display: block !important; page-break-inside: avoid; }
     .checks-section { box-shadow: none; border: none; padding: 0 0 10px; }
     .details-table th::after { content: none !important; }
+    .details-table .clamp { display: block; -webkit-line-clamp: unset; }
 }

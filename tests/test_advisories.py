@@ -25,9 +25,9 @@ import httplib2
 import pytest
 from googleapiclient.errors import HttpError
 
-from app.checks.advisories import (ADVISORIES_CHECK, ORG_ONLY_NOTE, SETTINGS_CHECK, SETTINGS_FIX, check_org_advisories,
-                                   check_project_advisories, html_to_lines, notification_row, settings_rows, strip_html,
-                                   summarize_attachments, summarize_sensitive_actions)
+from app.checks.advisories import (ADVISORIES_CHECK, MAX_ATTACHMENT_ROWS, MAX_SUMMARY_LENGTH, ORG_ONLY_NOTE, SETTINGS_CHECK,
+                                   SETTINGS_FIX, check_org_advisories, check_project_advisories, html_to_lines, notification_row,
+                                   settings_rows, strip_html, summarize_attachments, summarize_sensitive_actions)
 from app.checks.categories import merge_shard_findings
 from app.checks.not_checked import NOT_CHECKED
 from fakes import _execute
@@ -135,22 +135,32 @@ def test_html_bodies_become_text():
 
 
 def test_notification_row_summarizes_the_body_and_the_attachments():
+    """The message keeps a line per paragraph and the attachments a line per row: nothing is cut for the page's
+    sake (v14.1; the report lays the lines out, the CSV quotes them)."""
     row = notification_row(MSA)
     assert row == {'Date': MSA['createTime'][:10], 'Type': 'Mandatory Service Announcement', 'Subject': 'MSA: move off TLS 1.0',
-                   'Summary': 'Google will stop accepting TLS 1.0. Act now.',
-                   'Details': '4 affected resource rows (instances.csv): Project: p-1; Instance: sql-0 | Project: p-2; Instance: sql-1 | '
-                              'Project: p-3; Instance: sql-2 (+1 more)'}
+                   'Summary': 'Google will stop accepting TLS 1.0.\nAct now.',
+                   'Details': '4 affected resource rows (instances.csv)\nProject: p-1; Instance: sql-0\nProject: p-2; Instance: sql-1\n'
+                              'Project: p-3; Instance: sql-2\nProject: p-4; Instance: sql-3'}
     assert summarize_attachments([]) == '' and summarize_attachments([{'attachments': [{'displayName': 'empty.csv', 'csv': {}}]}]) == '0 affected resource rows (empty.csv)'
+    # Past MAX_ATTACHMENT_ROWS rows, the rest is a count.
+    big = notification('NOTIFICATION_TYPE_SECURITY_MSA', 's', 1, attachments=[('big.csv', ('Project',), tuple((f'p-{i}',) for i in range(MAX_ATTACHMENT_ROWS + 5)))])
+    lines = summarize_attachments(big['messages']).split('\n')
+    assert lines[0] == f'{MAX_ATTACHMENT_ROWS + 5} affected resource rows (big.csv)' and lines[1] == 'Project: p-0'
+    assert len(lines) == MAX_ATTACHMENT_ROWS + 2 and lines[-1] == '(+5 more)'
     assert notification_row({})['Subject'] == '(no subject)' and notification_row({})['Type'] == 'Unknown'
     assert notification_row({'notificationType': 'NOTIFICATION_TYPE_NEW_KIND'})['Type'] == 'New Kind'
+    # A long message is kept whole; only the safety cap cuts it.
     long = notification_row(notification('NOTIFICATION_TYPE_SECURITY_MSA', 's', 1, '<p>' + 'word ' * 200 + '</p>'))
-    assert len(long['Summary']) == 400 and long['Summary'].endswith('...')
+    assert long['Summary'] == ('word ' * 200).strip()
+    huge = notification_row(notification('NOTIFICATION_TYPE_SECURITY_MSA', 's', 1, '<p>' + 'word ' * 2000 + '</p>'))
+    assert len(huge['Summary']) == MAX_SUMMARY_LENGTH and huge['Summary'].endswith('...')
 
 
 def test_sensitive_actions_digest_lists_actions_and_actors():
     row = notification_row(DIGEST)
     assert row['Type'] == 'Sensitive Actions'
-    assert row['Details'] == 'Organization policy updated (x4); Owner role granted (x1) · by admin@example.com, ops@example.com'
+    assert row['Details'] == 'Organization policy updated (x4)\nOwner role granted (x1)\nby admin@example.com, ops@example.com'
     assert summarize_sensitive_actions(['nothing here']) == ''
 
 

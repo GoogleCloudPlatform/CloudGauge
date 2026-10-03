@@ -46,6 +46,8 @@ from dataclasses import dataclass, fields
 
 from markupsafe import Markup
 
+from app.reporting.layouts import lay_out
+
 # The report's sections, in display order. The sidebar in report.html links to them.
 REPORT_CATEGORY_ORDER = ("Security & Identity", "Cost Optimization", "Reliability & Resilience", "Operational Excellence & Observability")
 ORG_POLICIES_KEY = "Organization Policies"
@@ -96,6 +98,9 @@ class Details:
 
     ``rows``/``lines`` hold at most ``MAX_ROWS_PER_CHECK`` entries; ``total_rows``
     counts them all and ``omitted_rows`` how many the page leaves to the CSV.
+    ``headers``/``rows`` are the raw strings (what the CSV has); the template
+    renders ``display_headers``/``cells``, which ``app.reporting.layouts``
+    composes from them, and ``fix_lines`` as the finding's remediation block.
     """
     kind: str  # "table" or "text"
     headers: tuple = ()
@@ -105,6 +110,9 @@ class Details:
     omitted_rows: int = 0
     project_column: int | None = None  # index of the project column in ``headers``
     project_count: int | None = None  # distinct projects over all rows (None without a project column)
+    display_headers: tuple = ()  # the table as shown: the raw columns, or a check's layout of them
+    cells: tuple = ()  # rows of ``app.reporting.layouts.Cell``, one per row of ``rows``
+    fix_lines: tuple = ()  # the distinct values of a ``Fix`` column, shown under the table instead of in it
 
 
 @dataclass(frozen=True)
@@ -300,11 +308,12 @@ def group_findings(findings_list):
     return grouped
 
 
-def build_details(details_list, max_rows=MAX_ROWS_PER_CHECK):
+def build_details(details_list, max_rows=MAX_ROWS_PER_CHECK, check_name=None):
     """Returns a table if details are a list of dicts, otherwise text lines (legacy ``create_details_html``).
 
     Only the first ``max_rows`` rows (or lines) go into the page; ``total_rows``
-    and ``project_count`` are computed over all of them.
+    and ``project_count`` are computed over all of them. The rows shown are
+    laid out for ``check_name`` (``app.reporting.layouts.lay_out``).
     """
     if not details_list: return None
     if isinstance(details_list[0], dict):
@@ -318,8 +327,11 @@ def build_details(details_list, max_rows=MAX_ROWS_PER_CHECK):
             return _text_details(details_list, max_rows)
         project_column = next((i for i, h in enumerate(header_cells) if h.strip().lower() in PROJECT_COLUMNS), None)
         project_count = len({row[project_column] for row in rows}) if project_column is not None else None
-        return Details(kind="table", headers=header_cells, rows=tuple(rows[:max_rows]), total_rows=len(rows),
-                       omitted_rows=max(0, len(rows) - max_rows), project_column=project_column, project_count=project_count)
+        shown = tuple(rows[:max_rows])
+        display_headers, cells, fix_lines = lay_out(check_name, header_cells, shown, details_list[:max_rows])
+        return Details(kind="table", headers=header_cells, rows=shown, total_rows=len(rows),
+                       omitted_rows=max(0, len(rows) - max_rows), project_column=project_column, project_count=project_count,
+                       display_headers=display_headers, cells=cells, fix_lines=fix_lines)
     return _text_details(details_list, max_rows)
 
 
@@ -473,7 +485,7 @@ def build_report_context(scope, scope_id, job_id, all_results, banner=None, cove
             if status in ACTIONABLE_STATUSES:
                 fix_id = finding_counter
                 finding_counter += 1
-            details = build_details(group_data.get('details', []))
+            details = build_details(group_data.get('details', []), check_name=check_name)
             checks.append(CheckItem(
                 check_name=f"{check_name}",
                 status=f"{status}",

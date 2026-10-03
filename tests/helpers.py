@@ -148,13 +148,19 @@ def report_facts(html):
         # where the new report escapes them, and both unescape to the same string.
         return html_unescape(markup.replace('<br>', '\n')).strip()
 
+    def cell_text(markup):
+        # Layout markup (app.reporting.layouts: titles, muted lines, disclosures, lists, clamps) is reduced to its
+        # text, as a browser's textContent would be. Legacy cells have none, so they compare as before.
+        return html_unescape(' '.join(re.sub(r'</?(?:span|details|summary|div|button|ul|li|br)\b[^>]*>', ' ', markup).split()))
+
     items = []
-    for item in re.findall(r'<li class="status-[\w-]+">(.*?)</li>', html, re.S):
+    # An item ends with its status badge: a list cell's own <li> elements must not end it early.
+    for item in re.findall(r'<li class="status-[\w-]+">(.*?<span class="status-badge">.*?</span>\s*)</li>', html, re.S):
         name = html_unescape(re.search(r'<strong>(.*?)</strong>', item, re.S).group(1))
         badge = html_unescape(re.search(r'<span class="status-badge">(.*?)</span>', item, re.S).group(1))
         headers = tuple(html_unescape(h) for h in re.findall(r'<th(?:\s[^>]*)?>(.*?)</th>', item, re.S))
         rows = tuple(cells for cells in (
-            tuple(html_unescape(cell) for cell in re.findall(r'<td(?:\s[^>]*)?>(.*?)</td>', row, re.S))
+            tuple(cell_text(cell) for cell in re.findall(r'<td(?:\s[^>]*)?>(.*?)</td>', row, re.S))
             for row in re.findall(r'<tr(?:\s[^>]*)?>(.*?)</tr>', item, re.S)) if cells)
         details = re.search(r'<div class="details">(.*?)</div>', item, re.S)
         details_text = None if (rows or details is None) else text(details.group(1))

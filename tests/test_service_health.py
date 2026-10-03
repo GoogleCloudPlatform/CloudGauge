@@ -108,10 +108,11 @@ def test_events_of_several_projects_fold_into_one_incident_row():
     assert 'data-lake' in rows[0]['Project IDs']
 
 
-def test_many_locations_are_counted_not_listed():
+def test_every_location_is_listed():
+    """The row carries every location (the report folds a long list behind a count; the CSV has it all)."""
     many = tuple(('Compute Engine', f'region-{i}') for i in range(14))
     row = incident_row(fold_events({'p': [event('C', 'p', 'IMPACTED', products=many)]})['C'])
-    assert row['Locations'].startswith('14 locations: region-0, ') and row['Locations'].endswith(', ...')
+    assert row['Locations'] == ', '.join(f'region-{i}' for i in range(14))
     assert describe_relevance(('IMPACTED', 'RELATED')) == 'Impacted or Related'
     assert describe_relevance(('IMPACTED', 'RELATED', 'PARTIALLY_RELATED')) == 'Impacted, Related or Partially related'
 
@@ -226,9 +227,10 @@ def test_incident_rows_of_several_shards_fold_into_one():
          'Impacted projects': 3, 'Project IDs': 'p-1, p-7, p-9', 'Relevance': 'Impacted'},
         row_c,
     ]
-    many = {**row_a, 'Locations': '14 locations: region-0, region-1, ...'}
-    (merged,) = merge_shard_findings([{**shards[0], 'Finding': [row_a]}, {**shards[0], 'Finding': [many]}])
-    assert merged['Finding'][0]['Locations'] == many['Locations']  # a truncated list is kept, not spliced
+    more = {**row_a, 'Products': 'Cloud SQL, Cloud Run', 'Locations': 'region-1, us-central1, region-0'}
+    (merged,) = merge_shard_findings([{**shards[0], 'Finding': [row_a]}, {**shards[0], 'Finding': [more]}])
+    assert merged['Finding'][0]['Products'] == 'Cloud Run, Cloud SQL'  # a union, in order of first sight, every item kept
+    assert merged['Finding'][0]['Locations'] == 'us-central1, region-1, region-0'
     assert merge_shard_findings(shards[1:2] * 2) == [shards[1]]  # only notes: one note
     # The coverage check merges like any scored check: the Compliant placeholder yields to the findings.
     coverage = [{'Check': COVERAGE_CHECK, 'Status': 'Compliant', 'Finding': [{'Status': 'ok'}]},

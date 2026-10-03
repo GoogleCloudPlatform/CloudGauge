@@ -23,14 +23,43 @@
   reveals them ("Show 50 more"), sorts columns, and filters rows. A table
   holds at most max_rows_per_check rows; the note under it points to the CSV.
 
+  Cells (app.reporting.layouts.Cell) render by kind: plain text, stacked
+  lines, a title with a muted second line, a count that discloses its list, a
+  bulleted list, or a message clamped to three lines. Everything a cell holds
+  is in the page as text, so sorting and the filter box see it. A check whose
+  rows carry a Fix gets one remediation block under its table instead of a
+  Fix column; the Gemini button leaves those checks alone.
+
   A page is never blank: a category with nothing to list shows its
   empty_message, and a page whose checks are all hidden by the filter shows
   the .filter-empty note (filled in by applyRowFilter in _script.js).
 #}
+{% macro disclosure(summary, body) -%}
+<details class="cell-more"><summary>{{ summary }}</summary>{% if body is string %}<span class="more-body">{{ body }}</span>{% else %}<ul class="cell-list more-body">{% for line in body %}<li>{{ line }}</li>{% endfor %}</ul>{% endif %}</details>
+{%- endmacro %}
+
+{% macro render_cell(cell) -%}
+<td{% if cell.classes %} class="{{ cell.classes }}"{% endif %}>
+{%- if cell.kind == "stack" -%}
+{% for line in cell.lines %}{% if loop.first %}{{ line }}{% else %}<br><span class="muted">{{ line }}</span>{% endif %}{% endfor %}
+{%- elif cell.kind == "rich" -%}
+<span class="cell-title">{{ cell.text }}</span>{% if cell.secondary or cell.more %}<span class="cell-secondary">{{ cell.secondary }}{% if cell.more %}{{ disclosure(cell.more[0], cell.more[1]) }}{% endif %}</span>{% endif %}
+{%- elif cell.kind == "disclose" -%}
+{{ disclosure(cell.text, cell.body) }}
+{%- elif cell.kind == "list" -%}
+{% if cell.lines %}<ul class="cell-list">{% for line in cell.lines %}<li>{{ line }}</li>{% endfor %}</ul>{% endif %}{% if cell.more %}{{ disclosure(cell.more[0], cell.more[1]) }}{% endif %}
+{%- elif cell.kind == "article" -%}
+<span class="cell-title">{{ cell.text }}</span>{% if cell.body %}<div class="clamp">{{ cell.body }}</div>{% if cell.more %}<button class="link-btn clamp-toggle" type="button" onclick="toggleClamp(this)" data-more="{{ cell.more[0] }}" data-less="{{ cell.more[1] }}" aria-expanded="false"></button>{% endif %}{% endif %}
+{%- else -%}
+{{ cell.text }}
+{%- endif -%}
+</td>
+{%- endmacro %}
+
 {% macro details_cell(details, rows_per_page) -%}
 {% if details is not none -%}
 {% if details.kind == "table" -%}
-<table class='details-table'><thead><tr>{% for header in details.headers %}<th>{{ header }}</th>{% endfor %}</tr></thead><tbody>{% for row in details.rows %}<tr{% if loop.index > rows_per_page %} hidden{% endif %}>{% for cell in row %}<td>{{ cell }}</td>{% endfor %}</tr>{% endfor %}</tbody></table>
+<table class='details-table'><thead><tr>{% for header in details.display_headers %}<th>{{ header }}</th>{% endfor %}</tr></thead><tbody>{% for row in details.cells %}<tr{% if loop.index > rows_per_page %} hidden{% endif %}>{% for cell in row %}{{ render_cell(cell) }}{% endfor %}</tr>{% endfor %}</tbody></table>
 {%- else -%}
 {{ details.lines|join("<br>"|safe) }}
 {%- endif %}
@@ -81,6 +110,9 @@
         {% endif %}
         {% if check.details is not none and check.details.omitted_rows %}
         <div class="table-note">Only the first {{ "{:,}".format(check.details.total_rows - check.details.omitted_rows) }} of {{ "{:,}".format(check.details.total_rows) }} rows are included in this page. The complete list is in the <a href="{{ csv_href }}">CSV report</a>.</div>
+        {% endif %}
+        {% if check.details is not none and check.details.fix_lines %}
+        <div class="fix-block"><strong>Fix</strong><pre>{{ check.details.fix_lines|join("\n") }}</pre></div>
         {% endif %}
         {% if check.fix_id is not none %}
         <div class='remediation-placeholder' id='fix-{{ check.fix_id }}'></div>

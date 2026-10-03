@@ -20,6 +20,7 @@ function showSection(sectionId, clickedLinkElement = null) {
     const targetSection = document.getElementById(sectionId + '-section');
     if (targetSection) {
         targetSection.style.display = 'block';
+        settleClamps(targetSection);
     }
     // The filter box acts on the checks of the page shown; the Overview has none, so it is hidden there.
     const toolbar = document.querySelector('.report-toolbar');
@@ -41,6 +42,7 @@ function showSection(sectionId, clickedLinkElement = null) {
 }
 
 document.addEventListener("DOMContentLoaded", function() {
+    clampLongCells();
     const hash = window.location.hash.substring(1);
     if (hash && document.getElementById(hash + '-section')) {
         showSection(hash);
@@ -65,6 +67,48 @@ function toggleSubSection(btn) {
             btn.textContent = "View Details";
         }
     }
+}
+
+// --- Long cells (see app/reporting/layouts.py) ---
+// A plain cell longer than CLAMP_MIN_CHARS is clamped to three lines with a "Show more" toggle; the briefings'
+// message cells come clamped from the template. The toggle's label is CSS-generated (data-more / data-less), so it
+// is not part of the row's text for sorting, filtering, or the Gemini prompt. Once a cell is visible, a toggle whose
+// text fits in three lines anyway is removed (settleClamps); hidden rows keep theirs until they are shown.
+const CLAMP_MIN_CHARS = 200;
+
+function clampLongCells() {
+    document.querySelectorAll('table.details-table td').forEach(td => {
+        if (td.childElementCount > 0 || td.textContent.length <= CLAMP_MIN_CHARS) { return; }
+        const box = document.createElement('div');
+        box.className = 'clamp';
+        box.textContent = td.textContent;
+        td.textContent = '';
+        td.appendChild(box);
+        const toggle = document.createElement('button');
+        toggle.className = 'link-btn clamp-toggle';
+        toggle.type = 'button';
+        toggle.dataset.more = 'Show more';
+        toggle.dataset.less = 'Show less';
+        toggle.setAttribute('aria-expanded', 'false');
+        toggle.addEventListener('click', () => toggleClamp(toggle));
+        td.appendChild(toggle);
+    });
+}
+
+function toggleClamp(toggle) {
+    const box = toggle.previousElementSibling;
+    const open = box.classList.toggle('open');
+    toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+}
+
+function settleClamps(root) {
+    (root || document).querySelectorAll('.clamp:not(.open)').forEach(box => {
+        const toggle = box.nextElementSibling;
+        if (toggle && toggle.classList.contains('clamp-toggle') && box.clientHeight > 0 && box.scrollHeight <= box.clientHeight + 1) {
+            toggle.remove();
+            box.classList.add('open');
+        }
+    });
 }
 
 // --- Large tables: paging, sorting, and filtering (all client-side, no requests) ---
@@ -311,10 +355,13 @@ async function getGeminiSuggestions() {
     const btn = event.target;
     btn.disabled = true;
     const findingsToFix = [];
+    let alreadyFixed = 0;
     const placeholders = document.querySelectorAll(".remediation-placeholder");
 
     placeholders.forEach((placeholder) => {
         const listItem = placeholder.closest('li');
+        // A check that knows its fix shows it (the fix-block); only the others are asked of Gemini.
+        if (listItem.querySelector('.fix-block')) { alreadyFixed++; return; }
         const detailsDiv = listItem.querySelector('.details');
         const table = detailsDiv.querySelector('table.details-table');
         const index = placeholder.id.split('-')[1];
@@ -368,7 +415,7 @@ async function getGeminiSuggestions() {
     });
 
     if (findingsToFix.length === 0) {
-        btn.textContent = "No Actionable Findings";
+        btn.textContent = alreadyFixed ? "Every finding already shows its fix" : "No Actionable Findings";
         return;
     }
 
@@ -390,9 +437,9 @@ async function getGeminiSuggestions() {
                     const placeholder = document.getElementById(`fix-${originalIndex}`);
                     if (placeholder) {
                         const preNode = document.createElement("pre");
-                        preNode.style.cssText = 'background-color: #f1f3f4; padding: 10px; border-radius: 4px; margin-top: 10px; white-space: pre-wrap; word-break: break-all;';
                         preNode.textContent = suggestion;
-                        placeholder.innerHTML = `<strong>Suggested Fix:</strong>`;
+                        placeholder.className = 'remediation-placeholder fix-block';
+                        placeholder.innerHTML = `<strong>Suggested fix</strong> <span class="muted">(AI-generated)</span>`;
                         placeholder.appendChild(preNode);
                     }
                 }

@@ -64,7 +64,6 @@ PAGE_SIZE = 100
 REQUEST_TIMEOUT_SECONDS = 60
 RETRY_DELAYS = (2, 4, 8)  # seconds before retrying a 429 or 5xx answer; then the error is reported
 RETRIED_STATUSES = (429, 500, 502, 503, 504)
-MAX_LOCATIONS_LISTED = 10
 RELEVANCE_LABELS = {"IMPACTED": "Impacted", "RELATED": "Related", "PARTIALLY_RELATED": "Partially related",
                     "NOT_IMPACTED": "Not impacted", "UNKNOWN": "Unknown"}
 DETAILED_STATE_LABELS = {"EMERGING": "Emerging", "CONFIRMED": "Confirmed", "RESOLVED": "Resolved", "MERGED": "Merged",
@@ -154,16 +153,16 @@ def fold_events(events_by_project):
 
 
 def incident_row(incident):
-    """The report row of a folded incident (column names shared with ``categories.fold_incident_rows``)."""
-    event, locations = incident["event"], incident["locations"]
+    """The report row of a folded incident (column names shared with ``categories.fold_incident_rows``).
+
+    Every location and every project is listed: the report shows long lists as
+    a count that opens to the list (``app.reporting.layouts``), the CSV in full.
+    """
+    event = incident["event"]
     state = categories.ACTIVE_INCIDENT if event.get("state") == "ACTIVE" else "Resolved"
     detailed = DETAILED_STATE_LABELS.get(event.get("detailedState"))
     if detailed and detailed != state:
         state = f"{state} ({detailed.lower()})"
-    if len(locations) > MAX_LOCATIONS_LISTED:
-        locations_text = f"{len(locations)} locations: {', '.join(locations[:MAX_LOCATIONS_LISTED])}, ..."
-    else:
-        locations_text = ", ".join(locations)
     relevance = min((RELEVANCE_LABELS.get(r, "Unknown") for r in incident["relevances"]),
                     key=lambda r: categories.RELEVANCE_ORDER.index(r) if r in categories.RELEVANCE_ORDER else len(categories.RELEVANCE_ORDER))
     return {
@@ -172,7 +171,7 @@ def incident_row(incident):
         "Ended": _timestamp(event.get("endTime")),
         "Incident": event.get("title") or incident["id"],
         "Products": ", ".join(incident["products"]),
-        "Locations": locations_text,
+        "Locations": ", ".join(incident["locations"]),
         categories.INCIDENT_PROJECT_COUNT: len(incident["projects"]),
         categories.INCIDENT_PROJECTS: ", ".join(incident["projects"]),
         categories.INCIDENT_RELEVANCE: relevance,

@@ -37,11 +37,12 @@ same notification seen from several projects into one row. Organization-wide
 announcements are only visible in an organization scan; the briefing says so.
 
 Bodies are HTML. They are reduced to text with the standard library's parser
-before anything reaches the report (Jinja then escapes it): the summary is the
-first ``SUMMARY_LENGTH`` characters, and the Details column carries what a
-reader would otherwise open the notification for - the affected resources of
-an advisory (its CSV attachments) or the actions and actors of a
-sensitive-actions digest.
+before anything reaches the report (Jinja then escapes it): the Summary column
+is the whole message, one line per paragraph (the report shows three lines and
+opens the rest on request; a body is only cut at ``MAX_SUMMARY_LENGTH``), and
+the Details column carries what a reader would otherwise open the notification
+for - the affected resources of an advisory (its CSV attachments) or the
+actions and actors of a sensitive-actions digest, one per line.
 
 Failures follow the rest of the checks: an organization-level call that fails
 is an ``Error`` record naming the API or permission to fix (both records, since
@@ -63,8 +64,8 @@ ADVISORY_API = "advisorynotifications.googleapis.com"
 LIST_PERMISSION = "advisorynotifications.notifications.list"
 SETTINGS_PERMISSION = "advisorynotifications.settings.get"
 PAGE_SIZE = 50
-SUMMARY_LENGTH = 400
-MAX_ATTACHMENT_ROWS = 3  # affected-resource rows quoted in the Details column; the rest is a count
+MAX_SUMMARY_LENGTH = 8000  # a safety cap on the message text in a row; Google's bodies are far shorter
+MAX_ATTACHMENT_ROWS = 25  # affected-resource rows quoted in the Details column, one per line; the rest is a count
 SENSITIVE_ACTIONS = "NOTIFICATION_TYPE_SENSITIVE_ACTIONS"
 TYPE_LABELS = {
     "NOTIFICATION_TYPE_SECURITY_MSA": "Mandatory Service Announcement",
@@ -130,13 +131,17 @@ def strip_html(html_text):
     return " ".join(html_to_lines(html_text))
 
 
-def truncate(text, length=SUMMARY_LENGTH):
+def truncate(text, length=MAX_SUMMARY_LENGTH):
     text = str(text or "")
     return text if len(text) <= length else text[:length - 3].rstrip() + "..."
 
 
 def summarize_attachments(messages):
-    """The affected resources of a notification: its CSV attachments as a count plus the first rows."""
+    """The affected resources of a notification: its CSV attachments as a count line plus one line per row.
+
+    ``"4 affected resource rows (instances.csv)\\nProject: p-1; Instance: sql-0\\n...\\n(+1 more)"``;
+    at most ``MAX_ATTACHMENT_ROWS`` rows are quoted. Empty when there are no attachments.
+    """
     total, samples, names = 0, [], []
     for message in messages or []:
         for attachment in message.get("attachments", []) or []:
@@ -151,14 +156,13 @@ def summarize_attachments(messages):
                 samples.append("; ".join(pairs))
     if not total and not names:
         return ""
-    text = f"{total} affected resource row{'' if total == 1 else 's'}"
+    heading = f"{total} affected resource row{'' if total == 1 else 's'}"
     if names:
-        text += f" ({', '.join(dict.fromkeys(names))})"
-    if samples:
-        text += ": " + " | ".join(samples)
+        heading += f" ({', '.join(dict.fromkeys(names))})"
+    lines = [heading, *samples]
     if total > len(samples):
-        text += f" (+{total - len(samples)} more)"
-    return text
+        lines.append(f"(+{total - len(samples)} more)")
+    return "\n".join(lines)
 
 
 def action_heading(lines, index):
@@ -175,7 +179,8 @@ def action_heading(lines, index):
 
 
 def summarize_sensitive_actions(lines):
-    """The actions and actors of a sensitive-actions digest, from its text lines: ``"<action> (x4) · by a@x, b@x"``.
+    """The actions and actors of a sensitive-actions digest, from its text lines, one per line:
+    ``"<action> (x4)\\n<action> (x1)\\nby a@x, b@x"``.
 
     Best effort over Google's HTML layout (a heading per action, its details as "Label: value"
     lines, "This action was taken N times", and one "By: <email>" per occurrence); an empty
@@ -191,14 +196,18 @@ def summarize_sensitive_actions(lines):
         for email in _EMAIL.findall(line):
             if email not in actors:
                 actors.append(email)
-    text = "; ".join(actions)
     if actors:
-        text += (" · " if text else "") + "by " + ", ".join(actors)
-    return text
+        actions.append("by " + ", ".join(actors))
+    return "\n".join(actions)
 
 
 def notification_row(notification):
-    """The report row of one notification (without the Projects column of folder/project scans)."""
+    """The report row of one notification (without the Projects column of folder/project scans).
+
+    ``Summary`` is the message text, one line per paragraph; ``Details`` one
+    item per line (``app.reporting.layouts`` shows them as a clamped message
+    and a list; the CSV keeps each as one field).
+    """
     messages = notification.get("messages") or []
     body = ((messages[0].get("body") or {}).get("text") or {}).get("enText", "") if messages else ""
     lines = html_to_lines(body)
@@ -210,7 +219,7 @@ def notification_row(notification):
         categories.ADVISORY_DATE: str(notification.get("createTime") or "")[:10],
         categories.ADVISORY_TYPE: TYPE_LABELS.get(kind, kind.replace("NOTIFICATION_TYPE_", "").replace("_", " ").title() or "Unknown"),
         categories.ADVISORY_SUBJECT: ((notification.get("subject") or {}).get("text") or {}).get("enText", "") or "(no subject)",
-        "Summary": truncate(" ".join(lines)),
+        "Summary": truncate("\n".join(lines)),
         "Details": details,
     }
 

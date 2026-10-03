@@ -218,24 +218,15 @@ def is_active_incident(row):
     return str(row.get(INCIDENT_STATE) or "").startswith(ACTIVE_INCIDENT)
 
 
-def _merge_locations(kept, other):
-    """The union of two location texts, unless one is already a truncated "N locations: ..." (keep the larger)."""
-    truncated = [text for text in (kept, other) if " locations: " in str(text or "")]
-    if truncated:
-        return max(truncated, key=lambda text: int(str(text).split(" locations: ")[0] or 0))
-    return _union(kept, other)
-
-
 def fold_incident_rows(rows):
     """Folds rows with the same incident ID into one: the union of their projects, products and locations,
     the highest relevance, active if any part was active. Active incidents come first, then the most recent."""
     def merge(kept, row):
         kept[INCIDENT_PROJECTS] = _union(kept.get(INCIDENT_PROJECTS), row.get(INCIDENT_PROJECTS))
         kept[INCIDENT_PROJECT_COUNT] = len(_split_list(kept[INCIDENT_PROJECTS]))
-        if "Products" in kept or "Products" in row:
-            kept["Products"] = _union(kept.get("Products"), row.get("Products"))
-        if "Locations" in kept or "Locations" in row:
-            kept["Locations"] = _merge_locations(kept.get("Locations"), row.get("Locations"))
+        for column in ("Products", "Locations"):
+            if column in kept or column in row:
+                kept[column] = _union(kept.get(column), row.get(column))
         if is_active_incident(row) and not is_active_incident(kept):
             kept[INCIDENT_STATE] = row[INCIDENT_STATE]
             kept["Ended"] = row.get("Ended", "")

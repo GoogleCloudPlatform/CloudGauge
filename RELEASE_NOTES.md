@@ -8,7 +8,74 @@ the test suite running inside the image, a zero-traffic canary revision scanned
 against a real organization, promotion, and a production scan compared fact for
 fact with the previous version's report.
 
-Versions are the image tags (`v5` … `v14`); the commit is the one that shipped.
+Versions are the image tags (`v5` … `v14.1`); the commit is the one that shipped.
+
+---
+
+## v14.1 — One remediation convention, readable briefing tables
+
+A patch release prompted by a review of v14's report: the two briefings were
+unreadable at normal page widths, and the report had two ways of offering a
+fix. No new checks, no new settings, no upgrade steps.
+
+### Changed: where a fix is shown
+
+Until v14 the report offered remediation one way: the **Get Remediation
+Suggestions** button asked Gemini for every Action Required or Investigation
+Recommended finding. v14 then gave its two new scored checks and Essential
+Contacts a `Fix` column — the exact `gcloud` command — without reconciling the
+two, so a reader saw a fix up front for three checks and had to ask Gemini for
+the rest (user question: *"I want to understand the reasoning for this being
+different from the rest of the flow"*). There was no good reason; the
+deterministic fix is simply more reliable than a generated one wherever a check
+can compute it. v14.1 makes it one convention:
+
+- **Every failing finding has one remediation block, under its table.** A check
+  that knows its fix shows a **Fix** block with the distinct commands (one line
+  per distinct value, the CSV keeps every row's). The `Fix` column is gone from
+  the page; it stays in the CSV.
+- **Gemini fills the gaps.** *Get Remediation Suggestions* asks only for the
+  findings without a fix block and renders its answer in the same place,
+  labelled *Suggested fix (AI-generated)*. When every finding already shows its
+  fix, the button says so instead of calling Gemini.
+- Any check can opt in by writing a `Fix` key in its rows (README, *Adding a
+  check*).
+
+### Fixed: the briefing tables
+
+The v14 incident table had ten columns and the notification table five, two of
+them long texts; at normal widths the browser squeezed them until the legacy
+stylesheet's `word-break: break-all` split words anywhere ("Resolve / d",
+"JZBYGF / V", "Sensitiv / e Action / s"), and three caps in the checks had
+already cut the data before it reached the page or the CSV (ten locations, 400
+characters of message, three attachment rows). Three changes:
+
+- **Cells wrap at word boundaries**, short columns (dates, states, IDs, counts)
+  stay on one line, a table wider than the page scrolls sideways instead of
+  squeezing, and a plain cell longer than a few lines is clamped to three with
+  a *Show more* toggle. These rules apply to every table in the report.
+- **The briefings have their own layouts** (`app/reporting/layouts.py`, a
+  presentation layer over the raw rows). An incident is
+  `State | When (UTC) | Incident | Products | Projects | Relevance | ID`: start
+  and end stacked, the locations as a muted line under the title (a long list
+  as "14 locations", opening on click), the projects as "37 projects" that
+  opens to the list, Products its own sortable column. A notification is
+  `Date | Type | Notification | Details` (+ `Projects` in folder and project
+  scans): the message under its subject, clamped to three lines from its first
+  line with *Show full message*; attachments and digest actions as a list with
+  the first three items shown and the rest behind "N more".
+- **Nothing is shortened at the source.** Every location, every attachment row
+  (up to 25 quoted, then a count) and the whole message (one line per
+  paragraph) are in the page and in the CSV, whose columns are unchanged and
+  raw. Everything behind a disclosure is in the page as text, so the filter box
+  and column sorting see it, and the print stylesheet unclamps it.
+- **Informational and Error badges are visible.** The legacy stylesheet gave
+  them no background, so their white text was invisible — a gap every briefing
+  (always *Informational*) and every *Projects not checked* item (*Error*) fell
+  into. They now use the same grey as their icons.
+
+Tests: 445 (new `tests/test_layouts.py`; the parity suite still compares the
+legacy checks' tables byte for byte, which the new rules leave unchanged).
 
 ---
 
