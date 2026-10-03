@@ -124,16 +124,19 @@ def test_manifest_adds_the_scope_shard():
 def test_scope_and_project_plans_partition_the_full_plan(scope):
     """Scope-level = the checks that don't take the project list; together with the project checks they are the full plan."""
     plist = projects(3)
+    scope_level = registry.scope_level_checks(scope)
     full = registry.build_check_plan(scope, SCOPE_ID, JOB, plist, ['z'], ['r'])
     by_args = {spec.name for spec in full if not any(arg is plist for arg in spec.args)}
-    assert by_args == {spec.name for spec in full if spec.name in registry.SCOPE_LEVEL_CHECKS}
+    assert by_args == {spec.name for spec in full if spec.name in scope_level}
+    # Advisory Notifications is read once at the organization, per project everywhere else.
+    assert (registry.ADVISORIES_CHECK in scope_level) == (scope == 'organization')
 
     scope_plan = registry.scope_check_plan(scope, SCOPE_ID, JOB)
     project_plan = registry.project_check_plan(scope, SCOPE_ID, JOB, plist, ['z'], ['r'])
-    assert [spec.name for spec in project_plan] == [spec.name for spec in full if spec.name not in registry.SCOPE_LEVEL_CHECKS]
+    assert [spec.name for spec in project_plan] == [spec.name for spec in full if spec.name not in scope_level]
     misc_in_scope = [spec for spec in scope_plan if spec.name == registry.MISCELLANEOUS_CHECK]
     assert [spec.name for spec in scope_plan if spec.name != registry.MISCELLANEOUS_CHECK] == \
-           [spec.name for spec in full if spec.name in registry.SCOPE_LEVEL_CHECKS]
+           [spec.name for spec in full if spec.name in scope_level]
     # The miscellaneous check is split: org-wide insights once (organization only), project work in every shard.
     assert bool(misc_in_scope) == (scope == 'organization')
     if misc_in_scope:
@@ -436,7 +439,7 @@ def test_shard_failure_is_retried_then_becomes_error_rows(store, queue, monkeypa
     assert marker['status'] == 'failed' and marker['attempt'] == 3 and 'quota exceeded' in marker['error']
     names = [spec.name for spec in registry.project_check_plan('organization', SCOPE_ID, JOB, projects(2), [], [])]
     errors = store.read_all_findings(JOB, shard_id='shard-001')
-    assert sorted(f['Check'] for f in errors) == sorted(names) and len(names) == 17
+    assert sorted(f['Check'] for f in errors) == sorted(names) and len(names) == 18  # v14: + Service Health Incidents
     assert all(f['Status'] == 'Error' and f['Finding'][0]['Error'].startswith(
         'Not checked for 2 projects (p-000, p-001): the scan failed after 3 attempts. Last error: ') for f in errors)
     assert 'quota exceeded' in errors[0]['Finding'][0]['Error']
@@ -620,7 +623,7 @@ def test_sweep_finishes_the_job_when_a_shard_has_died(store, queue, monkeypatch)
     marker = store.read_markers(JOB)['shard-002']
     assert marker['status'] == 'failed' and marker['swept'] == 1 and 'crashed on every attempt' in marker['error']
     errors = store.read_all_findings(JOB, shard_id='shard-002')
-    assert len(errors) == 17 and all(f['Status'] == 'Error' for f in errors)
+    assert len(errors) == 18 and all(f['Status'] == 'Error' for f in errors)  # one per project-level check (v14: 18)
     assert queue.calls == [('/run-aggregation', BODY, f'{JOB}-aggregate', None)]
     assert store.read_status(JOB, SCOPE_ID)['current_task'] == 'The scan of 1 project failed; merging the results of the others...'
     assert all(f['Finding'][0]['Error'] == 'Not checked for 1 project (p-002): the scan crashed on every attempt.' for f in errors)

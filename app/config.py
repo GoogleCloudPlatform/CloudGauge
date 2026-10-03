@@ -80,6 +80,18 @@ QUEUE_MAX_ATTEMPTS = 3
 QUEUE_MIN_BACKOFF_SECONDS = 30
 QUEUE_MAX_BACKOFF_SECONDS = 600
 
+# --- Service Health incidents and Advisory Notifications (the report's briefings) ---
+# The Service Health Incidents briefing lists the incidents updated in the last
+# SERVICE_HEALTH_WINDOW_DAYS whose relevance to a scanned project is one of
+# SERVICE_HEALTH_RELEVANCE (comma-separated; "Impacted" is only computed for some
+# products, so "Related" is included by default). The Advisory Notifications
+# briefing lists the notifications created in the last ADVISORY_WINDOW_DAYS (the
+# API keeps about a year).
+DEFAULT_SERVICE_HEALTH_WINDOW_DAYS = 90
+DEFAULT_SERVICE_HEALTH_RELEVANCE = ("IMPACTED", "RELATED")
+SERVICE_HEALTH_RELEVANCE_VALUES = ("IMPACTED", "RELATED", "PARTIALLY_RELATED", "NOT_IMPACTED", "UNKNOWN")
+DEFAULT_ADVISORY_WINDOW_DAYS = 365
+
 # Configures logging to display INFO level messages with a timestamp.
 LOG_FORMAT = '%(levelname)s: [%(asctime)s] %(message)s'
 LOG_DATEFMT = '%Y-%m-%d %H:%M:%S'
@@ -119,6 +131,18 @@ def _number(env, name, default, cast, minimum=None, maximum=None):
     return value
 
 
+def _relevance(value):
+    """``SERVICE_HEALTH_RELEVANCE`` as a tuple of relevance values (any casing, comma-separated); the default when unset."""
+    values = tuple(dict.fromkeys(v.strip().upper() for v in (value or '').split(',') if v.strip()))
+    if not values:
+        return DEFAULT_SERVICE_HEALTH_RELEVANCE
+    unknown = [v for v in values if v not in SERVICE_HEALTH_RELEVANCE_VALUES]
+    if unknown:
+        raise ValueError(f"SERVICE_HEALTH_RELEVANCE has unknown values {unknown}; expected a comma-separated subset of "
+                         f"{', '.join(SERVICE_HEALTH_RELEVANCE_VALUES)}")
+    return values
+
+
 @dataclass(frozen=True)
 class Settings:
     """Runtime settings. Build them with :meth:`from_env`; they never change afterwards."""
@@ -149,6 +173,10 @@ class Settings:
     sweep_interval_seconds: int = DEFAULT_SWEEP_INTERVAL_SECONDS
     scan_time_limit_seconds: int = 0  # 0: computed per job (app.fanout.job_time_limit_seconds)
     task_max_attempts: int = QUEUE_MAX_ATTEMPTS
+    # Service Health incidents and Advisory Notifications (see the constants above)
+    service_health_window_days: int = DEFAULT_SERVICE_HEALTH_WINDOW_DAYS
+    service_health_relevance: tuple = DEFAULT_SERVICE_HEALTH_RELEVANCE
+    advisory_window_days: int = DEFAULT_ADVISORY_WINDOW_DAYS
     # Synthetic load mode (profile 'synthetic' only; see app.synthetic)
     synthetic_projects: int = 0
     synthetic_seed: int = DEFAULT_SYNTHETIC_SEED
@@ -194,6 +222,9 @@ class Settings:
             sweep_interval_seconds=_number(env, 'SWEEP_INTERVAL_SECONDS', DEFAULT_SWEEP_INTERVAL_SECONDS, int, minimum=60),
             scan_time_limit_seconds=_number(env, 'SCAN_TIME_LIMIT_SECONDS', 0, int, minimum=0),
             task_max_attempts=_number(env, 'TASK_MAX_ATTEMPTS', QUEUE_MAX_ATTEMPTS, int, minimum=1, maximum=100),
+            service_health_window_days=_number(env, 'SERVICE_HEALTH_WINDOW_DAYS', DEFAULT_SERVICE_HEALTH_WINDOW_DAYS, int, minimum=1, maximum=366),
+            service_health_relevance=_relevance(env.get('SERVICE_HEALTH_RELEVANCE')),
+            advisory_window_days=_number(env, 'ADVISORY_WINDOW_DAYS', DEFAULT_ADVISORY_WINDOW_DAYS, int, minimum=1, maximum=3660),
             synthetic_projects=synthetic_projects,
             synthetic_seed=_number(env, 'SYNTHETIC_SEED', DEFAULT_SYNTHETIC_SEED, int),
             synthetic_latency_ms=_number(env, 'SYNTHETIC_LATENCY_MS', DEFAULT_SYNTHETIC_LATENCY_MS, float, minimum=0),

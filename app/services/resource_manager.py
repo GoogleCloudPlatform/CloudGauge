@@ -26,6 +26,12 @@ from app.config import SCOPES
 from app.services import gcp
 
 
+def project_number_of(project_resource):
+    """The number in Asset Search's ``project`` field (``"projects/123"`` -> ``"123"``); ``""`` when absent."""
+    value = str(project_resource or '').strip()
+    return value.split('/')[-1] if value.startswith('projects/') else ''
+
+
 def list_projects_for_scope(scope, scope_id):
     """
     Retrieves a list of all ACTIVE projects within a given scope (org, folder, or project)
@@ -42,7 +48,8 @@ def list_projects_for_scope(scope, scope_id):
             if project.get('lifecycleState') == 'ACTIVE':
                 print(f"✅ Found 1 ACTIVE project.")
                 # Return in the same format as the Asset API for consistency
-                return [{'projectId': project['projectId'], 'displayName': project.get('name', project['projectId'])}]
+                return [{'projectId': project['projectId'], 'displayName': project.get('name', project['projectId']),
+                         'projectNumber': str(project.get('projectNumber') or '')}]
             else:
                 print("⚠️ Project is not ACTIVE.")
                 return []
@@ -76,11 +83,12 @@ def list_projects_for_scope(scope, scope_id):
         # Process the results into the expected format
         all_projects = []
         for resource in response:
-            # The project ID is part of the full resource name
+            # The project ID is part of the full resource name; ``project`` is "projects/<number>"
             project_id = resource.name.split('/')[-1]
             all_projects.append({
                 'projectId': project_id,
-                'displayName': resource.display_name
+                'displayName': resource.display_name,
+                'projectNumber': project_number_of(getattr(resource, 'project', '')),
             })
         
         print(f"✅ Found {len(all_projects)} ACTIVE projects recursively.")

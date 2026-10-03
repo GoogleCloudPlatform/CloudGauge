@@ -264,6 +264,15 @@ def one_project(monkeypatch):
 
 
 BETA_V1_CHECKS = ['check_cloud_sql_security', 'check_vpc_configuration', 'check_storage_ubla', 'check_vm_external_ips']
+# v14: added to the plan after beta v1's checks (Service Health Incidents everywhere; Advisory Notifications
+# read from the organization in an organization scan, per project otherwise) ...
+V14_CHECKS = {'check_service_health_incidents', 'check_org_advisories', 'check_project_advisories'}
+# ... and beta v1's organization-level Personalized Service Health probe, which the per-project check replaces.
+RETIRED_CHECKS = {'check_service_health_status'}
+
+
+def finished_checks(progress_updates):
+    return {p['current_task'].split(' Finished: ')[1] for p in progress_updates}
 
 
 @pytest.mark.parametrize('scope, scope_id', [('organization', '123456789'), ('folder', '42'), ('project', 'web-prod')])
@@ -271,16 +280,22 @@ def test_runner_runs_the_beta_v1_check_plan(scope, scope_id, beta, monkeypatch):
     """Both runners call the same check functions with the same arguments and report the same progress.
 
     The reference is upstream beta v1's ``run_all_checks``: the legacy plan plus four Security checks.
+    The v14 checks come after them in the plan, and beta's retired probe is left out of the comparison.
     """
     zones, regions = ['us-central1-a'], ['us-central1', 'global']
     names = [spec.func.__name__ for spec in registry.build_check_plan(scope, scope_id, JOB_ID, PROJECTS, zones, regions)]
-    assert len(names) == (24 if scope == 'organization' else 18)
+    assert len(names) == (25 if scope == 'organization' else 20)
     # Same order as beta v1's plan lists, which append the four checks after "Service Quota Limits".
     beta_plan = ast.parse(textwrap.dedent(inspect.getsource(beta.run_all_checks)))
-    beta_names = [entry.elts[2].id for node in ast.walk(beta_plan) if isinstance(node, ast.List)
-                  for entry in node.elts if isinstance(entry, ast.Tuple)]
-    assert names == beta_names[:len(names)]
+    beta_lists = [[entry.elts[2].id for entry in node.elts if isinstance(entry, ast.Tuple)]
+                  for node in ast.walk(beta_plan) if isinstance(node, ast.List)]
+    beta_common, beta_org_only = [plan for plan in beta_lists if plan]
+    beta_names = beta_common + (beta_org_only if scope == 'organization' else [])
+    shared = [name for name in names if name not in V14_CHECKS]
+    assert shared == [name for name in beta_names if name not in RETIRED_CHECKS]
     assert names[14:18] == BETA_V1_CHECKS
+    assert names[18] == 'check_service_health_incidents'
+    assert names[-1] == ('check_org_advisories' if scope == 'organization' else 'check_project_advisories')
     calls = {'beta': {}, 'new': {}}
     sink = RecordingSink()
 
@@ -289,8 +304,9 @@ def test_runner_runs_the_beta_v1_check_plan(scope, scope_id, beta, monkeypatch):
             calls[implementation][name] = (args, kwargs)
         return check
 
-    for name in names:
+    for name in beta_common + beta_org_only:
         monkeypatch.setattr(beta, name, recorder('beta', name))
+    for name in names:
         monkeypatch.setattr(registry, name, recorder('new', name))
     for module in (beta, runner):
         monkeypatch.setattr(module, 'list_projects_for_scope', lambda scope, scope_id: PROJECTS)
@@ -300,26 +316,36 @@ def test_runner_runs_the_beta_v1_check_plan(scope, scope_id, beta, monkeypatch):
     assert beta.run_all_checks(scope, scope_id, JOB_ID, progress_callback=lambda **kw: beta_progress.append(kw)) is True
     assert runner.run_all_checks(scope, scope_id, JOB_ID, progress_callback=lambda **kw: progress.append(kw), sink=sink) is True
 
-    assert set(calls['new']) == set(calls['beta']) == set(names)
+    assert set(calls['new']) == set(names)
+    assert set(calls['beta']) == set(beta_names)
     # The two location-based checks take one argument more than in beta v1: the projects whose
     # locations could not be discovered (none here), which they report as not checked.
-    for name in names:
+    for name in shared:
         beta_args, beta_kwargs = calls['beta'][name]
         args, kwargs = calls['new'][name]
         assert (args[:len(beta_args)], beta_kwargs, kwargs) == (beta_args, {}, {'sink': sink}), name
         assert args[len(beta_args):] == (({},) if name in ('run_cost_recommendations', 'run_network_insights') else ()), name
-    # Checks finish in any order, so compare progress as sets of values and messages.
-    assert [p['progress'] for p in progress] == [p['progress'] for p in beta_progress]
-    assert {p['current_task'].split(' Finished: ')[1] for p in progress} == {p['current_task'].split(' Finished: ')[1] for p in beta_progress}
+    for name in names:
+        if name in V14_CHECKS:
+            assert calls['new'][name][1] == {'sink': sink}, name
+    # Checks finish in any order, so compare progress as sets of messages; both runners end their checks at 95%.
+    assert len(progress) == len(names) and len(beta_progress) == len(beta_names)
+    assert progress[-1]['progress'] == beta_progress[-1]['progress'] == 95
+    assert finished_checks(progress) - {registry.SERVICE_HEALTH_CHECK, registry.ADVISORIES_CHECK} == \
+           finished_checks(beta_progress) - {'Personalized Service Health'}
     assert sink.findings == []
 
 
 @pytest.mark.parametrize('scope', ['organization', 'project'])
 def test_check_plan_is_the_legacy_plan_plus_the_beta_v1_checks(scope, legacy):
-    """No legacy check was dropped: the plan is the checks legacy ``run_all_checks`` names, plus the four."""
+    """No legacy check was dropped: the plan is the checks legacy ``run_all_checks`` names, plus the four
+    beta v1 checks and the v14 checks (legacy's Personalized Service Health probe is retired)."""
     names = [spec.func.__name__ for spec in registry.build_check_plan(scope, SCOPE_ID, JOB_ID, PROJECTS, [], ['global'])]
     legacy_names = set(legacy.run_all_checks.__code__.co_names)
-    assert [name for name in names if name not in legacy_names] == BETA_V1_CHECKS
+    advisories = 'check_org_advisories' if scope == 'organization' else 'check_project_advisories'
+    assert [name for name in names if name not in legacy_names] == BETA_V1_CHECKS + ['check_service_health_incidents', advisories]
+    if scope == 'organization':  # the one legacy check the plan no longer runs
+        assert {name for name in legacy_names if name.startswith('check_')} - set(names) == RETIRED_CHECKS
 
 
 def test_runner_passes_location_discovery_failures_to_the_plan(monkeypatch):

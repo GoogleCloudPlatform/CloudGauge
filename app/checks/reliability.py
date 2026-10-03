@@ -17,8 +17,12 @@ Moved from ``cloudgauge.py`` (Phase 2) with mechanical changes only: each
 check takes a keyword-only ``sink`` (a ``GcsResultsStore``) and writes
 through ``sink.write_finding(...)``, and GCP auth and discovery calls go
 through ``app.services.gcp``.
+
+The organization-level "Personalized Service Health" probe that lived here
+(an HTTP GET to see whether the Service Health API answered) is retired in
+v14: ``app.checks.service_health`` reads the incidents of every project and
+reports the projects in which the API is not enabled.
 """
-from google.auth.transport.requests import Request as GoogleAuthRequest
 from google.cloud import asset_v1
 from googleapiclient.errors import HttpError
 
@@ -26,36 +30,23 @@ from app.config import SCOPES
 from app.checks.not_checked import NotChecked
 from app.services import gcp
 
+# The Essential Contacts categories every organization should have someone subscribed to:
+# security incidents, technical issues and outages, legal notices, and account suspension warnings.
+REQUIRED_CONTACT_CATEGORIES = ("SECURITY", "TECHNICAL", "LEGAL", "SUSPENSION")
 
-def check_service_health_status(org_id, job_id, *, sink):
+
+def missing_contact_categories(contacts):
+    """The required categories no contact in ``contacts`` is subscribed to, in required order.
+
+    Every subscription of every contact counts (a contact subscribed to several
+    categories covers them all), and ``ALL`` covers every category.
     """
-    Verifies if the Personalized Service Health API is enabled and accessible.
-
-    Args:
-        org_id (str): The organization ID.
-
-    Returns:
-        list: A list of finding dictionaries indicating the status.
-    """
-    CHECK_NAME = "Personalized Service Health"
-    print(f"❤️‍🩹 [{job_id}] Checking {CHECK_NAME}...")
-    try:
-        credentials, _ = gcp.auth_default(scopes=SCOPES)
-        credentials.refresh(GoogleAuthRequest())
-        headers = {"Authorization": f"Bearer {credentials.token}"}
-        url = f"https://servicehealth.googleapis.com/v1beta/organizations/{org_id}/locations/global/organizationEvents?filter=state=ACTIVE%20category=INCIDENT"
-        response = gcp.http_get(url, headers=headers)
-        if response.status_code == 200:
-            result = {"Check": CHECK_NAME, "Finding": [{"Status": "Enabled"}], "Status": "Compliant"}
-        elif response.status_code == 403:
-            error = response.json().get('error', {}).get('message', 'Permission denied.')
-            result = {"Check": CHECK_NAME, "Finding": [{"Error": error}], "Status": "Error"}
-        else:
-            response.raise_for_status()
-            result = {"Check": CHECK_NAME, "Finding": [{"Status": "Enabled"}], "Status": "Compliant"} # Should not be reached on error
-    except Exception as e:
-        result = {"Check": CHECK_NAME, "Finding": [{"Error": str(e)}], "Status": "Error"}
-    sink.write_finding(job_id, CHECK_NAME.replace(" ", "_"), result)
+    found = set()
+    for contact in contacts:
+        found.update(contact.get('notificationCategorySubscriptions') or [])
+    if "ALL" in found:
+        return []
+    return [category for category in REQUIRED_CONTACT_CATEGORIES if category not in found]
 
 
 def check_essential_contacts(org_id, job_id, *, sink):
@@ -74,13 +65,17 @@ def check_essential_contacts(org_id, job_id, *, sink):
         credentials, _ = gcp.auth_default(scopes=SCOPES)
         service = gcp.api_build('essentialcontacts', 'v1', credentials=credentials)
         contacts = service.organizations().contacts().list(parent=f"organizations/{org_id}").execute().get('contacts', [])
-        found = {c.get('notificationCategorySubscriptions', [])[0] for c in contacts if c.get('notificationCategorySubscriptions')}
-        missing = sorted(list({"SECURITY", "TECHNICAL", "LEGAL"} - found))
-        
+        missing = missing_contact_categories(contacts)
+
         if not missing:
-            result = {"Check": CHECK_NAME, "Finding": [{"Status": "All key contact categories are configured."}], "Status": "Compliant"}
+            result = {"Check": CHECK_NAME, "Finding": [{"Status": f"A contact is subscribed to every key category ({', '.join(REQUIRED_CONTACT_CATEGORIES)})."}], "Status": "Compliant"}
         else:
-            result = {"Check": CHECK_NAME, "Finding": [{"Missing Categories": ", ".join(missing)}], "Status": "Action Required"}
+            result = {"Check": CHECK_NAME, "Finding": [{
+                "Missing Categories": ", ".join(missing),
+                "Issue": "Nobody in the organization receives Google's notifications in these categories.",
+                "Fix": (f"gcloud essential-contacts create --organization={org_id} --email=<address> "
+                        f"--notification-categories={','.join(missing)}"),
+            }], "Status": "Action Required"}
     except HttpError as e:
         if "API has not been used" in str(e) or "service is disabled" in str(e):
              result = {"Check": CHECK_NAME, "Finding": [{"Error": "The Essential Contacts API is not enabled. Please enable it to run this check."}], "Status": "Error"}

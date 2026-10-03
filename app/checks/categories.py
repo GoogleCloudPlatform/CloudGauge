@@ -42,7 +42,7 @@ CATEGORY_MAP = {
 
     # Reliability & Resilience
     "Cloud Storage Versioning": "Reliability & Resilience", "GKE Hygiene": "Reliability & Resilience",
-    "Essential Contacts": "Reliability & Resilience", "Personalized Service Health": "Reliability & Resilience",
+    "Essential Contacts": "Reliability & Resilience",
     "Cloud SQL High Availability": "Reliability & Resilience", "Cloud SQL Automated Backups": "Reliability & Resilience",
     "Cloud SQL Backup Retention": "Reliability & Resilience", "Cloud SQL PITR": "Reliability & Resilience",
     "MIG Resilience (Zonal)": "Reliability & Resilience", "Disk Snapshot Resilience": "Reliability & Resilience",
@@ -77,6 +77,12 @@ CATEGORY_MAP = {
     "Miscellaneous Checks": "Operational Excellence & Observability",
     "Service Quota Limits": "Operational Excellence & Observability",
     "Organization Audit Logging": "Operational Excellence & Observability",
+
+    # v14: the briefings (always Informational; outside the score) and their scored companions.
+    "Service Health Incidents": "Reliability & Resilience",
+    "Personalized Service Health API Coverage": "Reliability & Resilience",
+    "Advisory Notifications": "Security & Identity",
+    "Advisory Notifications Settings": "Security & Identity",
 }
 
 
@@ -129,6 +135,11 @@ def merge_shard_findings(findings):
     was) and are never shared with the input (the join copies the rows). A
     single shard's findings pass through unchanged. Records that carry their
     own ``"Category"`` (``"Projects not checked"``) join only within it.
+
+    Rows that describe the same thing from several shards are then folded
+    (``ROW_FOLDS``): an incident is listed by every project it impacted, so the
+    Service Health Incidents rows of one incident become one row naming all the
+    projects, as in one scan.
     """
     checks_with_findings = {f.get("Check") for f in findings if f.get("Status") != "Compliant"}
     merged, by_key, seen = [], {}, set()
@@ -149,4 +160,114 @@ def merge_shard_findings(findings):
             finding = {**finding, "Finding": list(rows)}
             by_key.setdefault(key, finding)
         merged.append(finding)
+    for finding in merged:
+        fold = ROW_FOLDS.get(finding.get("Check"))
+        if fold and isinstance(finding.get("Finding"), list):
+            finding["Finding"] = fold(finding["Finding"])
     return merged
+
+
+# --- Briefing rows folded across projects and shards -------------------------------------
+# The briefings (Service Health Incidents, Advisory Notifications) list one row per incident
+# or notification, naming every project it reached. A shard only sees its own projects, so
+# the same incident comes back from several shards; the folds below rebuild one row from
+# them, as a single scan would have written. When a briefing has nothing in its window the
+# check writes one note row instead (``{"Summary": ...}``); a note from one shard is dropped
+# when another shard had rows, and kept once when none did.
+# The checks (app.checks.service_health, app.checks.advisories) write these columns.
+INCIDENT_ID = "Incident ID"
+INCIDENT_STATE = "State"
+INCIDENT_STARTED = "Started"
+INCIDENT_PROJECT_COUNT = "Impacted projects"
+INCIDENT_PROJECTS = "Project IDs"
+INCIDENT_RELEVANCE = "Relevance"
+ACTIVE_INCIDENT = "Active"
+# Highest first; a folded row shows the highest relevance any of its projects had.
+RELEVANCE_ORDER = ("Impacted", "Related", "Partially related", "Unknown", "Not impacted")
+ADVISORY_DATE = "Date"
+ADVISORY_TYPE = "Type"
+ADVISORY_SUBJECT = "Subject"
+ADVISORY_PROJECTS = "Projects"  # folder/project scans only; an organization's notifications have no project
+
+
+def _split_list(text):
+    return [part.strip() for part in str(text or "").split(",") if part.strip()]
+
+
+def _union(*texts):
+    return ", ".join(dict.fromkeys(part for text in texts for part in _split_list(text)))
+
+
+def _fold(rows, key_of, merge):
+    """Rows with the same ``key_of(row)`` become one (``merge(kept, row)`` in place); rows without a key are the notes."""
+    folded, order, notes = {}, [], []
+    for row in rows:
+        key = key_of(row)
+        if not key:
+            notes.append(dict(row))
+        elif key in folded:
+            merge(folded[key], row)
+        else:
+            folded[key] = dict(row)
+            order.append(key)
+    return [folded[key] for key in order], notes
+
+
+def is_active_incident(row):
+    """Whether an incident row is active (its state is "Active" or "Active (confirmed)" and the like)."""
+    return str(row.get(INCIDENT_STATE) or "").startswith(ACTIVE_INCIDENT)
+
+
+def _merge_locations(kept, other):
+    """The union of two location texts, unless one is already a truncated "N locations: ..." (keep the larger)."""
+    truncated = [text for text in (kept, other) if " locations: " in str(text or "")]
+    if truncated:
+        return max(truncated, key=lambda text: int(str(text).split(" locations: ")[0] or 0))
+    return _union(kept, other)
+
+
+def fold_incident_rows(rows):
+    """Folds rows with the same incident ID into one: the union of their projects, products and locations,
+    the highest relevance, active if any part was active. Active incidents come first, then the most recent."""
+    def merge(kept, row):
+        kept[INCIDENT_PROJECTS] = _union(kept.get(INCIDENT_PROJECTS), row.get(INCIDENT_PROJECTS))
+        kept[INCIDENT_PROJECT_COUNT] = len(_split_list(kept[INCIDENT_PROJECTS]))
+        if "Products" in kept or "Products" in row:
+            kept["Products"] = _union(kept.get("Products"), row.get("Products"))
+        if "Locations" in kept or "Locations" in row:
+            kept["Locations"] = _merge_locations(kept.get("Locations"), row.get("Locations"))
+        if is_active_incident(row) and not is_active_incident(kept):
+            kept[INCIDENT_STATE] = row[INCIDENT_STATE]
+            kept["Ended"] = row.get("Ended", "")
+        relevances = _split_list(kept.get(INCIDENT_RELEVANCE)) + _split_list(row.get(INCIDENT_RELEVANCE))
+        kept[INCIDENT_RELEVANCE] = min(relevances, key=lambda r: RELEVANCE_ORDER.index(r) if r in RELEVANCE_ORDER else len(RELEVANCE_ORDER))
+
+    folded, notes = _fold(rows, lambda row: row.get(INCIDENT_ID), merge)
+    return sort_incident_rows(folded) if folded else notes[:1]
+
+
+def sort_incident_rows(rows):
+    """Active incidents first, then by start time, newest first."""
+    active = [r for r in rows if is_active_incident(r)]
+    closed = [r for r in rows if not is_active_incident(r)]
+    active.sort(key=lambda r: str(r.get(INCIDENT_STARTED) or ""), reverse=True)
+    closed.sort(key=lambda r: str(r.get(INCIDENT_STARTED) or ""), reverse=True)
+    return active + closed
+
+
+def fold_advisory_rows(rows):
+    """Folds the rows of one notification (same type, subject and date) into one naming every project; newest first."""
+    def merge(kept, row):
+        if ADVISORY_PROJECTS in kept or ADVISORY_PROJECTS in row:
+            kept[ADVISORY_PROJECTS] = _union(kept.get(ADVISORY_PROJECTS), row.get(ADVISORY_PROJECTS))
+
+    def key_of(row):
+        key = tuple(row.get(column) for column in (ADVISORY_TYPE, ADVISORY_SUBJECT, ADVISORY_DATE))
+        return key if all(key) else None
+
+    folded, notes = _fold(rows, key_of, merge)
+    folded.sort(key=lambda r: str(r.get(ADVISORY_DATE) or ""), reverse=True)
+    return folded if folded else notes[:1]
+
+
+ROW_FOLDS = {"Service Health Incidents": fold_incident_rows, "Advisory Notifications": fold_advisory_rows}

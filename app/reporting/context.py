@@ -74,8 +74,10 @@ PROJECT_COLUMNS = ("project", "project id", "project_id")
 # The noun of a check's summary line, by status ("finding" otherwise)...
 SUMMARY_NOUNS = {"Error": "error", "Informational": "entry"}
 # ...or by check name: the projects a check could not cover (app.checks.not_checked)
-# are listed as "12 skipped checks across 4 of 1,000 projects".
-SUMMARY_NOUNS_BY_CHECK = {"Projects not checked": "skipped check"}
+# are listed as "12 skipped checks across 4 of 1,000 projects"; the briefings count
+# what they list ("12 incidents", "6 notifications").
+SUMMARY_NOUNS_BY_CHECK = {"Projects not checked": "skipped check", "Service Health Incidents": "incident",
+                          "Advisory Notifications": "notification"}
 
 
 @dataclass(frozen=True)

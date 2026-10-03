@@ -28,6 +28,7 @@ Final results are delivered as an interactive **HTML report** and a **CSV file**
 * [Load Testing with a Synthetic Organization](#load-testing-with-a-synthetic-organization)
 * [Troubleshooting](#troubleshooting)
 * [Cleanup Script](#cleanup-script)
+* [Release Notes & Roadmap](./RELEASE_NOTES.md)
 * [License & Support](#license--support)
 
 ## **Features**
@@ -47,6 +48,8 @@ CloudGauge scans your organization across several key domains, modeled after the
 * **VPC Configuration**: Detects projects still using the `default` VPC network and subnets without Private Google Access.
 * **GCS Uniform Bucket-Level Access**: Finds buckets without Uniform Bucket-Level Access (UBLA) enabled.
 * **VM External IPs**: Finds VM instances with external IP addresses.
+* **Advisory Notifications** *(briefing)*: Lists Google's Mandatory Service Announcements, Security & Privacy Advisories, Threat Horizons reports and sensitive-action digests for the scanned scope (the organization, or each project of a folder/project scan) from the last 365 days, one table with a `Type` column, affected resources and (for digests) the actions and actors. Always *Informational*: these are Google's messages, not the customer's posture.
+* **Advisory Notifications Settings**: Flags a scope in which a notification type is turned off (*Action Required*), and reports when the scanner cannot read the notifications or the settings (*Error*; see the [prerequisites](#common-prerequisites-required-for-all-methods)).
 
 ### **Cost Optimization**
 
@@ -56,8 +59,9 @@ CloudGauge scans your organization across several key domains, modeled after the
 
 ### **Reliability & Resilience**
 
-* **Essential Contacts**: Ensures contacts are configured for `SECURITY`, `TECHNICAL`, and `LEGAL` categories.
-* **Service Health**: Verifies that the Personalized Service Health API is enabled.
+* **Essential Contacts**: Ensures a contact is subscribed to the `SECURITY`, `TECHNICAL`, `LEGAL` and `SUSPENSION` categories (a contact subscribed to `ALL` covers them all).
+* **Service Health Incidents** *(briefing)*: The Google Cloud incidents that were *Impacted* or *Related* to the scanned projects in the last 90 days, from Personalized Service Health, one row per incident naming every project it touched (active incidents first). Always *Informational*. The relevance and window are configurable (`SERVICE_HEALTH_RELEVANCE`, `SERVICE_HEALTH_WINDOW_DAYS`).
+* **Personalized Service Health API Coverage**: Flags every project in which the Service Health API is not enabled (*Action Required*): such a project has no personalized incident view, alerts or relevance.
 * **Cloud SQL Resilience**: Checks for High Availability (HA) configuration, automated backups, and Point-in-Time Recovery (PITR).
 * **GCS Versioning**: Finds buckets without object versioning enabled.
 * **GKE Hygiene**: Checks for clusters not on a release channel and node pools with auto-upgrade disabled.
@@ -86,7 +90,7 @@ The application follows a robust, scalable, and asynchronous "fire-and-forget" p
 2.  **Task Creation**: The `/scan` endpoint creates a **Cloud Task** with the scan details and redirects the user to a status page.
 3.  **Background Worker**: Cloud Tasks securely invokes the `/run-scan` endpoint in the background. The worker lists the projects in scope and decides:
     * **Up to `SCAN_SHARD_SIZE` projects (default 20)**: it runs the whole scan in this one request, exactly as before.
-    * **More projects**: it becomes a **dispatcher**. It writes the job's *manifest* (which projects belong to which shard), enqueues one `/scan-shard` task per shard of `SCAN_SHARD_SIZE` projects plus one **scope shard** for the checks that look at the organization itself (Organization Policies, org IAM, SCC, audit logging, Essential Contacts, ...), schedules a *sweeper*, and returns within seconds.
+    * **More projects**: it becomes a **dispatcher**. It writes the job's *manifest* (which projects belong to which shard), enqueues one `/scan-shard` task per shard of `SCAN_SHARD_SIZE` projects plus one **scope shard** for the checks that look at the organization itself (Organization Policies, org IAM, SCC, audit logging, Essential Contacts, the organization's Advisory Notifications, ...), schedules a *sweeper*, and returns within seconds.
 4.  **Parallel Processing**: Each shard executes its checks concurrently using a thread pool (`app/checks/runner.py`) under a time budget (`SHARD_TIME_BUDGET_SECONDS`). Every finding is written to an intermediate file in GCS as soon as it is found. Cloud Tasks runs up to `SCAN_MAX_CONCURRENT_SHARDS` shards at a time and retries a failed shard; a shard that fails on its last attempt records its checks as error rows so one bad shard never costs the whole report.
 5.  **Automatic Fan-in**: When a shard finishes it writes a *marker* file. The shard that sees a marker for every shard enqueues the `/run-aggregation` task. The task name is deterministic (`<job>-aggregate`), so when two shards finish together Cloud Tasks accepts only one; nothing is counted, nothing needs a database. The `/sweep` task runs every `SWEEP_INTERVAL_SECONDS` as a safety net: it gives shards whose task has vanished error rows and finishes the job, so a scan always terminates.
 6.  **Report Storage**: The aggregation merges the shards' findings into the same report a single-task scan produces (one item per check, with a **coverage** line stating how many projects were scanned), generates the HTML/CSV reports, uploads them to Google Cloud Storage, and deletes the intermediate files.
@@ -191,6 +195,7 @@ A report for 1,000 projects can hold tens of thousands of finding rows. The HTML
 * **Paged, sortable, filterable tables.** Tables show 50 rows at a time ("Show 50 more" / "Show all"), any column header sorts, and the filter box at the top of each category page keeps only the rows (and checks) that mention a project ID, bucket name, or any other text (the Overview has no findings to filter, so it shows only the CSV link). Everything is inline, vanilla JavaScript: the report stays a single self-contained file.
 * **No blank pages.** Every category has a page, whatever the scan found. A category none of whose checks reported anything says "No findings in this category — all Cost Optimization checks were compliant" (its score is 100%), and a page whose checks are all hidden by the filter says so and how many matching checks are on other pages. A check that fails outright is listed as an error in its category, and a check that could not cover some projects says so (next bullet), so an empty category is one whose checks all ran everywhere and found nothing.
 * **"Projects not checked" instead of silent passes.** A per-project check skips a project whose API call fails (a missing role, a disabled API, a quota, a transient error) rather than stop the scan. Those skips are not silent: each category page lists at most one **Projects not checked** item, with status Error, holding a `Project | Skipped check | Reason` table of every project a check of that category could not cover and the API's message (filterable by project ID like any other table; the CSV has the same rows). A project in which the API that owns the resources is not enabled (no Compute Engine API, so no firewall rules or VMs) has nothing to check and is left out; a disabled Recommender or Monitoring API is reported, since the project may well have the resources. Cost-Saving Recommendations and Network Insights are queried at the zones and regions discovered from the scanned projects' compute resources, so a project whose discovery failed is reported too: "all 8 recommenders: no zones or regions were discovered to query" when nothing could be queried for it, or "queried only in zones and regions found in other projects" when it was. When the item is present, a Compliant check on that page is compliant for the projects it could read; the projects in this table were not looked at by the check named next to them.
+* **Briefings: Google's messages, outside the score.** Two items are *briefings* rather than checks: **Service Health Incidents** (Reliability) and **Advisory Notifications** (Security). They list what Google told the customer — incidents that touched the scanned projects, Mandatory Service Announcements, advisories, sensitive-action digests — and are always *Informational*: they never count as compliant or non-compliant and do not move a category's score. Each is one table for the whole scan, one row per incident or notification naming every project it concerns (never one row per project), newest and active first. What *is* scored is whether the customer can receive these messages at all: **Personalized Service Health API Coverage** (a project without the Service Health API) and **Advisory Notifications Settings** (a notification type turned off, or settings the scanner cannot read).
 * **Bounded page size.** A table holds at most 2,000 rows in the page; a note under it says how many were left out and links to the complete list. The CSV report always has every row and can be downloaded at any time from `/report/<job_id>/<scope_id>/csv` (the signed link on the status page expires after an hour; the toolbar link in the report does not).
 * **Bounded prompts.** The AI executive summary is generated from at most 25 rows per check (plus the row counts), and a remediation prompt from the first 25 rows of a finding, so Gemini calls stay within their input limits however large the scan.
 
@@ -216,7 +221,9 @@ app/
 ├── checks/              # Checks grouped by pillar: security, cost, reliability, operations, network
 │   ├── registry.py      #   The check plan: which checks run, and in what order
 │   ├── runner.py        #   Runs the plan concurrently (ThreadPoolExecutor) and reports progress
-│   ├── categories.py    #   Maps check names to report categories
+│   ├── categories.py    #   Maps check names to report categories; folds briefing rows across shards
+│   ├── service_health.py#   Service Health Incidents briefing + Personalized Service Health API Coverage (v14)
+│   ├── advisories.py    #   Advisory Notifications briefing + Advisory Notifications Settings (v14)
 │   └── not_checked.py   #   The projects a check could not cover, reported as "Projects not checked"
 ├── services/            # GCP clients, Cloud Tasks, GCS results store, Gemini, insights, org policies
 ├── reporting/           # HTML and CSV report builders
@@ -255,6 +262,7 @@ Follow the **Common Prerequisites** first, then choose **Method 1** or **Method 
        recommender.googleapis.com \
        securitycenter.googleapis.com \
        servicehealth.googleapis.com \
+       advisorynotifications.googleapis.com \
        essentialcontacts.googleapis.com \
        compute.googleapis.com \
        container.googleapis.com \
@@ -265,6 +273,8 @@ Follow the **Common Prerequisites** first, then choose **Method 1** or **Method 
        aiplatform.googleapis.com \
        cloudasset.googleapis.com
    ```
+
+   > The Service Health and Advisory Notifications APIs must be enabled in the project CloudGauge runs in: the scanner calls them on behalf of every scanned project, and the report says so (as an *Error* on the two Service Health / Advisory Notifications items) if either is missing. The **Personalized Service Health API Coverage** check additionally lists the *scanned* projects in which `servicehealth.googleapis.com` is not enabled.
    
 
 2. **Create Service Account & Grant Permissions**:  
@@ -318,6 +328,21 @@ Follow the **Common Prerequisites** first, then choose **Method 1** or **Method 
    gcloud organizations add-iam-policy-binding ${ORG_ID} --member="serviceAccount:${SA_EMAIL}" --role="roles/securitycenter.settingsViewer"
 
    gcloud organizations add-iam-policy-binding ${ORG_ID} --member="serviceAccount:${SA_EMAIL}" --role="roles/iam.securityReviewer"
+
+   
+
+   # 1b. Advisory Notifications (v14): a custom org role that can list the notifications AND read the
+   #     notification settings. The predefined roles/advisorynotifications.viewer cannot read the settings,
+   #     and the admin role can change them; this role is read-only. The same role covers the per-project
+   #     reads of a folder or project scan (roles granted on the organization are inherited).
+
+   gcloud iam roles create CloudGaugeAdvisoryViewer --organization=${ORG_ID} \
+       --title="CloudGauge Advisory Notifications Viewer" \
+       --description="Read-only access to Advisory Notifications and their settings for CloudGauge scans" \
+       --permissions=advisorynotifications.notifications.list,advisorynotifications.notifications.get,advisorynotifications.settings.get \
+       --stage=GA
+
+   gcloud organizations add-iam-policy-binding ${ORG_ID} --member="serviceAccount:${SA_EMAIL}" --role="organizations/${ORG_ID}/roles/CloudGaugeAdvisoryViewer"
 
    
 
@@ -502,6 +527,9 @@ CloudGauge is configured entirely through environment variables on the Cloud Run
 | `WORKER_URL` | No | auto-discovered | URL that Cloud Tasks calls for `/run-scan`. By default the service discovers its own URL at startup (needs `roles/run.viewer`). Set it to override discovery, for example for a tagged canary revision. |
 | `WORKER_AUDIENCE` | No | the task URL | Audience of the OIDC token on scan tasks. Leave unset normally. For a canary, set it to the service's **main** URL: Cloud Run rejects tokens whose audience is a revision tag URL (HTTP 401). |
 | `BEST_PRACTICES_CSV_URL` | No | GitHub-hosted CSV | Source of the best-practice list used by the Organization Policies check. |
+| `SERVICE_HEALTH_WINDOW_DAYS` | No | `90` | How far back the **Service Health Incidents** briefing looks (1–366 days). |
+| `SERVICE_HEALTH_RELEVANCE` | No | `IMPACTED,RELATED` | Which Personalized Service Health relevance levels the briefing lists, comma-separated: `IMPACTED`, `RELATED`, `PARTIALLY_RELATED`, `NOT_IMPACTED`, `UNKNOWN`. Add `PARTIALLY_RELATED` for a wider view. |
+| `ADVISORY_WINDOW_DAYS` | No | `365` | How far back the **Advisory Notifications** briefing looks (1–3660 days). |
 | `SCAN_SHARD_SIZE` | No | `20` | Projects per shard. A scope with more projects than this runs as a sharded scan (see [Scaling to Large Organizations](#scaling-to-large-organizations)); up to this many, in one task as before. |
 | `SCAN_MAX_CONCURRENT_SHARDS` | No | `25` | Shards Cloud Tasks runs at a time (the queue's max concurrent dispatches). Lower it if the organization's API quotas are tight, raise it for speed. |
 | `SHARD_TIME_BUDGET_SECONDS` | No | `1200` | Time a shard gives its checks (60–1800). Checks still running when it runs out are reported as errors for that shard. |
@@ -895,6 +923,10 @@ gcloud organizations remove-iam-policy-binding ${YOUR_ORG_ID} --member="serviceA
 gcloud organizations remove-iam-policy-binding ${YOUR_ORG_ID} --member="serviceAccount:${SA_EMAIL}" --role="roles/iam.securityReviewer" --quiet
 gcloud organizations remove-iam-policy-binding ${YOUR_ORG_ID} --member="serviceAccount:${SA_EMAIL}" --role="roles/recommender.organizationViewer" --quiet
 gcloud organizations remove-iam-policy-binding ${YOUR_ORG_ID} --member="serviceAccount:${SA_EMAIL}" --role="roles/cloudasset.viewer" --quiet
+
+# The custom Advisory Notifications role (v14): unbind it, then delete it
+gcloud organizations remove-iam-policy-binding ${YOUR_ORG_ID} --member="serviceAccount:${SA_EMAIL}" --role="organizations/${YOUR_ORG_ID}/roles/CloudGaugeAdvisoryViewer" --quiet
+gcloud iam roles delete CloudGaugeAdvisoryViewer --organization=${YOUR_ORG_ID} --quiet
 
 # Project-level roles
 gcloud projects remove-iam-policy-binding ${PROJECT_ID} --member="serviceAccount:${SA_EMAIL}" --role="roles/cloudtasks.admin" --quiet

@@ -18,13 +18,14 @@ optional 429s, and call metrics.
 Installed through ``app.services.gcp.install_provider``. It stands in for:
 
 - Discovery clients (``gcp.api_build``): Resource Manager, Compute, IAM, SQL
-  Admin, GKE, Recommender (REST), Monitoring, Logging, SCC, Essential Contacts
-  and Org Policy calls. Unknown methods answer ``{}`` and are counted, so a new
-  check degrades to "nothing found" instead of failing. The Cloud Run Admin API
-  (``run``) is passed through to the real library: it is infrastructure (worker
-  URL discovery), not scan data.
+  Admin, GKE, Recommender (REST), Monitoring, Logging, SCC, Essential Contacts,
+  Advisory Notifications and Org Policy calls. Unknown methods answer ``{}`` and
+  are counted, so a new check degrades to "nothing found" instead of failing.
+  The Cloud Run Admin API (``run``) is passed through to the real library: it
+  is infrastructure (worker URL discovery), not scan data.
 - Cloud Asset Inventory, Recommender (gRPC), OS Config, per-project Storage and
-  the two plain HTTP GETs.
+  the plain HTTP GETs: the best-practices CSV and the Service Health events of a
+  project (``servicehealth.googleapis.com/v1/projects/{id}/locations/global/events``).
 
 Every API call goes through :meth:`SyntheticGcp.call`, which records it,
 raises for denied projects or an injected 429, then sleeps for a log-normal
@@ -36,6 +37,7 @@ import json
 import logging
 import math
 import random
+import re
 import threading
 import time
 from collections import Counter
@@ -52,13 +54,14 @@ from googleapiclient.errors import HttpError
 
 from app.checks.cost import COST_RECOMMENDERS
 from app.checks.network import NETWORK_INSIGHT_TYPES
-from app.synthetic.world import BEST_PRACTICES_CSV, HOST_PROJECT, QUOTA_METRICS, REGIONS, SyntheticOrg
+from app.synthetic.world import (ADVISORY_TYPES, BEST_PRACTICES_CSV, HOST_PROJECT, INCIDENTS, ORG_ADVISORIES, PROJECT_ADVISORY,
+                                 QUOTA_METRICS, REGIONS, SyntheticOrg)
 
 # Median latency of each API relative to ``latency_ms``.
 API_LATENCY_SCALE = {
     "cloudresourcemanager": 0.8, "compute": 1.0, "iam": 1.0, "sqladmin": 1.2, "container": 1.5,
     "recommender": 1.6, "monitoring": 1.2, "logging": 1.0, "securitycenter": 1.0, "essentialcontacts": 1.0,
-    "asset": 2.0, "osconfig": 0.8, "storage": 0.8, "http": 1.0,
+    "asset": 2.0, "osconfig": 0.8, "storage": 0.8, "http": 1.0, "servicehealth": 1.2, "advisorynotifications": 1.0,
 }
 LATENCY_SIGMA = 0.45  # log-normal spread: p95 is about 2x the median
 PASSTHROUGH_SERVICES = ("run",)  # infrastructure APIs the synthetic provider never fakes
@@ -242,9 +245,41 @@ class SyntheticGcp:
         return _OsConfigStub(self)
 
     def http_get(self, url, **kwargs):
+        if "servicehealth.googleapis.com/" in url:
+            return self._service_health_events(url, kwargs.get("params") or {})
         self.call("http", "GET", style="http")
         text = BEST_PRACTICES_CSV if url.lower().endswith(".csv") else "{}"
         return _HttpResponse(200, text)
+
+    def _service_health_events(self, url, params):
+        """``GET .../v1/projects/{id}/locations/global/events``: the project's view of the organization's incidents."""
+        project_id = _project_of(url.split("?")[0])
+        try:
+            self.call("servicehealth", "events.list", project_id=project_id, style="http")
+        except HttpError as e:  # a denied project or an injected 429, as requests would deliver it
+            return _HttpResponse(e.resp.status, e.content.decode() if isinstance(e.content, bytes) else str(e.content))
+        profile = self.world.project(project_id)
+        if profile.servicehealth_disabled:
+            message = (f"Service Health API has not been used in project {project_id} before or it is disabled. Enable it by visiting "
+                       f"https://console.developers.google.com/apis/api/servicehealth.googleapis.com/overview?project={project_id} then retry.")
+            return _HttpResponse(403, json.dumps({"error": {"code": 403, "message": message, "status": "PERMISSION_DENIED"}}))
+        match = re.search(r'update_time\s*>=\s*"([^"]+)"', str(params.get("filter", "")))
+        since = match.group(1) if match else ""
+        events = []
+        for incident_id, title, product, location, state, started, ended in INCIDENTS:
+            relevance = profile.incident_relevance.get(incident_id)
+            updated = _iso(ended if ended is not None else 0)
+            if relevance is None or updated < since:
+                continue
+            events.append({
+                "name": f"projects/{project_id}/locations/global/events/{incident_id}", "title": title,
+                "category": "INCIDENT", "detailedCategory": "CONFIRMED_INCIDENT", "state": state,
+                "detailedState": "CONFIRMED" if state == "ACTIVE" else "RESOLVED", "relevance": relevance,
+                "eventImpacts": [{"product": {"productName": product, "id": product.lower().replace(" ", "-")},
+                                  "location": {"locationName": location}}],
+                "updateTime": updated, "startTime": _iso(started), **({"endTime": _iso(ended)} if ended is not None else {}),
+            })
+        return _HttpResponse(200, json.dumps({"events": events}))
 
     # --- Discovery API handlers: "service.resource.method" -> response dict ---
 
@@ -260,6 +295,8 @@ class SyntheticGcp:
                     break
         if project_id is None and "resource" in kwargs and not str(kwargs["resource"]).count("/"):
             project_id = kwargs["resource"]
+        if project_id is not None and str(project_id).isdigit():  # addressed by number (Advisory Notifications)
+            project_id = self.world.project_id_for_number(project_id) or project_id
         if project_id == HOST_PROJECT:
             project_id = None
         if handler is None:
@@ -277,7 +314,7 @@ class SyntheticGcp:
         if profile is None:
             raise _http_error(404, f"Project {kw['projectId']} not found")
         return {"projectId": profile.project_id, "name": profile.display_name, "lifecycleState": "ACTIVE",
-                "projectNumber": str(300000000000 + profile.index)}
+                "projectNumber": profile.project_number}
 
     def _h_cloudresourcemanager_projects_getIamPolicy(self, kw, project_id):
         self.call("cloudresourcemanager", "projects.getIamPolicy", project_id=project_id, style="http")
@@ -428,6 +465,42 @@ class SyntheticGcp:
         return {"contacts": [{"email": "security@example.com", "notificationCategorySubscriptions": ["SECURITY"]},
                              {"email": "ops@example.com", "notificationCategorySubscriptions": ["TECHNICAL"]}]}
 
+    # --- Advisory Notifications ---
+
+    @staticmethod
+    def _notification(parent, index, advisory):
+        kind, subject, days_ago, body, attachments = advisory
+        return {
+            "name": f"{parent}/notifications/syn-notification-{index}", "notificationType": kind, "createTime": _iso(days_ago),
+            "subject": {"text": {"enText": subject, "localizedText": subject, "localizationState": "LOCALIZATION_STATE_NOT_APPLICABLE"}},
+            "messages": [{
+                "createTime": _iso(days_ago), "localizationTime": _iso(days_ago),
+                "body": {"text": {"enText": body, "localizedText": body, "localizationState": "LOCALIZATION_STATE_NOT_APPLICABLE"}},
+                "attachments": [{"displayName": name, "csv": {"headers": list(headers), "dataRows": [{"entries": list(row)} for row in rows]}}
+                                for name, headers, rows in attachments],
+            }],
+        }
+
+    def _h_advisorynotifications_organizations_locations_notifications_list(self, kw, project_id):
+        self.call("advisorynotifications", "notifications.list(organization)", style="http")
+        parent = kw["parent"]
+        return {"notifications": [self._notification(parent, i, advisory) for i, advisory in enumerate(ORG_ADVISORIES)]}
+
+    def _h_advisorynotifications_organizations_locations_getSettings(self, kw, project_id):
+        self.call("advisorynotifications", "getSettings(organization)", style="http")
+        return {"name": kw["name"], "etag": "synthetic", "notificationSettings": {kind: {"enabled": True} for kind in ADVISORY_TYPES}}
+
+    def _h_advisorynotifications_projects_locations_notifications_list(self, kw, project_id):
+        self.call("advisorynotifications", "notifications.list(project)", project_id=project_id, style="http")
+        profile = self.world.project(project_id)
+        return {"notifications": [self._notification(kw["parent"], 0, PROJECT_ADVISORY)] if profile.has_project_advisory else []}
+
+    def _h_advisorynotifications_projects_locations_getSettings(self, kw, project_id):
+        self.call("advisorynotifications", "getSettings(project)", project_id=project_id, style="http")
+        profile = self.world.project(project_id)
+        return {"name": kw["name"], "etag": "synthetic",
+                "notificationSettings": {kind: {"enabled": kind not in profile.advisory_types_disabled} for kind in ADVISORY_TYPES}}
+
     # --- Asset Inventory ---
 
     def search_all_resources(self, request):
@@ -440,7 +513,7 @@ class SyntheticGcp:
                         for i, fid in enumerate(self.world.folder_ids)]
         if "cloudresourcemanager.googleapis.com/Project" in asset_types:
             results += [SimpleNamespace(name=f"//cloudresourcemanager.googleapis.com/projects/{p.project_id}", display_name=p.display_name,
-                                        asset_type="cloudresourcemanager.googleapis.com/Project", project=f"projects/{p.project_id}")
+                                        asset_type="cloudresourcemanager.googleapis.com/Project", project=f"projects/{p.project_number}")
                         for p in self.world.projects(folder_id)]
         self.call("asset", "searchAllResources", pages=max(1, math.ceil(len(results) / PAGE_SIZE)))
         return results

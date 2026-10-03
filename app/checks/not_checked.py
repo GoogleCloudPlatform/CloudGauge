@@ -120,6 +120,29 @@ def is_api_disabled(error):
     return disabled_api(error) is not None
 
 
+# "in project <id> before", "?project=<id> then retry": the project an API error is about.
+_PROJECT_MENTION = re.compile(r"\bproject[ =]([a-z][a-z0-9:.-]*[a-z0-9]|\d+)")
+
+
+def mentioned_projects(error):
+    """The project IDs or numbers an API error message names (``set()`` when it names none)."""
+    return set(_PROJECT_MENTION.findall(str(error)))
+
+
+def disabled_api_elsewhere(error, project_id, project_number=""):
+    """Whether ``error`` says an API is disabled in a project *other than* ``project_id``.
+
+    A per-project API (Service Health, Advisory Notifications) can also be
+    disabled in the scanner's own project, in which case the message names that
+    project and the same error would stop every project of the scan: the check
+    reports it once as its own Error rather than as one skipped project per row.
+    """
+    if disabled_api(error) is None:
+        return False
+    named = mentioned_projects(error)
+    return bool(named) and not (named & {str(project_id), str(project_number or "")})
+
+
 def is_request_error(error):
     """Whether ``error`` is about the request, not about access to the project.
 

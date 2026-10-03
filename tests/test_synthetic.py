@@ -230,10 +230,13 @@ def test_organization_scan_covers_every_section_and_org_check(gcp):
     for section_id in SECTION_IDS:
         assert f'id="{section_id}-section"' in html
     for check in ('Organization Policies', 'Critical Org-Level Roles', 'Security Command Center Status', 'Organization Log Sink',
-                  'Essential Contacts', 'MIG Resilience (Zonal)', 'Personalized Service Health', 'Unattended Projects',
-                  'VM Rightsizing', 'VPC IP Address Utilization', 'Quota Utilization (&gt;80%)', 'OS Config Agent Coverage'):
+                  'Essential Contacts', 'MIG Resilience (Zonal)', 'Unattended Projects',
+                  'VM Rightsizing', 'VPC IP Address Utilization', 'Quota Utilization (&gt;80%)', 'OS Config Agent Coverage',
+                  # v14: the briefings and the scored checks behind them
+                  'Service Health Incidents', 'Personalized Service Health API Coverage',
+                  'Advisory Notifications', 'Advisory Notifications Settings'):
         assert check in html, check
-    assert 'Action Required' in html and 'Compliant' in html
+    assert 'Action Required' in html and 'Compliant' in html and 'Informational' in html
 
 
 def test_denied_projects_and_quota_errors_do_not_break_the_scan(gcp):

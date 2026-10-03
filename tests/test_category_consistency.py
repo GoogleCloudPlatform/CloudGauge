@@ -63,11 +63,24 @@ def _string_constants(func):
     return constants
 
 
+def _module_constants(tree):
+    """``NAME = "literal"`` assignments at the top level of the module (e.g. ``INCIDENTS_CHECK``)."""
+    constants = {}
+    for node in tree.body:
+        if (isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant)
+                and isinstance(node.value.value, str)):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    constants[target.id] = node.value.value
+    return constants
+
+
 def emitted_check_names():
     """``{name: [locations]}`` for every "Check" value the check modules can write."""
     names, unresolved = {}, []
     for path in sorted(CHECKS_DIR.glob('*.py')):
         tree = ast.parse(path.read_text(), filename=str(path))
+        module_constants = _module_constants(tree)
         for func, value in _check_values(tree):
             where = f'{path.name}:{value.lineno} ({func.name})'
             if isinstance(value, ast.Constant) and isinstance(value.value, str):
@@ -77,6 +90,8 @@ def emitted_check_names():
             elif isinstance(value, ast.Name) and (path.name, value.id) in DYNAMIC_NAMES:
                 for name in DYNAMIC_NAMES[(path.name, value.id)] or ():
                     names.setdefault(name, []).append(where)
+            elif isinstance(value, ast.Name) and value.id in module_constants:
+                names.setdefault(module_constants[value.id], []).append(where)
             else:
                 unresolved.append(f'{where}: {ast.unparse(value)}')
     assert not unresolved, f'Add these "Check" values to DYNAMIC_NAMES or use a literal/constant: {unresolved}'

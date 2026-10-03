@@ -21,6 +21,7 @@ reports to ``app.checks.categories.CATEGORY_MAP``.
 import functools
 from typing import Any, Callable, NamedTuple
 
+from app.checks.advisories import check_org_advisories, check_project_advisories
 from app.checks.cost import run_cost_recommendations
 from app.checks.network import run_network_insights
 from app.checks.operations import (
@@ -35,7 +36,6 @@ from app.checks.reliability import (
     check_essential_contacts,
     check_gke_hygiene,
     check_resilience_assets,
-    check_service_health_status,
     check_storage_versioning,
 )
 from app.checks.security import (
@@ -51,6 +51,7 @@ from app.checks.security import (
     check_vm_external_ips,
     check_vpc_configuration,
 )
+from app.checks.service_health import check_service_health_incidents
 
 
 class CheckSpec(NamedTuple):
@@ -62,13 +63,23 @@ class CheckSpec(NamedTuple):
     args: tuple
 
 
+# Display names of the checks added in v14 (Advisory Notifications runs differently per scope; see scope_level_checks).
+SERVICE_HEALTH_CHECK = "Service Health Incidents"
+ADVISORIES_CHECK = "Advisory Notifications"
+
+
 def build_check_plan(scope, scope_id, job_id, all_projects, active_zones, active_regions, location_errors=None):
     """
     Returns the ordered list of checks to run for a scan, as ``CheckSpec`` entries.
-    The 18 common and 6 organization-only checks, their order, and their arguments
+    The first 18 common and 5 organization-only checks, their order, and their arguments
     are the same as in upstream beta v1's ``run_all_checks``: the legacy plan plus
     four Security checks at the end of the common list. The runner calls each one as
     ``func(*args, sink=...)``.
+
+    After them come the checks added since (v14): Service Health Incidents, over the
+    projects of every scope, and Advisory Notifications, read once from the organization
+    in an organization scan and per project otherwise. Beta v1's organization-level
+    Personalized Service Health probe is retired: the per-project check covers it.
 
     The two checks that query by location (Cost-Saving Recommendations, Network
     Insights) take one argument more than in beta v1: ``location_errors``, project ID
@@ -97,6 +108,7 @@ def build_check_plan(scope, scope_id, job_id, all_projects, active_zones, active
         CheckSpec("Security & Identity", "VPC Configuration", check_vpc_configuration, (scope_id, all_projects, job_id)),
         CheckSpec("Security & Identity", "GCS Uniform Bucket-Level Access", check_storage_ubla, (scope_id, all_projects, job_id)),
         CheckSpec("Security & Identity", "VM External IPs", check_vm_external_ips, (scope_id, all_projects, job_id)),
+        CheckSpec("Reliability & Resilience", SERVICE_HEALTH_CHECK, check_service_health_incidents, (scope_id, all_projects, job_id)),
     ]
 
     if scope == 'organization':
@@ -106,9 +118,11 @@ def build_check_plan(scope, scope_id, job_id, all_projects, active_zones, active
             CheckSpec("Operational Excellence & Observability", "Organization Audit Logging", check_audit_logging, (scope_id, job_id)),
             CheckSpec("Reliability & Resilience", "Essential Contacts", check_essential_contacts, (scope_id, job_id)),
             CheckSpec("Reliability & Resilience", "Resilience of Critical Assets", check_resilience_assets, (scope_id, job_id)),
-            CheckSpec("Reliability & Resilience", "Personalized Service Health", check_service_health_status, (scope_id, job_id)),
+            CheckSpec("Security & Identity", ADVISORIES_CHECK, check_org_advisories, (scope_id, job_id)),
         ]
         all_checks_to_run.extend(org_only_checks)
+    else:
+        all_checks_to_run.append(CheckSpec("Security & Identity", ADVISORIES_CHECK, check_project_advisories, (scope_id, all_projects, job_id)))
 
     return all_checks_to_run
 
@@ -119,17 +133,24 @@ def build_check_plan(scope, scope_id, job_id, all_projects, active_zones, active
 # don't include the project list (tests/test_fanout.py verifies this agrees).
 SCOPE_LEVEL_CHECKS = frozenset({
     "Organization Policies", "Organization IAM Policy", "Security Command Center Status",
-    "Organization Audit Logging", "Essential Contacts", "Resilience of Critical Assets", "Personalized Service Health",
+    "Organization Audit Logging", "Essential Contacts", "Resilience of Critical Assets",
 })
 # The one check that does both: organization-wide insights plus per-project work.
 # Shards split it with its keyword flags (see run_miscellaneous_checks_refactored).
 MISCELLANEOUS_CHECK = "Miscellaneous Checks"
 
 
+def scope_level_checks(scope):
+    """The names of the scope-level checks of a ``scope`` scan: ``SCOPE_LEVEL_CHECKS``, plus Advisory
+    Notifications in an organization scan (read once from the organization; per project otherwise)."""
+    return SCOPE_LEVEL_CHECKS | ({ADVISORIES_CHECK} if scope == 'organization' else frozenset())
+
+
 def scope_check_plan(scope, scope_id, job_id):
     """The scope-level checks of :func:`build_check_plan`: Organization Policies, plus, for an
     organization, the org-only checks and the organization-wide half of the miscellaneous checks."""
-    plan = [spec for spec in build_check_plan(scope, scope_id, job_id, [], [], []) if spec.name in SCOPE_LEVEL_CHECKS]
+    scope_level = scope_level_checks(scope)
+    plan = [spec for spec in build_check_plan(scope, scope_id, job_id, [], [], []) if spec.name in scope_level]
     if scope == 'organization':
         plan.append(CheckSpec("Operational Excellence & Observability", MISCELLANEOUS_CHECK,
                               functools.partial(run_miscellaneous_checks_refactored, project_checks=False),
@@ -139,9 +160,9 @@ def scope_check_plan(scope, scope_id, job_id):
 
 def project_check_plan(scope, scope_id, job_id, projects, active_zones, active_regions, location_errors=None):
     """The project-level checks of :func:`build_check_plan`, over ``projects`` only."""
-    plan = []
+    plan, scope_level = [], scope_level_checks(scope)
     for spec in build_check_plan(scope, scope_id, job_id, projects, active_zones, active_regions, location_errors):
-        if spec.name in SCOPE_LEVEL_CHECKS:
+        if spec.name in scope_level:
             continue
         if spec.name == MISCELLANEOUS_CHECK:
             spec = spec._replace(func=functools.partial(spec.func, org_insights=False))

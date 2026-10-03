@@ -35,6 +35,39 @@ ORG_ID = "100000000001"
 FOLDER_COUNT = 6
 FOLDER_IDS = [str(200000000001 + i) for i in range(FOLDER_COUNT)]
 HOST_PROJECT = "synthetic-host"  # the project that "runs" CloudGauge (auth_default's project)
+PROJECT_NUMBER_BASE = 300000000000  # project i has number PROJECT_NUMBER_BASE + i
+
+# Google Cloud incidents of the last quarter (Service Health). Every project is impacted by,
+# related to, or untouched by each one; the first is still active.
+# (id, title, product, location, state, started days ago, ended days ago)
+INCIDENTS = (
+    ("syn-inc-001", "Elevated error rates with Cloud Run in us-central1", "Cloud Run", "us-central1", "ACTIVE", 1, None),
+    ("syn-inc-002", "Cloud SQL connectivity issues in europe-west1", "Cloud SQL", "europe-west1", "CLOSED", 12, 11),
+    ("syn-inc-003", "Increased latency for Cloud Storage in asia-south1", "Cloud Storage", "asia-south1", "CLOSED", 38, 38),
+    ("syn-inc-004", "GKE control plane unavailable in us-east1", "Google Kubernetes Engine", "us-east1", "CLOSED", 70, 69),
+    ("syn-inc-005", "Compute Engine VM creation failures in europe-west2", "Compute Engine", "europe-west2", "CLOSED", 140, 139),  # outside a 90-day window
+)
+INCIDENT_RELEVANCES = ("IMPACTED", "RELATED", "PARTIALLY_RELATED")
+# Advisory Notifications of the organization: (type, subject, days ago, HTML body, ((attachment name, headers, rows), ...)).
+ADVISORY_TYPES = ("NOTIFICATION_TYPE_SECURITY_MSA", "NOTIFICATION_TYPE_SECURITY_PRIVACY_ADVISORY",
+                  "NOTIFICATION_TYPE_SENSITIVE_ACTIONS", "NOTIFICATION_TYPE_THREAT_HORIZONS")
+ORG_ADVISORIES = (
+    ("NOTIFICATION_TYPE_SECURITY_MSA", "Mandatory Service Announcement: Cloud SQL instances must move off TLS 1.0 and 1.1", 20,
+     "<p>Google Cloud will stop accepting TLS 1.0 and 1.1 connections to Cloud SQL on the date below.</p>"
+     "<p>Action required: update the clients of the instances listed in the attachment.</p>",
+     (("affected_instances.csv", ("Project", "Instance", "Region"), (("syn-prod-db", "sql-0", "europe-west1"), ("syn-analytics", "sql-1", "us-central1"))),)),
+    ("NOTIFICATION_TYPE_SENSITIVE_ACTIONS", "Sensitive actions were taken in your organization", 5,
+     '<div class="report-intro"><p>The following sensitive actions were detected.</p></div>'
+     "<h2>Organization policy updated</h2><p>Policy: constraints/iam.allowedPolicyMemberDomains</p><p>Policy action: Updated</p>"
+     "<p>This action was taken 4 times</p><p>By: admin@example.com</p><p>By: ops-lead@example.com</p>"
+     "<h2>Owner role granted at the organization</h2><p>This action was taken 1 time</p><p>By: admin@example.com</p>", ()),
+    ("NOTIFICATION_TYPE_SECURITY_PRIVACY_ADVISORY", "Security advisory: GKE node vulnerability CVE-2026-0101", 60,
+     "<p>A vulnerability in the GKE node image allows container escape. Upgrade the node pools listed in the attachment.</p>",
+     (("affected_clusters.csv", ("Project", "Cluster", "Location"), (("syn-platform", "cluster-0", "us-central1-a"),)),)),
+    ("NOTIFICATION_TYPE_THREAT_HORIZONS", "Threat Horizons Report Q3", 400, "<p>Quarterly threat intelligence.</p>", ()),  # older than a year
+)
+# The security advisory above, as seen from an affected project (folder and project scans read per project).
+PROJECT_ADVISORY = ORG_ADVISORIES[2]
 
 # Zones the generated VMs live in (6 zones, 4 regions); the location discovery
 # finds these plus the regions of addresses and forwarding rules.
@@ -146,6 +179,15 @@ class ProjectProfile:
     recent_changes: tuple = ()
     mig_zones: tuple = ()
     single_region_snapshots: int = 0
+    # v14: Service Health and Advisory Notifications
+    servicehealth_disabled: bool = False  # the Service Health API is not enabled (no personalized incidents)
+    incident_relevance: dict = field(default_factory=dict)  # incident id -> the project's relevance to it
+    advisory_types_disabled: tuple = ()  # notification types turned off in the project's Advisory Notifications settings
+    has_project_advisory: bool = False  # the project-level security advisory applies to it
+
+    @property
+    def project_number(self):
+        return str(PROJECT_NUMBER_BASE + self.index)
 
     @property
     def zones(self):
@@ -185,6 +227,17 @@ class SyntheticOrg:
         """The :class:`ProjectProfile` for ``project_id``, or ``None`` if it isn't in the organization."""
         index = self.index_of(project_id)
         return None if index is None else self._project(index)
+
+    def project_number(self, index):
+        return str(PROJECT_NUMBER_BASE + index)
+
+    def project_id_for_number(self, number):
+        """The project ID of a generated project number, or ``None`` for an unknown number."""
+        try:
+            index = int(str(number)) - PROJECT_NUMBER_BASE
+        except (TypeError, ValueError):
+            return None
+        return self.project_id(index) if 0 <= index < self.n_projects else None
 
     def projects(self, folder_id=None):
         """Every project profile, or those in ``folder_id``, in index order."""
@@ -308,18 +361,32 @@ class SyntheticOrg:
         recent_changes = tuple(f"IAM policy of project {project_id} changed: {rng.choice(['added', 'removed'])} roles/editor for {rng.choice(PRIMITIVE_MEMBERS[:3])}"
                                for _ in range(rng.randint(1, 2) if _chance(rng, 0.2) else 0))
         mig_zones = tuple(sorted({vm.zone for vm in vms if vm.in_mig and not vm.gke}))
+        osconfig_disabled = _chance(rng, 0.05)
+        has_default_vpc = _chance(rng, 0.5)
+        single_region_snapshots = rng.randint(0, 3) if vms else 0
+
+        # v14 (drawn last, so the inventory above is the same as before for a given seed)
+        servicehealth_disabled = _chance(rng, 0.08)
+        incident_relevance = {}
+        for incident_id, *_ in INCIDENTS:
+            if size != "empty" and _chance(rng, 0.3):
+                incident_relevance[incident_id] = rng.choices(INCIDENT_RELEVANCES, weights=[3, 4, 3])[0]
+        advisory_types_disabled = ("NOTIFICATION_TYPE_THREAT_HORIZONS",) if _chance(rng, 0.05) else ()
+        has_project_advisory = bool(gke_clusters) and _chance(rng, 0.5)
 
         return ProjectProfile(
             index=index, project_id=project_id, display_name=f"Synthetic Project {index}",
-            folder_id=self.folder_of(index), denied=denied, osconfig_disabled=_chance(rng, 0.05),
+            folder_id=self.folder_of(index), denied=denied, osconfig_disabled=osconfig_disabled,
             vms=tuple(vms), buckets=buckets, primitive_bindings=tuple(primitive),
             service_accounts=tuple(service_accounts), firewall_rules=firewall_rules,
-            has_default_vpc=_chance(rng, 0.5), subnets=subnets, hot_quotas=hot_quotas,
+            has_default_vpc=has_default_vpc, subnets=subnets, hot_quotas=hot_quotas,
             sql_instances=sql_instances, gke_clusters=gke_clusters, alert_filters=tuple(alert_filters),
             addresses_regions=addresses_regions, forwarding_rule_regions=forwarding,
             cost_recommendations=cost_recommendations, network_insights=network_insights,
             recent_changes=recent_changes, mig_zones=mig_zones,
-            single_region_snapshots=rng.randint(0, 3) if vms else 0,
+            single_region_snapshots=single_region_snapshots,
+            servicehealth_disabled=servicehealth_disabled, incident_relevance=incident_relevance,
+            advisory_types_disabled=advisory_types_disabled, has_project_advisory=has_project_advisory,
         )
 
     # --- organization-level data ---
