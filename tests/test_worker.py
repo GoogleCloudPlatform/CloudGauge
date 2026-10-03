@@ -240,7 +240,7 @@ def test_scan_job_with_the_real_runner(client, prod_app, gcp, monkeypatch):
 
     html, _ = gcp.bucket.objects[REPORT_HTML]
     assert '<strong>Open Firewall Rules</strong>' in html
-    assert "<table class='details-table'><thead><tr><th>Error</th></tr></thead><tbody><tr><td>quota exceeded</td></tr></tbody></table>" in html
+    assert ("<table class='data-table details-table'><thead><tr><th>Error</th></tr></thead><tbody><tr><td class=\"prose\">quota exceeded</td></tr></tbody></table>") in html
     csv_text, _ = gcp.bucket.objects[REPORT_CSV]
     assert csv_sections(csv_text)['Reliability & Resilience'] == [['Check', 'Status', 'Error'], ['GKE Hygiene', 'Error', 'quota exceeded'], []]
 

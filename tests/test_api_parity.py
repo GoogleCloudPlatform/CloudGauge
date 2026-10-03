@@ -16,8 +16,9 @@
 Every test sends the same request to ``legacy_client`` (the frozen pre-refactor
 module) and to ``client`` (``create_app()`` in the production profile, as
 gunicorn runs it). Both talk to the same GCP fakes, so the calls they make can
-be compared too. Pages are compared line by line, everything else byte for byte.
-``/run-scan`` is covered by test_worker.py.
+be compared too. Error pages are compared line by line; the index and status
+pages, redesigned in v14.2, on what they tell the browser (``page_facts``);
+everything else byte for byte. ``/run-scan`` is covered by test_worker.py.
 """
 import json
 import time
@@ -32,7 +33,7 @@ from google.genai import errors as genai_errors
 import fakes
 from app import create_app
 from app.services import insights as insights_service
-from helpers import assert_same_response, normalized_lines
+from helpers import assert_same_response, normalized_lines, page_facts
 
 SA_EMAIL = fakes.TEST_ENV['SERVICE_ACCOUNT_EMAIL']
 XSS = '"><img src=x onerror=alert(1)>'  # no "/": a URL segment can't contain one
@@ -43,10 +44,10 @@ def send_both(legacy_client, client, method, path, **kwargs):
     return legacy_client.open(path, method=method, **kwargs), client.open(path, method=method, **kwargs)
 
 
-def assert_parity(legacy_client, client, method, path, *, html=False, **kwargs):
+def assert_parity(legacy_client, client, method, path, *, html=False, facts=None, **kwargs):
     """Asserts both apps respond the same way and returns the new app's response."""
     legacy_response, response = send_both(legacy_client, client, method, path, **kwargs)
-    assert_same_response(legacy_response, response, html=html)
+    assert_same_response(legacy_response, response, html=html, facts=facts)
     return response
 
 
@@ -60,9 +61,16 @@ def halves(calls):
 # --- Pages ---
 
 def test_index_page(legacy_client, client):
-    response = assert_parity(legacy_client, client, 'GET', '/', html=True)
+    response = assert_parity(legacy_client, client, 'GET', '/', facts=page_facts)
     assert response.status_code == 200
-    assert "fetch(`/api/list-resources?scope=${selectedScope}`)" in response.get_data(as_text=True)
+    assert page_facts(response.get_data(as_text=True)) == {
+        'forms': [('/scan', 'post')],
+        'fields': [('scope', False, False), ('scope_id', True, True)],  # the resource select waits for a scope
+        'options': ['', 'organization', 'folder', 'project', ''],
+        'submit_disabled': True,
+        'constants': [],
+        'urls': ['/api/list-resources?scope=${selectedScope}'],
+    }
 
 
 def test_scan_enqueues_the_legacy_task(legacy_client, client, gcp, monkeypatch):
@@ -100,10 +108,16 @@ def test_scan_rejects_incomplete_forms(kwargs, legacy_client, client, gcp):
 
 def test_status_page(legacy_client, client, gcp):
     startup_auth_calls = len(gcp.auth_scopes)  # the new app's startup looked up its URL
-    response = assert_parity(legacy_client, client, 'GET', '/status/job-1/organization/123456789', html=True)
+    response = assert_parity(legacy_client, client, 'GET', '/status/job-1/organization/123456789', facts=page_facts)
     assert response.status_code == 200
-    assert 'const signed_csv_url = "https://storage.example/test-bucket/job-1/123456789_report.csv?X-Goog-Signature=abc&X-Goog-Expires=3600";' \
-        in normalized_lines(response.get_data(as_text=True))
+    page = response.get_data(as_text=True)
+    signed_url = 'https://storage.example/test-bucket/job-1/123456789_report.csv?X-Goog-Signature=abc&X-Goog-Expires=3600'
+    assert page_facts(page) == {
+        'forms': [], 'fields': [], 'options': [], 'submit_disabled': False,
+        'constants': [('job_id', '"job-1"'), ('scope_id', '"123456789"'), ('signed_csv_url', f'"{signed_url}"')],
+        'urls': ['/api/status/${job_id}/${scope_id}', '/report/${job_id}/${scope_id}'],
+    }
+    assert 'const scope = "organization";' in normalized_lines(page)  # new in v14.2: the card names the scope
 
     (legacy_blob, legacy_kwargs), (blob, kwargs) = gcp.bucket.signed_url_requests
     assert blob == legacy_blob == 'job-1/123456789_report.csv'
@@ -117,18 +131,19 @@ def test_status_page(legacy_client, client, gcp):
 
 def test_status_page_without_a_signed_url(legacy_client, client, gcp):
     gcp.bucket.signing_error = RuntimeError('Permission iam.serviceAccounts.signBlob denied')
-    response = assert_parity(legacy_client, client, 'GET', '/status/job-1/project/my-project', html=True)
+    response = assert_parity(legacy_client, client, 'GET', '/status/job-1/project/my-project', facts=page_facts)
     assert response.status_code == 200
     assert 'const signed_csv_url = "#";' in normalized_lines(response.get_data(as_text=True))
 
 
 def test_status_page_escapes_url_values(legacy_client, client):
     path = f'/status/{quote(XSS, safe="")}/project/{quote(XSS, safe="")}'
-    response = assert_parity(legacy_client, client, 'GET', path, html=True)
+    response = assert_parity(legacy_client, client, 'GET', path, facts=page_facts)
     assert response.status_code == 200
     page = response.get_data(as_text=True)
     assert XSS not in page
     assert 'const job_id = "&#34;&gt;&lt;img src=x onerror=alert(1)&gt;";' in normalized_lines(page)
+    assert 'const scope_id = "&#34;&gt;&lt;img src=x onerror=alert(1)&gt;";' in normalized_lines(page)
 
 
 def test_report_is_served_as_stored(legacy_client, client, gcp):

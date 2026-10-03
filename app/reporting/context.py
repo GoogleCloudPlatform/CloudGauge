@@ -42,7 +42,9 @@ groups by project (hundreds of groups would bury the findings) and instead:
   table of project, skipped check, and reason, so a check that skipped projects
   is not mistaken for a compliant one. Its summary line counts skipped checks.
 """
+import re
 from dataclasses import dataclass, fields
+from datetime import datetime, timezone
 
 from markupsafe import Markup
 
@@ -124,6 +126,8 @@ class CheckItem:
     details: Details | None
     fix_id: int | None  # the N of the remediation placeholder id "fix-N"
     summary: str | None = None  # "12 findings across 3 projects"; None when it would only repeat the table
+    slug: str = ""  # the item's anchor within its section ("open-firewall-rules"); #<section id>-<slug> opens it
+    open: bool = True  # expanded when the page loads: what needs a human is, Compliant and Informational are not
 
 
 @dataclass(frozen=True)
@@ -158,6 +162,11 @@ class OrgPolicySummary:
     status_class: str
     icon: str
 
+    @property
+    def open(self):
+        """Expanded on load unless every policy is compliant (the rule of ``CheckItem.open``)."""
+        return self.status_class != "compliant"
+
 
 @dataclass(frozen=True)
 class Section:
@@ -172,6 +181,9 @@ class Section:
     status_counts: tuple = ()  # a StatusCount per status present among ``checks``, in DISPLAY_ORDER
     # Shown instead of the checks list when the category has no checks and no org policies.
     empty_message: str | None = None
+    nav_title: str = ""  # the sidebar's shorter name for the section
+    worst_status_class: str = "compliant"  # the most severe status among its items (the sidebar's dot)
+    attention_count: int = 0  # items that need a human: failing checks, plus Organization Policies when not all compliant
 
 
 @dataclass(frozen=True)
@@ -181,6 +193,12 @@ class ScoreRow:
     score: float
     score_display: str
     score_class: str
+    pass_count: int = 0  # compliant checks (and policies) behind the score...
+    fail_count: int = 0  # ...and failing ones; the Review scores list shows "18 of 21"
+
+    @property
+    def scored_count(self):
+        return self.pass_count + self.fail_count
 
 
 @dataclass(frozen=True)
@@ -247,14 +265,29 @@ class ReportContext:
     total_projects: int | None = None
     rows_per_page: int = ROWS_PER_PAGE
     max_rows_per_check: int = MAX_ROWS_PER_CHECK
+    generated_at: str = ""  # when the report was rendered, "2026-10-03 20:11 UTC" (the sidebar's footer)
 
     def template_vars(self):
         """The top-level template variables (a shallow dict of the fields)."""
         return {f.name: getattr(self, f.name) for f in fields(self)}
 
 
+# The sidebar's names for the sections (the full titles head the pages).
+NAV_TITLES = {"Operational Excellence & Observability": "Operational Excellence"}
+
+
 def section_id_for(category_name):
     return category_name.lower().replace(' & ', '-').replace(' ', '-')
+
+
+def slug_for(check_name):
+    """A check's anchor within its section: lowercase, runs of anything but letters and digits become one dash."""
+    return re.sub(r"[^a-z0-9]+", "-", check_name.lower()).strip("-")
+
+
+def generated_now():
+    """The current time as the report states it (UTC, to the minute)."""
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
 
 def empty_category_message(category_name):
@@ -444,6 +477,7 @@ def build_report_context(scope, scope_id, job_id, all_results, banner=None, cove
         org_policy_summary = build_org_policy_summary(all_results[ORG_POLICIES_KEY])
 
     category_scores = {}
+    category_counts = {}  # (pass, fail) behind each score
     all_other_findings = []
     for category_name in REPORT_CATEGORY_ORDER:
         findings = all_results.get(category_name, [])
@@ -457,6 +491,7 @@ def build_report_context(scope, scope_id, job_id, all_results, banner=None, cove
         total_for_score = pass_count + fail_count
         score = (pass_count / total_for_score) * 100 if total_for_score > 0 else 100
         category_scores[category_name] = score
+        category_counts[category_name] = (pass_count, fail_count)
 
     grouped_all_findings = group_findings(all_other_findings)
     action_count = sum(1 for g in grouped_all_findings.values() if g.get('Status') == 'Action Required')
@@ -494,6 +529,8 @@ def build_report_context(scope, scope_id, job_id, all_results, banner=None, cove
                 details=details,
                 fix_id=fix_id,
                 summary=summarize_details(details, status, total_projects, check_name),
+                slug=slug_for(f"{check_name}"),
+                open=status in FAILING_STATUSES,
             ))
         has_content = bool(checks) or org_content_for_section is not None
         footer = None
@@ -502,6 +539,11 @@ def build_report_context(scope, scope_id, job_id, all_results, banner=None, cove
         elif has_content and category_name == "Security & Identity" and scope == 'organization':
             footer = "security"
         score = category_scores[category_name]
+        # The sidebar's dot and count: the most severe status among the items, and how many need a human.
+        item_statuses = [check.status for check in checks]
+        if org_content_for_section is not None:
+            item_statuses.append("Compliant" if org_content_for_section.status_class == "compliant" else "Action Required")
+        worst = min(item_statuses, key=display_rank, default="Compliant")
         sections.append(Section(
             title=category_name,
             section_id=section_id_for(category_name),
@@ -513,11 +555,14 @@ def build_report_context(scope, scope_id, job_id, all_results, banner=None, cove
             footer=footer,
             status_counts=count_statuses(checks),
             empty_message=None if has_content else empty_category_message(category_name),
+            nav_title=NAV_TITLES.get(category_name, category_name),
+            worst_status_class=STATUS_STYLES.get(worst, STATUS_STYLES["Informational"])["class"],
+            attention_count=sum(1 for s in item_statuses if s in FAILING_STATUSES),
         ))
 
     # --- THE SCORE SUMMARY TABLE ---
     score_summary = tuple(
-        ScoreRow(category_name, section_id_for(category_name), score, f"{score:.0f}", score_class_for(score))
+        ScoreRow(category_name, section_id_for(category_name), score, f"{score:.0f}", score_class_for(score), *category_counts[category_name])
         for category_name, score in category_scores.items()
     )
 
@@ -532,4 +577,5 @@ def build_report_context(scope, scope_id, job_id, all_results, banner=None, cove
         banner=banner,
         coverage=Coverage.from_dict(coverage, scope) if coverage else None,
         total_projects=total_projects,
+        generated_at=generated_now(),
     )

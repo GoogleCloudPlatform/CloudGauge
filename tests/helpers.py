@@ -132,12 +132,15 @@ def report_facts(html):
     """What a report says, independent of how it is laid out.
 
     The enterprise layout (plan item 6b) orders checks by severity, adds summary
-    lines, hides rows past the first page, and so on, so a new report no longer
-    matches the legacy one line for line. It must still show the same facts:
-    the title, the overview counts, the category scores, and every check item
-    with its status badge, its details (table headers and rows, or text), and
-    whether it has a remediation placeholder. Items are returned sorted, since
-    only their order within a section changed. Values are HTML-unescaped.
+    lines, hides rows past the first page, and so on, and the v14.2 redesign
+    renders each check as an accordion with its badge in the summary row, so a
+    new report no longer matches the legacy one line for line. It must still
+    show the same facts: the title, the scope and report ID, the overview
+    counts, the category scores, and every check item with its status badge,
+    its details (table headers and rows, or text), and whether it has a
+    remediation placeholder. Items are returned sorted, since only their order
+    within a section changed. Values are HTML-unescaped; the markup inside a
+    cell (chips, disclosures, pills) is reduced to its text.
 
     ``sections`` are the category pages that list checks (with their header
     scores in ``section_scores``): the new report also gives a category with
@@ -149,15 +152,17 @@ def report_facts(html):
         return html_unescape(markup.replace('<br>', '\n')).strip()
 
     def cell_text(markup):
-        # Layout markup (app.reporting.layouts: titles, muted lines, disclosures, lists, clamps) is reduced to its
-        # text, as a browser's textContent would be. Legacy cells have none, so they compare as before.
-        return html_unescape(' '.join(re.sub(r'</?(?:span|details|summary|div|button|ul|li|br)\b[^>]*>', ' ', markup).split()))
+        # Layout markup (app.reporting.layouts: titles, muted lines, chips, disclosures, lists, clamps, pills) is
+        # reduced to its text, as a browser's textContent would be. Legacy cells have none, so they compare as before.
+        return html_unescape(' '.join(re.sub(r'</?(?:span|details|summary|div|button|ul|li|br|code|svg|path|time)\b[^>]*>', ' ', markup).split()))
 
     items = []
-    # An item ends with its status badge: a list cell's own <li> elements must not end it early.
-    for item in re.findall(r'<li class="status-[\w-]+">(.*?<span class="status-badge">.*?</span>\s*)</li>', html, re.S):
+    # An item runs to the </li> on its own line: a list cell's own <li> elements (written inline) must not end it early.
+    for item in re.findall(r'<li class="status-[\w-]+"[^>]*>(.*?)\n\s*</li>', html, re.S):
         name = html_unescape(re.search(r'<strong>(.*?)</strong>', item, re.S).group(1))
-        badge = html_unescape(re.search(r'<span class="status-badge">(.*?)</span>', item, re.S).group(1))
+        badge = html_unescape(re.search(r'<span class="status-badge[^"]*">(.*?)</span>', item, re.S).group(1))
+        # Legacy wrote the Organization Policies tally into the name as well as the badge; the new report once.
+        name = re.sub(r'^Organization Policies \(\d+/\d+ Compliant\)$', 'Organization Policies', name)
         headers = tuple(html_unescape(h) for h in re.findall(r'<th(?:\s[^>]*)?>(.*?)</th>', item, re.S))
         rows = tuple(cells for cells in (
             tuple(cell_text(cell) for cell in re.findall(r'<td(?:\s[^>]*)?>(.*?)</td>', row, re.S))
@@ -169,24 +174,57 @@ def report_facts(html):
     parts = re.split(r'<div id="([\w-]+)-section" class="content-section"', html.split('<script', 1)[0])
     sections = [(parts[i], parts[i + 1]) for i in range(1, len(parts) - 1, 2)]
     listed = [(sid, body) for sid, body in sections if 'class="checks-list"' in body]
+    # Legacy: "Scope: Organization | ID: 123 | Report ID: job-42" in one line; new: a <dl> of the same values.
+    header = (re.search(r'Scope: (\w+) \| ID: (.*?) \| Report ID: (.*?)</p>', html)
+              or re.search(r'<dt>Scope</dt><dd>(\w+) (.*?)</dd>\s*<dt>Report ID</dt><dd>(.*?)</dd>', html))
     return {
         'title': re.search(r'<title>(.*?)</title>', html).group(1),
-        'header': text(re.search(r'<p style="color: var\(--light-text-color\);">(.*?)</p>', html).group(1)),
+        'header': tuple(html_unescape(value) for value in header.groups()),
         'overview': re.findall(r'<h3>([\w ]+)</h3><p class="count">(\d+)</p>', html),
-        'scores': re.findall(r'score-badge score-(\w+)">(\d+)%</span></td>', html),  # the Review Scores table
+        # The Review Scores table: legacy's score badge, or the new report's score next to its bar.
+        'scores': re.findall(r'class="(?:score-badge|score) score-(\w+)">(\d+)%</span></td>', html),
         'sections': [sid for sid, _ in listed],
-        'section_scores': [(sid, *re.search(r'score-badge score-(\w+)">(\d+)% Compliant', body).groups()) for sid, body in listed],
+        'section_scores': [(sid, *re.search(r'(?:score-badge score|score-pill pill pill)-(\w+)">(\d+)% [Cc]ompliant', body).groups())
+                           for sid, body in listed],
         'items': sorted(items),
         'console_link': 'active-assist/list/security/recommendations?organizationId=' in html,
     }
 
 
-def assert_same_response(legacy_response, response, *, html=False):
-    """Asserts the same status, headers that matter, and body (HTML: by ``normalized_lines``)."""
+def page_facts(html):
+    """What a page tells the browser to do, independent of how it is laid out.
+
+    The v14.2 redesign rewrote the index and status pages, so they no longer
+    compare line by line with the legacy ones. What must not change is their
+    contract with the server and the user: the form (where it posts, its field
+    names and which are required, the scope values) and the script (the values
+    the page embeds, where it polls, where the report is).
+    """
+    markup, _, script = html.partition('<script')
+    return {
+        'forms': re.findall(r'<form action="([^"]*)" method="(\w+)"', markup),
+        'fields': [(re.search(r'name="(\w+)"', attrs).group(1), ' required' in attrs, ' disabled' in attrs)
+                   for attrs in re.findall(r'<select([^>]*)>', markup)],
+        'options': re.findall(r'<option value="([^"]*)"', markup),
+        'submit_disabled': bool(re.search(r'<button[^>]*type="submit"[^>]*\bdisabled\b', markup)),
+        'constants': sorted(re.findall(r'const (job_id|scope_id|signed_csv_url) = (".*?");', script)),
+        'urls': sorted(set(re.findall(r'`(/(?:api|report)/[^`]*)`', script))),
+    }
+
+
+def assert_same_response(legacy_response, response, *, html=False, facts=None):
+    """Asserts the same status, headers that matter, and body.
+
+    HTML bodies compare by ``normalized_lines``, or by ``facts(html)`` when the
+    new page is laid out differently from the legacy one (``page_facts`` for
+    the pages redesigned in v14.2); everything else byte for byte.
+    """
     assert response.status_code == legacy_response.status_code
     for header in ('Content-Type', 'Location', 'Allow'):
         assert response.headers.get(header) == legacy_response.headers.get(header), header
-    if html:
+    if facts is not None:
+        assert facts(response.get_data(as_text=True)) == facts(legacy_response.get_data(as_text=True))
+    elif html:
         assert normalized_lines(response.get_data(as_text=True)) == normalized_lines(legacy_response.get_data(as_text=True))
     else:
         assert response.get_data() == legacy_response.get_data()

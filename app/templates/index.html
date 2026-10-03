@@ -13,70 +13,87 @@
   See the License for the specific language governing permissions and
   limitations under the License.
 #}
+{#
+  The setup page: one centred card on the dot-grid canvas. Choosing a scope
+  loads its resources into the second select (/api/list-resources); the
+  loading, empty and error states are a help line under it, and "Start scan"
+  stays disabled until a resource is chosen.
+#}
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>CloudGauge</title>
-    <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&display=swap" rel="stylesheet">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
     <style>
-        :root { --primary-color: #4285F4; --background-color: #f8f9fa; --text-color: #3c4043; --border-color: #dfe1e5; --card-bg-color: #ffffff; }
-        body { font-family: 'Roboto', sans-serif; margin: 0; background-color: var(--background-color); color: var(--text-color); display: flex; align-items: center; justify-content: center; height: 100vh; }
-        .scan-card { background-color: var(--card-bg-color); padding: 40px; border-radius: 8px; box-shadow: 0 4px 10px rgba(0,0,0,0.08); text-align: center; max-width: 500px; width: 100%; }
-        h1 { font-weight: 500; }
-        p { color: #5f6368; margin-bottom: 30px; }
-        form { display: flex; flex-direction: column; gap: 20px; }
-        .form-group { text-align: left; }
-        label { font-weight: 500; display: block; margin-bottom: 5px; }
-        select, button { font-size: 16px; padding: 12px; border-radius: 5px; border: 1px solid var(--border-color); width: 100%; box-sizing: border-box; }
-        button { background-color: var(--primary-color); color: white; cursor: pointer; font-weight: 500; }
-        button:disabled { background-color: #e0e0e0; cursor: not-allowed; }
-        #loader { display: none; margin-top: 10px; font-style: italic; color: var(--text-color); }
+{% include "_design.css" %}
+        body { min-height: 100vh; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px; padding: 24px; }
+        .setup-card { width: 100%; max-width: 448px; padding: 32px; }
+        .notice { width: 100%; max-width: 448px; }
+        .brand { margin-bottom: 28px; font-size: 13px; font-weight: 600; letter-spacing: -0.01em; color: var(--ink); }
+        .setup-card h1 { font-size: 22px; margin-bottom: 6px; }
+        .lede { margin-bottom: 24px; color: var(--muted); }
+        form { display: flex; flex-direction: column; gap: 18px; }
+        .field .help { margin-top: 2px; }
+        .btn-block { margin-top: 6px; padding: 11px 14px; }
     </style>
 </head>
-<body>
-    <div class="scan-card">
-        {% if banner %}<div role="note" style="margin: 0 0 20px; padding: 12px 16px; border-left: 6px solid #f9ab00; background: #fef7e0; color: #5f4b00; font-weight: 500; text-align: left;">{{ banner }}</div>{% endif %}
-        <h1>Review Your Cloud Environment</h1>
-        <p>Select a scope and resource to begin a comprehensive review.</p>
+<body class="dotgrid">
+    {% if banner %}<div role="note" class="notice notice-amber">{{ banner }}</div>{% endif %}
+    <main class="card setup-card">
+        <div class="brand">CloudGauge</div>
+        <h1>Review your cloud environment</h1>
+        <p class="lede">Choose a scope, then the resource to review.</p>
         <form action="/scan" method="post">
-            <div class="form-group">
-                <label for="scope">1. Select Scan Scope:</label>
-                <select id="scope" name="scope">
-                    <option value="" disabled selected>-- Choose a scope --</option>
+            <div class="field">
+                <label for="scope">Scope</label>
+                <select id="scope" name="scope" class="select">
+                    <option value="" disabled selected>Choose a scope</option>
                     <option value="organization">Organization</option>
                     <option value="folder">Folder</option>
                     <option value="project">Project</option>
                 </select>
             </div>
-            <div class="form-group">
-                <label for="scope_id">2. Select Resource:</label>
-                <select id="scope_id" name="scope_id" required disabled>
-                    <option value="" disabled selected>-- Select scope first --</option>
+            <div class="field">
+                <label for="scope_id">Resource</label>
+                <select id="scope_id" name="scope_id" class="select" required disabled aria-describedby="resource-help">
+                    <option value="" disabled selected>Choose a scope first</option>
                 </select>
-                <div id="loader">Loading resources...</div>
+                <p id="loader" class="help" hidden><span class="spinner"></span>Loading resources…</p>
+                <p id="resource-help" class="help" aria-live="polite"></p>
             </div>
-            <button id="submit-btn" type="submit" disabled>Start Scan</button>
+            <button id="submit-btn" type="submit" class="btn btn-primary btn-block" disabled>Start scan</button>
         </form>
-    </div>
+    </main>
 
     <script>
         document.addEventListener('DOMContentLoaded', function() {
             const scopeSelect = document.getElementById('scope');
             const resourceSelect = document.getElementById('scope_id');
             const loader = document.getElementById('loader');
+            const help = document.getElementById('resource-help');
             const submitBtn = document.getElementById('submit-btn');
+            const SCOPE_NOUNS = { organization: 'organizations', folder: 'folders', project: 'projects' };
+
+            function setHelp(text, isError = false) {
+                help.textContent = text;
+                help.classList.toggle('help-error', isError);
+                help.hidden = !text;
+            }
 
             scopeSelect.addEventListener('change', async function() {
                 const selectedScope = this.value;
                 if (!selectedScope) return;
 
-                // Reset and show loader
-                resourceSelect.innerHTML = '<option value="" disabled selected>-- Loading... --</option>';
+                // Reset and show the loading line
+                resourceSelect.innerHTML = '<option value="" disabled selected>Loading…</option>';
                 resourceSelect.disabled = true;
                 submitBtn.disabled = true;
-                loader.style.display = 'block';
+                setHelp('');
+                loader.hidden = false;
 
                 try {
                     const response = await fetch(`/api/list-resources?scope=${selectedScope}`);
@@ -86,21 +103,24 @@
                     const resources = await response.json();
 
                     // Clear dropdown and add new options
-                    resourceSelect.innerHTML = '<option value="" disabled selected>-- Select a resource --</option>';
+                    resourceSelect.innerHTML = '<option value="" disabled selected>Choose a resource</option>';
                     if (resources.length > 0) {
                         resources.forEach(resource => {
                             const option = new Option(resource.name, resource.id);
                             resourceSelect.appendChild(option);
                         });
                         resourceSelect.disabled = false;
+                        setHelp(`${resources.length} ${resources.length === 1 ? SCOPE_NOUNS[selectedScope].slice(0, -1) : SCOPE_NOUNS[selectedScope]} available`);
                     } else {
-                        resourceSelect.innerHTML = '<option value="" disabled selected>-- No resources found --</option>';
+                        resourceSelect.innerHTML = '<option value="" disabled selected>No resources found</option>';
+                        setHelp(`No ${SCOPE_NOUNS[selectedScope]} are visible to the service account.`);
                     }
                 } catch (error) {
                     console.error('Error:', error);
-                    resourceSelect.innerHTML = '<option value="" disabled selected>-- Error loading resources --</option>';
+                    resourceSelect.innerHTML = '<option value="" disabled selected>Could not load resources</option>';
+                    setHelp(`Couldn't load the ${SCOPE_NOUNS[selectedScope]}. Check the service account's permissions and the application logs.`, true);
                 } finally {
-                    loader.style.display = 'none';
+                    loader.hidden = true;
                 }
             });
 

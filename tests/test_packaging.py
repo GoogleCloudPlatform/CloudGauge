@@ -41,7 +41,8 @@ from app.reporting.html_report import report_environment
 from helpers import make_settings
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-TEMPLATES = ['index.html', 'report/_macros.html', 'report/_script.js', 'report/_styles.css', 'report/report.html', 'status.html']
+TEMPLATES = ['_design.css', 'index.html', 'report/_macros.html', 'report/_script.js', 'report/_styles.css', 'report/report.html',
+             'status.html']
 WEB_MODULES = ['app.extensions', 'app.routes', 'app.routes.api', 'app.routes.ui', 'app.routes.worker']
 
 # Makes any network connection or GCP client creation raise.

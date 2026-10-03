@@ -41,12 +41,41 @@ function showSection(sectionId, clickedLinkElement = null) {
     }
 }
 
+// --- Accordions (one <details class="check"> per check, see _macros.html) ---
+// Items that need a human open on load, the rest are collapsed; "Expand all" / "Collapse all" act on the page
+// shown, the filter opens every item it matches (and restores the default when cleared), printing opens all,
+// and a #<section id>-<check slug> link opens that one check.
+function checkDetails(root) {
+    return Array.from((root || document).querySelectorAll('details.check'));
+}
+
+function currentSection() {
+    return Array.from(document.querySelectorAll('.content-section')).find(section => section.style.display !== 'none');
+}
+
+function setAllChecks(open) {
+    checkDetails(currentSection()).forEach(details => { details.open = open; });
+    if (open) { settleClamps(currentSection()); }
+}
+
+function openCheckFromHash(hash) {
+    const item = hash && document.getElementById(hash);
+    if (!item || !item.matches('.checks-list > li')) { return false; }
+    showSection(item.closest('.content-section').id.replace(/-section$/, ''));
+    const details = item.querySelector('details.check');
+    if (details) { details.open = true; }
+    history.replaceState(null, null, '#' + hash);
+    item.scrollIntoView({ block: 'start' });
+    return true;
+}
+
 document.addEventListener("DOMContentLoaded", function() {
     clampLongCells();
+    checkDetails().forEach(details => { details.dataset.defaultOpen = details.open ? 'true' : 'false'; });
     const hash = window.location.hash.substring(1);
     if (hash && document.getElementById(hash + '-section')) {
         showSection(hash);
-    } else {
+    } else if (!openCheckFromHash(hash)) {
         showSection('overview');
     }
     // Large tables: click a column header to sort (see "Layout for large organizations" in app/reporting/context.py).
@@ -54,20 +83,21 @@ document.addEventListener("DOMContentLoaded", function() {
         th.title = 'Sort by this column';
         th.addEventListener('click', () => sortTable(th));
     });
+    // Opening a collapsed item lays its clamped cells out for the first time.
+    document.querySelectorAll('details.check').forEach(details => {
+        details.addEventListener('toggle', () => { if (details.open) { settleClamps(details); } });
+    });
 });
 
-function toggleSubSection(btn) {
-    const container = btn.nextElementSibling;
-    if (container) {
-        if (container.style.display === "none") {
-            container.style.display = "block";
-            btn.textContent = "Hide Details";
-        } else {
-            container.style.display = "none";
-            btn.textContent = "View Details";
-        }
-    }
-}
+let closedForPrint = [];
+window.addEventListener('beforeprint', () => {
+    closedForPrint = checkDetails().filter(details => !details.open);
+    closedForPrint.forEach(details => { details.open = true; });
+});
+window.addEventListener('afterprint', () => {
+    closedForPrint.forEach(details => { details.open = false; });
+    closedForPrint = [];
+});
 
 // --- Long cells (see app/reporting/layouts.py) ---
 // A plain cell longer than CLAMP_MIN_CHARS is clamped to three lines with a "Show more" toggle; the briefings'
@@ -218,6 +248,11 @@ function applyRowFilter() {
             visible = item.textContent.toLowerCase().includes(term);
         }
         item.hidden = !visible;
+        const details = item.querySelector('details.check');
+        if (details) {
+            // A matching item opens so its rows can be seen; clearing the filter puts the default state back.
+            details.open = term ? visible : details.dataset.defaultOpen === 'true';
+        }
         if (visible) {
             matchedChecks++;
             const page = item.closest('.content-section');
@@ -239,52 +274,65 @@ function applyRowFilter() {
     }
 }
 
-// --- UPDATED: generateAiSummary now includes the new Gemini sparkle theme ---
+// --- Gemini (the two actions on the Overview card, see report.html) ---
+// "Get AI summary" writes the executive summary into the card under the actions. "Get remediation suggestions" asks
+// Gemini for a gcloud command for every failing finding that does not already show a Fix and writes each one into
+// the finding's remediation placeholder on its category page; the status line under the actions says what happened,
+// because the fixes land on pages other than the one the button is on. Gemini's text is escaped before it is marked
+// up (renderMarkdown), so nothing quoted from a finding becomes HTML.
+const GEMINI_FOOTNOTE = "Written by Gemini from this report's findings. Check the details before acting on them.";
+
+function pendingHtml(text) {
+    return `<div class="pending"><span class="spinner"></span><span>${text}</span></div>`;
+}
+
 async function generateAiSummary() {
     const btn = document.getElementById("summaryBtn");
     const container = document.getElementById("ai-summary-container");
     const content = document.getElementById("ai-summary-content");
+    const copyBtn = document.getElementById("copy-summary-btn");
 
     btn.disabled = true;
-    btn.textContent = "Generating...";
-
-    // Apply the new vibrant blue theme and show the container
-    container.classList.add('gemini-summary-card');
-    container.style.display = "block";
-
-    // Inject the HTML for the new sparkle loader
-    const geminiLoaderHtml = `
-        <div class="gemini-loader-container">
-            <div class="gemini-loader">
-                <span class="sparkle"></span><span class="sparkle"></span>
-                <span class="sparkle"></span><span class="sparkle"></span>
-            </div>
-            <p>Generating summary with Gemini...</p>
-        </div>`;
-    content.innerHTML = geminiLoaderHtml;
+    btn.textContent = "Writing summary…";
+    container.hidden = false;
+    if (copyBtn) { copyBtn.hidden = true; }
+    content.innerHTML = pendingHtml("Gemini is reading the report and writing the summary…");
 
     try {
         const response = await fetch('/api/get-summary', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ scope_id: {{ scope_id|tojson }}, job_id: {{ job_id|tojson }} }) 
+            body: JSON.stringify({ scope_id: {{ scope_id|tojson }}, job_id: {{ job_id|tojson }} })
         });
         if (!response.ok) {
-            const err = await response.json();
-            throw new Error(err.error || 'Network response was not ok');
+            const err = await response.json().catch(() => ({}));
+            throw new Error(err.error || `The server answered ${response.status}.`);
         }
         const data = await response.json();
-        content.innerHTML = renderMarkdown(data.summary);
-        btn.textContent = "Summary Generated";
+        // Gemini tends to open with the heading the card already has.
+        const body = renderMarkdown(data.summary || '').replace(/^<h3>\s*executive summary\s*<\/h3>/i, '');
+        content.innerHTML = `<div class="prose-block">${body}</div><p class="footnote">${GEMINI_FOOTNOTE}</p>`;
+        btn.textContent = "Summary ready";
+        if (copyBtn) { copyBtn.hidden = false; }
     } catch (error) {
-        container.classList.remove('gemini-summary-card');
-        content.innerHTML = `<p style='color:var(--error-color);'><strong>Failed to generate summary:</strong> ${error.message}</p>`;
-        btn.textContent = "Error - Retry?";
+        content.innerHTML = `<div class="notice notice-rose"><strong>Couldn't write the summary.</strong> ${escapeHtml(error.message)}</div>`;
+        btn.textContent = "Retry summary";
         btn.disabled = false;
     }
 }
 
-// --- The rest of the functions are unchanged ---
+async function copySummary(btn) {
+    const content = document.getElementById("ai-summary-content").querySelector('.prose-block');
+    try {
+        await navigator.clipboard.writeText((content || {}).innerText || '');
+        btn.textContent = "Copied";
+    } catch (error) {
+        btn.textContent = "Couldn't copy";
+    }
+    setTimeout(() => { btn.textContent = "Copy"; }, 2000);
+}
+
+// --- Cost insights (the Cost Optimization footer's "Get detailed insights", see _macros.html) ---
 let allInsightsData = [];
 let currentPage = 1;
 const rowsPerPage = 10;
@@ -298,16 +346,18 @@ function renderTablePage(page) {
     const pageData = allInsightsData.slice(startIndex, endIndex);
     let tableRowsHtml = '';
     pageData.forEach(insight => {
-        tableRowsHtml += `<tr><td>${insight.check}</td><td>${insight.project}</td><td>${insight.resource}</td><td>${insight.details}</td></tr>`;
+        tableRowsHtml += `<tr><td class="prose">${escapeHtml(insight.check)}</td><td class="code nowrap"><code class="chip">${escapeHtml(insight.project)}</code></td><td class="code"><code class="chip">${escapeHtml(insight.resource)}</code></td><td class="prose">${escapeHtml(insight.details)}</td></tr>`;
     });
-    const tableHtml = `<h3>Detailed Insights</h3><table class="styled-table"><thead><tr><th>Check</th><th>Project</th><th>Resource</th><th>Details</th></tr></thead><tbody>${tableRowsHtml}</tbody></table>`;
-    const totalPages = Math.ceil(allInsightsData.length / rowsPerPage);
+    const count = allInsightsData.length;
+    const tableHtml = `<div class="card-title-row"><h3>Detailed insights</h3><span class="muted"><span class="mono">${count}</span> recommendation${count === 1 ? '' : 's'}</span></div>`
+        + `<table class="data-table"><thead><tr><th>Check</th><th>Project</th><th>Resource</th><th>Details</th></tr></thead><tbody>${tableRowsHtml}</tbody></table>`;
+    const totalPages = Math.ceil(count / rowsPerPage);
     let paginationHtml = '';
     if (totalPages > 1) {
         paginationHtml = '<div class="pagination-controls">';
-        paginationHtml += `<button onclick="renderTablePage(${page - 1})" ${page === 1 ? 'disabled' : ''}>&laquo; Previous</button>`;
-        paginationHtml += `<span> Page ${page} of ${totalPages} </span>`;
-        paginationHtml += `<button onclick="renderTablePage(${page + 1})" ${page === totalPages ? 'disabled' : ''}>Next &raquo;</button>`;
+        paginationHtml += `<button class="btn btn-outline btn-sm" onclick="renderTablePage(${page - 1})" ${page === 1 ? 'disabled' : ''}>Previous</button>`;
+        paginationHtml += `<span>Page <span class="mono">${page}</span> of <span class="mono">${totalPages}</span></span>`;
+        paginationHtml += `<button class="btn btn-outline btn-sm" onclick="renderTablePage(${page + 1})" ${page === totalPages ? 'disabled' : ''}>Next</button>`;
         paginationHtml += '</div>';
     }
     placeholder.innerHTML = tableHtml + paginationHtml;
@@ -316,43 +366,107 @@ function renderTablePage(page) {
 async function fetchInsights(btn) {
     const placeholder = document.getElementById('insights-placeholder');
     const introText = document.querySelector('.insights-intro');
-    const loader = btn.querySelector('.loader');
     btn.disabled = true;
-    loader.style.display = 'inline-block';
-    placeholder.innerHTML = "";
+    btn.textContent = "Loading insights…";
+    placeholder.innerHTML = pendingHtml("Querying the Recommender API for every project in scope — this can take a minute…");
     try {
         const response = await fetch('/api/get-insights', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ scope: {{ scope|tojson }}, scope_id: {{ scope_id|tojson }} })
         });
-        if (!response.ok) { throw new Error('Network response was not ok'); }
+        if (!response.ok) { throw new Error(`The server answered ${response.status}.`); }
         allInsightsData = await response.json();
         if (allInsightsData.length === 0) {
-            placeholder.innerHTML = "<p>No detailed insights found.</p>";
+            placeholder.innerHTML = '<div class="empty-state"><span class="dot dot-compliant"></span>The Recommender API has no cost recommendations for this scope.</div>';
         } else {
-            if (introText) { introText.style.display = 'none'; }
+            if (introText) { introText.hidden = true; }
             renderTablePage(1);
         }
-        btn.style.display = 'none';
+        btn.hidden = true;
     } catch (error) {
-        placeholder.innerHTML = "<p style='color:var(--error-color);'>Failed to load insights. Check logs.</p>";
-        btn.textContent = "Error - Retry?";
+        placeholder.innerHTML = `<div class="notice notice-rose"><strong>Couldn't load the insights.</strong> ${escapeHtml(error.message)} The server logs have the detail.</div>`;
+        btn.textContent = "Try again";
         btn.disabled = false;
-        loader.style.display = 'none';
     }
 }
 
+function escapeHtml(text) {
+    return String(text == null ? '' : text).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
+}
+
+function renderInline(text) {
+    return escapeHtml(text)
+        .replace(/`([^`]+)`/g, '<code>$1</code>')
+        .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+        .replace(/(^|[\s(])\*([^*\s][^*]*?)\*(?=[\s.,;:)]|$)/g, '$1<em>$2</em>');
+}
+
+// The summary prompt asks for GitHub-flavored Markdown: headings, paragraphs, bulleted and numbered lists, bold,
+// italics and inline code are rendered; everything is escaped first, so nothing quoted from a finding becomes HTML.
 function renderMarkdown(text) {
-    text = text.replace(/\*\*([^\*]+)\*\*/g, '<strong>$1</strong>');
-    text = text.replace(/^\*\s(.*)$/gm, '<li>$1</li>');
-    text = text.replace(/(<li>.*<\/li>)/s, '<ul>$1</ul>');
-    text = text.replace(/\n/g, '<br>');
+    const html = [];
+    let list = null;
+    let paragraph = [];
+    const closeList = () => { if (list) { html.push(`</${list}>`); list = null; } };
+    const flushParagraph = () => { if (paragraph.length) { html.push(`<p>${renderInline(paragraph.join(' '))}</p>`); paragraph = []; } };
+    const item = (kind, body) => { flushParagraph(); if (list !== kind) { closeList(); list = kind; html.push(`<${kind}>`); } html.push(`<li>${renderInline(body)}</li>`); };
+    String(text == null ? '' : text).replace(/\r\n?/g, '\n').split('\n').forEach(raw => {
+        const line = raw.trim();
+        let m;
+        if (!line) { flushParagraph(); closeList(); }
+        else if ((m = line.match(/^#+\s+(.*)$/))) { flushParagraph(); closeList(); html.push(`<h3>${renderInline(m[1])}</h3>`); }
+        else if ((m = line.match(/^[-*+\u2022]\s+(.*)$/))) { item('ul', m[1]); }
+        else if ((m = line.match(/^\d+[.)]\s+(.*)$/))) { item('ol', m[1]); }
+        else if (list && /^\s{2,}\S/.test(raw) && html.length) { html[html.length - 1] = html[html.length - 1].replace(/<\/li>$/, ` ${renderInline(line)}</li>`); }
+        else { paragraph.push(line); }
+    });
+    flushParagraph();
+    closeList();
+    return html.join('');
+}
+
+// The status line under the Gemini actions: pending (with the spinner), done, or an error notice.
+function setGeminiStatus(html, state) {
+    const status = document.getElementById('gemini-status');
+    if (!status) { return; }
+    status.hidden = false;
+    status.className = `gemini-status is-${state}`;
+    if (state === 'error') {
+        status.innerHTML = `<div class="notice notice-rose">${html}</div>`;
+    } else {
+        status.innerHTML = `${state === 'pending' ? '<span class="spinner"></span>' : ''}<span>${html}</span>`;
+    }
+}
+
+// "Suggested fixes added to 12 findings: Security & Identity (5) · Cost Optimization (7)." with links to the pages.
+// Counted from the page, so a retry after an error reports every fix added so far.
+function fixesSummary(declined) {
+    const perSection = new Map();
+    document.querySelectorAll('.remediation-placeholder.fix-block').forEach(placeholder => {
+        const section = placeholder.closest('.content-section');
+        if (section) { perSection.set(section, (perSection.get(section) || 0) + 1); }
+    });
+    const drafted = Array.from(perSection.values()).reduce((sum, count) => sum + count, 0);
+    const parts = Array.from(perSection, ([section, count]) => {
+        const id = section.id.replace(/-section$/, '');
+        const title = (section.querySelector('.section-header h2') || {}).textContent || id;
+        return `<a href="#${id}" onclick="showSection('${id}')">${escapeHtml(title)}</a> (<span class="mono">${count}</span>)`;
+    });
+    const findings = n => `${n} finding${n === 1 ? '' : 's'}`;
+    let text = drafted
+        ? `Suggested fixes added to ${findings(drafted)}: ${parts.join(' · ')}.`
+        : `Gemini couldn't draft a command for ${declined === 1 ? 'the finding' : `any of the ${findings(declined)}`}.`;
+    if (drafted && declined) { text += ` Gemini couldn't draft a command for ${declined} of them.`; }
     return text;
 }
 
-async function getGeminiSuggestions() {
-    const btn = event.target;
+function suggestedFixHtml() {
+    return '<strong>Suggested fix</strong> <span class="pill pill-sky">AI-generated</span>';
+}
+
+async function getGeminiSuggestions(btn) {
+    btn = btn || document.getElementById('suggestionsBtn');
     btn.disabled = true;
     const findingsToFix = [];
     let alreadyFixed = 0;
@@ -383,7 +497,6 @@ async function getGeminiSuggestions() {
                     if (i >= MAX_ROWS_FOR_FIX) { return; }  // a sample is enough for one gcloud command
                     const cells = row.querySelectorAll('td');
                     const currentProject = (projectIndex !== -1) ? cells[projectIndex].textContent.trim() : '';
-                    const recommendation = cells[recommendationIndex].textContent.trim();
 
                     if (i === 0) { projectId = currentProject; } // Use first project for the batch context
 
@@ -415,40 +528,63 @@ async function getGeminiSuggestions() {
     });
 
     if (findingsToFix.length === 0) {
-        btn.textContent = alreadyFixed ? "Every finding already shows its fix" : "No Actionable Findings";
+        btn.textContent = alreadyFixed ? "Every finding already shows its fix" : "No failing findings";
+        setGeminiStatus(alreadyFixed ? "Every failing finding already shows its fix, so there is nothing to ask Gemini for." : "There are no failing findings to draft fixes for.", 'done');
         return;
     }
 
+    // Each finding shows that its fix is on the way; the status line says where the fixes will appear.
+    findingsToFix.forEach(finding => {
+        const placeholder = document.getElementById(`fix-${finding.index}`);
+        if (placeholder) { placeholder.innerHTML = pendingHtml("Gemini is drafting a fix…"); }
+    });
+    setGeminiStatus(`Drafting fixes for ${findingsToFix.length} finding${findingsToFix.length === 1 ? '' : 's'} — each appears under its finding, on the category pages, as it arrives.`, 'pending');
+
+    let drafted = 0;
+    let declined = 0;
     const BATCH_SIZE = 5;
     for (let i = 0; i < findingsToFix.length; i += BATCH_SIZE) {
         const batch = findingsToFix.slice(i, i + BATCH_SIZE);
-        btn.textContent = `Getting Fixes (${i + batch.length}/${findingsToFix.length})...`;
+        btn.textContent = `Drafting fixes (${Math.min(i + batch.length, findingsToFix.length)} of ${findingsToFix.length})…`;
         try {
             const response = await fetch('/api/get-suggestions', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ findings: batch })
             });
-            if (!response.ok) { throw new Error(`API returned status ${response.status}`); }
+            if (!response.ok) { throw new Error(`The server answered ${response.status}.`); }
             const suggestions = await response.json();
-            for (const [key, suggestion] of Object.entries(suggestions)) {
-                 const originalIndex = key.split('-')[1];
-                 if (suggestion) {
-                    const placeholder = document.getElementById(`fix-${originalIndex}`);
-                    if (placeholder) {
-                        const preNode = document.createElement("pre");
-                        preNode.textContent = suggestion;
-                        placeholder.className = 'remediation-placeholder fix-block';
-                        placeholder.innerHTML = `<strong>Suggested fix</strong> <span class="muted">(AI-generated)</span>`;
-                        placeholder.appendChild(preNode);
-                    }
+            batch.forEach(finding => {
+                const placeholder = document.getElementById(`fix-${finding.index}`);
+                if (!placeholder) { return; }
+                const suggestion = String(suggestions[`finding-${finding.index}`] || '').trim();
+                // The service answers with a gcloud command, or with a sentence saying why it could not.
+                if (suggestion.startsWith('gcloud')) {
+                    drafted++;
+                    placeholder.className = 'remediation-placeholder fix-block';
+                    placeholder.innerHTML = suggestedFixHtml();
+                    const preNode = document.createElement("pre");
+                    preNode.textContent = suggestion;
+                    placeholder.appendChild(preNode);
+                } else {
+                    declined++;
+                    placeholder.className = 'remediation-placeholder';
+                    placeholder.innerHTML = '<p class="remediation-note">Gemini couldn\u2019t draft a command for this finding.</p>';
                 }
-            }
-        } catch (e) {
-            console.error("Failed to get Gemini suggestions:", e);
-            btn.textContent = "Error - Check Logs";
+            });
+        } catch (error) {
+            console.error("Failed to get Gemini suggestions:", error);
+            findingsToFix.slice(i).forEach(finding => {
+                const placeholder = document.getElementById(`fix-${finding.index}`);
+                if (placeholder && placeholder.querySelector('.pending')) { placeholder.innerHTML = ''; }
+            });
+            const before = drafted ? ` ${drafted} fix${drafted === 1 ? ' was' : 'es were'} added before the error; "Try again" asks only for the rest.` : '';
+            setGeminiStatus(`<strong>Couldn't get fixes from Gemini.</strong> ${escapeHtml(error.message)}${before}`, 'error');
+            btn.textContent = "Try again";
+            btn.disabled = false;
             return;
         }
     }
-    btn.textContent = "Suggestions Loaded";
+    btn.textContent = "Fixes added";
+    setGeminiStatus(fixesSummary(declined), 'done');
 }

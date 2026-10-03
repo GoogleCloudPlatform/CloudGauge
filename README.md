@@ -10,7 +10,7 @@ It is built with Python/Flask, structured as a modular application package (Flas
 
 Final results are delivered as an interactive **HTML report** and a **CSV file** stored in a Google Cloud Storage bucket. The reports also feature **Gemini-powered** executive summaries and `gCloud` remediation suggestions.
 
-![CloudGauge Report Demo](./assets/cloudgauge.gif)
+![The CloudGauge report: the Overview page](./assets/report_overview.png)
 
 ## **Table of Contents**
 
@@ -79,7 +79,7 @@ CloudGauge scans your organization across several key domains, modeled after the
 
 ### **AI-Powered Insights (Gemini)**
 
-* **Executive Summary & Remediation Suggestions**: Generated on demand from the report using Gemini on Vertex AI (via the `google-genai` SDK). Remediation follows one rule: a check that knows its fix shows it under the finding itself; **Get Remediation Suggestions** fills in the findings that have none, and marks what it adds as *AI-generated*.
+* **Executive Summary & Remediation Suggestions**: Generated on demand from the report using Gemini on Vertex AI (via the `google-genai` SDK). Remediation follows one rule: a check that knows its fix shows it under the finding itself; **Get remediation suggestions** fills in the findings that have none, and marks what it adds as *AI-generated*.
 * **Automatic model selection**: By default (`GEMINI_MODEL=auto`) CloudGauge uses the newest stable Gemini Flash model available to your project, so it keeps working when older models are retired. Pin a specific model with the `GEMINI_MODEL` environment variable (see [Configuration Reference](#configuration-reference)).
 
 ##  **Architecture**
@@ -198,10 +198,34 @@ A report for 1,000 projects can hold tens of thousands of finding rows. The HTML
 * **Briefings: Google's messages, outside the score.** Two items are *briefings* rather than checks: **Service Health Incidents** (Reliability) and **Advisory Notifications** (Security). They list what Google told the customer — incidents that touched the scanned projects, Mandatory Service Announcements, advisories, sensitive-action digests — and are always *Informational*: they never count as compliant or non-compliant and do not move a category's score. Each is one table for the whole scan, one row per incident or notification naming every project it concerns (never one row per project), newest and active first. What *is* scored is whether the customer can receive these messages at all: **Personalized Service Health API Coverage** (a project without the Service Health API) and **Advisory Notifications Settings** (a notification type turned off, or settings the scanner cannot read).
 * **Bounded page size.** A table holds at most 2,000 rows in the page; a note under it says how many were left out and links to the complete list. The CSV report always has every row and can be downloaded at any time from `/report/<job_id>/<scope_id>/csv` (the signed link on the status page expires after an hour; the toolbar link in the report does not).
 * **Bounded prompts.** The AI executive summary is generated from at most 25 rows per check (plus the row counts), and a remediation prompt from the first 25 rows of a finding, so Gemini calls stay within their input limits however large the scan.
-* **One remediation block per failing finding.** A check that knows its fix (Personalized Service Health API Coverage, Advisory Notifications Settings, Essential Contacts) shows it in a **Fix** block right under its table — the exact `gcloud` command or console step, one line per distinct fix — rather than in a column repeated on every row. For every other Action Required or Investigation Recommended finding, **Get Remediation Suggestions** asks Gemini and puts the answer in the same place, labelled *Suggested fix (AI-generated)*; checks that already show a fix are not sent to Gemini. The CSV keeps `Fix` as a column.
+* **One remediation block per failing finding.** A check that knows its fix (Personalized Service Health API Coverage, Advisory Notifications Settings, Essential Contacts) shows it in a **Fix** block right under its table — the exact `gcloud` command or console step, one line per distinct fix — rather than in a column repeated on every row. For every other Action Required or Investigation Recommended finding, **Get remediation suggestions** asks Gemini and puts the answer in the same place, labelled *Suggested fix (AI-generated)*; checks that already show a fix are not sent to Gemini. The CSV keeps `Fix` as a column.
 * **Readable tables, nothing cut.** Cells wrap at word boundaries (never mid-word), short columns — dates, states, IDs, counts — stay on one line, a table wider than the page scrolls sideways instead of squeezing, and a plain cell longer than a few lines is clamped to three with a *Show more* toggle. The two briefings have their own layouts: an incident row is `State | When (UTC) | Incident | Products | Projects | Relevance | ID` (start and end stacked, the locations as a muted line under the title, a long project or location list as a count that opens on click) and a notification row is `Date | Type | Notification | Details` (the message under its subject, clamped to three lines with *Show full message*; attachments and digest actions as a list). Nothing is shortened at the source: every location, every attachment row and the whole message are in the page (sortable and filterable, text behind a disclosure included) and in the CSV, whose columns are the raw ones.
 
 The caps live in `app/reporting/context.py` (`MAX_ROWS_PER_CHECK`, `ROWS_PER_PAGE`), `app/reporting/layouts.py` (the layout rules and their thresholds) and `app/services/gemini.py` (`SUMMARY_ROWS_PER_CHECK`, `REMEDIATION_MAX_CHARS`).
+
+### **The Pages**
+
+CloudGauge has three screens, redesigned in v14.2 around one small design system (`app/templates/_design.css`, inlined into every page so a stored report never depends on a stylesheet served later):
+
+* **Setup and status** — one centred card on a dot-grid canvas. The setup card is the scope and resource selects and one black **Start scan** button; the status card shows a thin progress bar and the current task while the scan runs, then **Scan complete** with **View interactive report** and **Download CSV** (or **Scan failed** with the last message).
+* **The report's Overview** — a fixed sidebar (each category with the colour of its worst status and the number of items that need a human, and when the report was generated), four count cards, the coverage line, the review scores as bars, and the Gemini card with **Get AI summary** and **Get remediation suggestions**. The executive summary appears in its own card under the actions, labelled *AI-generated*, with a **Copy** button; the status line under the actions reports where the remediation suggestions landed ("Suggested fixes added to 12 findings: Security & Identity (5) · Cost Optimization (7)") and offers **Try again** after an error.
+* **A category page** — the checks as accordions, worst first. Each row is a status dot, the check's name with its one-line summary ("1,204 findings across 312 of 1,000 projects (31%)"), and a status pill; on load the items that need a human (Action Required, Investigation Recommended, Error) are open and the Compliant and Informational ones collapsed. **Expand all** / **Collapse all** sit next to the filter box, and a `#<section>-<check>` link opens that one check.
+
+![A category page: accordions, status pills, monospace resources](./assets/report_findings.png)
+
+The rules, which `tests/test_design.py` holds the templates to:
+
+| Rule | In practice |
+|---|---|
+| Separation is a 1px border, never a shadow | `border: 1px solid` zinc-200 on cards, the sidebar, each accordion row; no `box-shadow` anywhere |
+| A quiet canvas, white content | page background zinc-50, cards and table rows white |
+| One high-contrast primary action | the black (zinc-900) button: *Start scan*, *Get AI summary*, *View interactive report*; everything else outlined or a text link |
+| Status is a dot and a soft pill, in a semantic colour | rose = Action Required, amber = Investigation Recommended, emerald = Compliant, zinc = Error, sky = Informational; each pill is a pale fill, a one-shade-darker border and dark text of its hue — never raw red or green |
+| Inter for text, monospace for anything a machine would read | project IDs, principals, instances, incident IDs, dates, counts, scores, the report ID and the job ID are monospace (`code`-styled chips for resources); the four KPI numbers are the one exception, set light in Inter with tabular figures |
+| Dense, quiet tables | no vertical rules; uppercase, letter-spaced, zinc-500 headers; a hairline under each row; a row hover; tight cell padding |
+| Sentence-case copy | "Review your cloud environment", "Scan complete", "Get AI summary"; status and category names keep their capitals |
+
+<p align="center"><img src="./assets/setup.png" alt="The setup page" width="49%"> <img src="./assets/scan_complete.png" alt="The status page when the scan is complete" width="49%"></p>
 
 ### **Project Structure**
 
@@ -230,7 +254,7 @@ app/
 ├── services/            # GCP clients, Cloud Tasks, GCS results store, Gemini, insights, org policies
 ├── reporting/           # HTML and CSV report builders; layouts.py lays out a check's table for the page (v14.1)
 ├── synthetic/           # Synthetic load mode: a generated organization behind the GCP client seam
-└── templates/           # index.html, status.html, report/ (HTML, CSS, JS)
+└── templates/           # _design.css (tokens and primitives every page inlines, v14.2), index.html, status.html, report/ (HTML, CSS, JS)
 tests/                   # pytest suite (see Local Development & Testing)
 tools/synthetic_scan.py  # Offline load test against the synthetic organization (see Load Testing)
 Dockerfile               # Production image
@@ -597,11 +621,11 @@ gcloud run services update-traffic ${SERVICE_NAME} --region ${REGION} --to-revis
 ## **How to Use** 
 
 1. Navigate to your service's URL (`${SERVICE_URL}`).  
-2. Select your Scope from Dropdown menu : Organization, Folder or Project
-3. Select the resource from the Dropdown
-4. Click "Start Scan".  
+2. Choose your scope: Organization, Folder or Project.
+3. Choose the resource.
+4. Click **Start scan**.  
 5. You will be redirected to a status page. Wait for the scan to complete (this can take 5-15 minutes depending on org size).  
-6. Once finished, links to the **Interactive HTML Report** and **Download CSV Report** will appear. The report itself also has a **Download CSV (all rows)** link, a filter box, and sortable, paged tables (see [Reports for Large Organizations](#reports-for-large-organizations)).
+6. Once finished, **View interactive report** and **Download CSV** appear. The report itself also has a **Download CSV** button (all rows, no expiry), a filter box, and sortable, paged tables (see [Reports for Large Organizations](#reports-for-large-organizations) and [The Pages](#the-pages)).
 
 > **Checks that can't run are reported, not hidden.** If a check fails (for example, a missing permission or a disabled API), the report shows it with status **Error** and the reason, in the check's own section. Errors count against that section's score, so fix the cause (see [Permission Denied on Google Cloud APIs](#permission-denied-on-google-cloud-apis)) for an accurate score. Organization scans also include the **Security Command Center Status** check.
 

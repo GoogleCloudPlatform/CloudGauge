@@ -15,8 +15,13 @@
 #}
 {#
   The interactive scan report. It is stored in GCS and served as-is later, so it
-  is self-contained: _styles.css and _script.js are inlined, not linked.
+  is self-contained: _design.css, _styles.css and _script.js are inlined, not linked.
   Variables come from app.reporting.context.ReportContext; logic belongs there.
+
+  Layout: a fixed sidebar (the sections, each with its worst status and the
+  number of items that need a human) and one page at a time in the main column.
+  The Overview is the four counts, the coverage line, the review scores and the
+  Gemini actions; each category page is a list of accordions (_macros.html).
 #}
 {% from "report/_macros.html" import category_section %}
 {% set csv_href = "/report/" ~ (job_id|pathsegment) ~ "/" ~ (scope_id|pathsegment) ~ "/csv" %}
@@ -26,72 +31,96 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>CloudGauge Report: {{ scope_title }} {{ scope_id }}</title>
-    <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&display=swap" rel="stylesheet">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet">
     <style>
+{% include "_design.css" %}
 {% include "report/_styles.css" %}
     </style>
 </head>
 <body>
-    <nav class="sidebar">
-        <div class="sidebar-header"><h2>Report Sections</h2></div>
-        <a href="#overview" class="nav-link active" onclick="showSection('overview', this)">Overview</a>
-        <a href="#security-identity" class="nav-link" onclick="showSection('security-identity', this)">Security & Identity</a>
-        <a href="#cost-optimization" class="nav-link" onclick="showSection('cost-optimization', this)">Cost Optimization</a>
-        <a href="#reliability-resilience" class="nav-link" onclick="showSection('reliability-resilience', this)">Reliability & Resilience</a>
-        <a href="#operational-excellence-observability" class="nav-link" onclick="showSection('operational-excellence-observability', this)">Operational Excellence</a>
+    <nav class="sidebar" aria-label="Report sections">
+        <div class="sidebar-brand">CloudGauge</div>
+        <a href="#overview" class="nav-link active" onclick="showSection('overview', this)"><span class="nav-label">Overview</span></a>
+        {% for section in sections %}
+        <a href="#{{ section.section_id }}" class="nav-link" onclick="showSection('{{ section.section_id }}', this)" title="{{ section.title }}: {{ section.attention_count }} item{{ '' if section.attention_count == 1 else 's' }} need{{ 's' if section.attention_count == 1 else '' }} attention">
+            <span class="nav-label">{{ section.nav_title }}</span>
+            <span class="nav-meta"><span class="dot dot-{{ section.worst_status_class }}"></span><span class="mono">{{ section.attention_count }}</span></span>
+        </a>
+        {% endfor %}
+        <div class="sidebar-foot"><span class="sidebar-foot-label">Generated</span><time>{{ generated_at }}</time></div>
     </nav>
     <div class="main-content">
-        <h1>CloudGauge Report</h1>
-        <p style="color: var(--light-text-color);">Scope: {{ scope_title }} | ID: {{ scope_id }} | Report ID: {{ job_id }}</p>
-        <div class="report-toolbar no-filter">
-            <input id="row-filter" type="search" placeholder="Filter findings by project ID, resource name, or any text" aria-label="Filter findings" oninput="scheduleRowFilter()">
-            <span id="filter-status" aria-live="polite"></span>
-            <a class="toolbar-link" href="{{ csv_href }}">Download CSV (all rows)</a>
-        </div>
+        <header class="report-header">
+            <div>
+                <h1>CloudGauge report</h1>
+                <dl class="report-meta">
+                    <dt>Scope</dt><dd>{{ scope_title }} {{ scope_id }}</dd>
+                    <dt>Report ID</dt><dd>{{ job_id }}</dd>
+                </dl>
+            </div>
+            <a class="btn btn-outline btn-sm" href="{{ csv_href }}">Download CSV</a>
+        </header>
 {% if banner %}
-        <div role="note" class="report-banner" style="margin: 0 0 20px; padding: 12px 16px; border-left: 6px solid #f9ab00; background: #fef7e0; color: #5f4b00; font-weight: 500;">{{ banner }}</div>
+        <div role="note" class="notice notice-amber report-banner">{{ banner }}</div>
 {% endif %}
+        <div class="report-toolbar no-filter">
+            <input id="row-filter" type="search" class="input" placeholder="Filter findings by project ID, resource name, or any text" aria-label="Filter findings" oninput="scheduleRowFilter()">
+            <span id="filter-status" aria-live="polite"></span>
+            <span class="toolbar-actions">
+                <button type="button" class="link-btn" onclick="setAllChecks(true)">Expand all</button>
+                <button type="button" class="link-btn" onclick="setAllChecks(false)">Collapse all</button>
+            </span>
+        </div>
 
         <div id="overview-section" class="content-section">
-            <div class="checks-section">
-                <h2>Overview</h2>
-                <div class="overview-container">
-                    <div class="summary-card action-required"><h3>Action Required</h3><p class="count">{{ overview.action_count }}</p></div>
-                    <div class="summary-card investigation"><h3>Investigation Recommended</h3><p class="count">{{ overview.investigation_count }}</p></div>
-                    <div class="summary-card compliant"><h3>Compliant</h3><p class="count">{{ overview.compliant_count }}</p></div>
-                    <div class="summary-card error"><h3>Errors</h3><p class="count">{{ overview.error_count }}</p></div>
-                </div>
+            <h2 class="sr-only">Overview</h2>
+            <div class="kpi-grid">
+                <div class="kpi"><span class="dot dot-action-required"></span><h3>Action Required</h3><p class="count">{{ overview.action_count }}</p><span class="kpi-unit">checks</span></div>
+                <div class="kpi"><span class="dot dot-investigation"></span><h3>Investigation Recommended</h3><p class="count">{{ overview.investigation_count }}</p><span class="kpi-unit">checks</span></div>
+                <div class="kpi"><span class="dot dot-compliant"></span><h3>Compliant</h3><p class="count">{{ overview.compliant_count }}</p><span class="kpi-unit">checks</span></div>
+                <div class="kpi"><span class="dot dot-error"></span><h3>Errors</h3><p class="count">{{ overview.error_count }}</p><span class="kpi-unit">checks</span></div>
+            </div>
 {% if coverage %}
-                <div role="note" class="coverage-note" style="margin: 16px 0 0; padding: 10px 14px; border-left: 6px solid {{ '#34a853' if coverage.complete else '#f9ab00' }}; background: {{ '#e6f4ea' if coverage.complete else '#fef7e0' }}; color: #3c4043;">
-                    <strong>Coverage:</strong> {{ "{:,}".format(coverage.projects_scanned) }} of {{ "{:,}".format(coverage.total_projects) }} projects scanned ({{ coverage.scanned_pct }}%)
-                    {%- if coverage.projects_partial %}, {{ "{:,}".format(coverage.projects_partial) }} partially scanned (some checks did not finish in time){% endif %}
-                    {%- if coverage.projects_not_scanned %}, {{ "{:,}".format(coverage.projects_not_scanned) }} not scanned{% endif %}
-                    &middot; {{ coverage.checks_label }}: {{ coverage.scope_checks_text }}
-                    {%- if not coverage.complete %}. Checks that could not run are listed as errors in their sections.{% endif %}
-                </div>
+            <p role="note" class="coverage-note">
+                <span class="dot dot-{{ 'compliant' if coverage.complete else 'investigation' }}"></span>
+                <span><strong>Coverage:</strong> {{ "{:,}".format(coverage.projects_scanned) }} of {{ "{:,}".format(coverage.total_projects) }} projects scanned ({{ coverage.scanned_pct }}%)
+                {%- if coverage.projects_partial %}, {{ "{:,}".format(coverage.projects_partial) }} partially scanned (some checks did not finish in time){% endif %}
+                {%- if coverage.projects_not_scanned %}, {{ "{:,}".format(coverage.projects_not_scanned) }} not scanned{% endif %}; {{ coverage.checks_label }} {{ coverage.scope_checks_text }}.
+                {%- if not coverage.complete %} Checks that could not run are listed as errors in their sections.{% endif %}</span>
+            </p>
 {% endif %}
-                <div class="section-footer" style="display:flex; justify-content:center; margin-left:-10px;">
-                    <button class="btn" onclick="getGeminiSuggestions()">Get Remediation Suggestions</button>
-                    <button id="summaryBtn" class="btn summary-btn" onclick="generateAiSummary()">Get AI Summary</button>
-                </div>
-            </div>
-            <div id="ai-summary-container" class="checks-section" style="display: none;">
-                <h2>Executive Summary (AI Generated)</h2>
-                <div id="ai-summary-content" style="line-height: 1.6;"></div>
-            </div>
-            <div class="checks-section">
-                <h2>Review Scores</h2>
-                <table class="styled-table">
+            <section class="card">
+                <h2>Review scores</h2>
+                <table class="data-table scores-table">
                     <tbody>
                     {% for row in score_summary %}
                         <tr>
-                            <td><a href="#{{ row.section_id }}" onclick="showSection('{{ row.section_id }}')">{{ row.category_name }}</a></td>
-                            <td><span class="score-badge score-{{ row.score_class }}">{{ row.score_display }}%</span></td>
+                            <td class="score-name"><a href="#{{ row.section_id }}" onclick="showSection('{{ row.section_id }}')">{{ row.category_name }}</a></td>
+                            <td class="score-bar-cell"><span class="bar"><span class="bar-fill score-{{ row.score_class }}" style="width: {{ row.score_display }}%"></span></span></td>
+                            <td class="num score-cell"><span class="score score-{{ row.score_class }}">{{ row.score_display }}%</span></td>
+                            <td class="score-of">{{ row.pass_count }} of {{ row.scored_count }}</td>
                         </tr>
                     {% endfor %}
                     </tbody>
                 </table>
-            </div>
+            </section>
+            <section class="card gemini-card">
+                <div>
+                    <h2>Gemini</h2>
+                    <p>Summarize this report for leadership, or draft a fix for each failing finding.</p>
+                </div>
+                <div class="gemini-actions">
+                    <button id="summaryBtn" class="btn btn-primary" onclick="generateAiSummary()">Get AI summary</button>
+                    <button id="suggestionsBtn" class="btn btn-outline" onclick="getGeminiSuggestions(this)">Get remediation suggestions</button>
+                </div>
+                <div id="gemini-status" class="gemini-status" role="status" hidden></div>
+            </section>
+            <section id="ai-summary-container" class="card" hidden>
+                <div class="card-title-row"><h2>Executive summary</h2><span class="pill pill-sky">AI-generated</span><button id="copy-summary-btn" class="btn btn-outline btn-sm" onclick="copySummary(this)" hidden>Copy</button></div>
+                <div id="ai-summary-content"></div>
+            </section>
         </div>
         {% for section in sections %}
         {{ category_section(section, scope_id, rows_per_page, csv_href) }}

@@ -8,7 +8,91 @@ the test suite running inside the image, a zero-traffic canary revision scanned
 against a real organization, promotion, and a production scan compared fact for
 fact with the previous version's report.
 
-Versions are the image tags (`v5` … `v14.1`); the commit is the one that shipped.
+Versions are the image tags (`v5` … `v14.2`); the commit is the one that shipped.
+
+---
+
+## v14.2 — The redesign: one design system for the three pages
+
+A release about how the application looks and reads, prompted by a review of
+the v14.1 pages: they relied on framework defaults — primary red, green and
+blue, drop shadows, boxy cards, one type size for everything — and did not
+read as a product built for enterprise review. No new checks, no new settings,
+no upgrade steps; the data on every page is unchanged.
+
+### Changed: the three screens
+
+- **Setup and status** are one centred card (448px) on a dot-grid canvas. The
+  setup card is the two selects and one black **Start scan** button, with a
+  help line under the resource select that says what happened ("3 projects
+  available", "No folders are visible to the service account.", or, in rose,
+  "Couldn't load the projects. Check the service account's permissions and
+  the application logs."). The status card shows a thin progress bar, the
+  current task and the job ID; then **Scan complete** with **View interactive
+  report** and **Download CSV**, or **Scan failed** with the last message in
+  a code block and a link to start another scan. The card names the scope
+  ("organization 880241551927").
+- **The report's Overview** has a fixed sidebar — each category with a dot in
+  the colour of its worst status and the number of items that need a human,
+  and a "Generated" time at the foot — four count cards with the numbers set
+  large and light, the coverage line with its own dot, the review scores as
+  bars (bar, percentage, "3 of 11"), and the Gemini card.
+- **Category pages** show the checks as accordions. Each row is a dot, the
+  name with the one-line summary under it, and a status pill; the items that
+  need a human (Action Required, Investigation Recommended, Error) are open
+  on load, Compliant and Informational ones collapsed. **Expand all** /
+  **Collapse all** sit on the toolbar next to the filter box; the filter opens
+  what it matches and restores the default when cleared; printing opens
+  everything; a `#<section>-<check>` link opens that one check. The category
+  heading carries a "27% compliant" pill and a strip of per-status counts.
+- **The Gemini flows** were restyled with the rest. *Get AI summary* writes
+  the summary into its own card under the actions — rendered from Gemini's
+  Markdown (headings, lists, bold, code), labelled *AI-generated*, with a
+  **Copy** button and a footnote — and the button reads *Retry summary* after
+  an error. *Get remediation suggestions* shows "Gemini is drafting a fix…"
+  under each finding it asked about, and a status line under the actions
+  says where the answers landed ("Suggested fixes added to 12 findings:
+  Security & Identity (5) · Cost Optimization (7)", with links to the pages),
+  how many Gemini declined, and after an error how many were added before it
+  and that **Try again** asks only for the rest. Error notices are the same
+  rose notice everywhere.
+
+### The design system
+
+Everything shared lives in `app/templates/_design.css` — tokens (Tailwind's
+zinc / rose / amber / emerald / sky palette, Inter and a monospace stack) and
+primitives (card, notice, buttons, dot, pill, chip, table, form controls,
+spinner) — and is inlined into every page, so a stored report still depends on
+nothing served later. The rules, which the new `tests/test_design.py` holds
+the templates to:
+
+| Rule | In practice |
+|---|---|
+| Separation is a 1px border, never a shadow | zinc-200 borders on cards, the sidebar and each accordion row; no `box-shadow` anywhere |
+| A quiet canvas, white content | zinc-50 page, white cards and rows |
+| One high-contrast primary action per page | the zinc-900 button; everything else outlined or a text link |
+| Status is a dot and a soft pill in a semantic colour | rose / amber / emerald / zinc / sky for the five statuses, each pill a pale fill, a one-shade-darker border and dark text of its hue; never raw red or green |
+| Inter for text, monospace for anything a machine would read | IDs, principals, instances, dates, counts, scores, the report and job IDs; the KPI numbers are the one exception (light Inter, tabular figures) |
+| Dense, quiet tables | no vertical rules; uppercase letter-spaced zinc-500 headers; a hairline under each row; a hover; 6px cell padding |
+| Sentence-case copy | "Review your cloud environment", "Scan complete", "Get AI summary"; status and category names keep their capitals |
+
+### Unchanged, deliberately
+
+- **What the pages say.** Every check, finding, count, score, summary line,
+  coverage sentence and "Projects not checked" item is the same; the parity
+  suite still compares each report fact for fact with the legacy generator.
+- **The CSV, the API and the URLs.** `/api/*` requests and responses, the
+  form the setup page posts, the values the status page embeds and polls,
+  and the report's three Gemini calls are byte-for-byte what they were.
+- **The scale rules of v14.1** (sorting, paging, filtering, clamping, chips
+  and disclosures) now sit on the new table primitive. One layout change: an
+  incident's ID moved from its own column to a monospace line under the
+  incident's title, so the incident table is six columns.
+
+Tests: 459 (new `tests/test_design.py`; the index and status pages are
+compared with the legacy module on what they tell the browser — form target,
+field names, scope values, embedded constants, polled URLs — rather than
+line by line).
 
 ---
 

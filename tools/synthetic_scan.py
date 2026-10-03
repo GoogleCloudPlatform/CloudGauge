@@ -75,9 +75,9 @@ from app.synthetic import SyntheticGcp, banner_for  # noqa: E402
 from app.synthetic.memory_store import memory_results_store  # noqa: E402
 from app.utils import configure_logging  # noqa: E402
 
-# One pair per check item; the coverage note's <strong> (sharded reports) is not one.
-CHECK_STATUS = re.compile(r'<strong>(?!Coverage:)([^<]+)</strong>.*?<span class="status-badge">([^<]+)</span>', re.S)
-COVERAGE_NOTE = re.compile(r'<strong>Coverage:</strong>(.*?)</div>', re.S)
+# One pair per check item: the title and the status pill in its accordion's summary row.
+CHECK_STATUS = re.compile(r'<span class="check-title"><strong>([^<]+)</strong>.*?<span class="status-badge[^"]*">([^<]+)</span>', re.S)
+COVERAGE_NOTE = re.compile(r'<strong>Coverage:</strong>(.*?)</span>', re.S)
 
 
 def peak_rss_mb():

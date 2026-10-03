@@ -262,9 +262,10 @@ def test_denied_projects_and_quota_errors_do_not_break_the_scan(gcp):
 
 def test_report_banner_is_optional_and_escaped():
     plain = generate_html_report('project', 'p', 'j')
-    assert 'class="report-banner"' not in plain
+    assert 'report-banner' not in plain
     marked = generate_html_report('project', 'p', 'j', banner='Synthetic <b>data</b>')
-    assert 'class="report-banner"' in marked and 'Synthetic &lt;b&gt;data&lt;/b&gt;' in marked and '<b>data</b>' not in marked
+    assert ('<div role="note" class="notice notice-amber report-banner">Synthetic &lt;b&gt;data&lt;/b&gt;</div>' in marked
+            and '<b>data</b>' not in marked)
 
 
 # --- The app in the synthetic profile ---
@@ -336,7 +337,7 @@ def test_offline_harness_runs_a_sharded_scan(gcp, tmp_path, capsys):
     assert code == 0
     out = capsys.readouterr().out
     assert 'RESULT: ok (status=completed)' in out and 'Sharded: 4 shards of 3, 2 at a time' in out
-    assert 'coverage: 7 of 7 projects scanned (100%) · organization-level checks: completed' in out
+    assert 'coverage: 7 of 7 projects scanned (100%); organization-level checks completed.' in out
     result = json.loads(json_path.read_text())
     sharding = result['sharding']
     assert (sharding['shards'], sharding['shard_attempts'], sharding['shard_retries'], sharding['failed_shards']) == (4, 4, 0, 0)

@@ -13,78 +13,106 @@
   See the License for the specific language governing permissions and
   limitations under the License.
 #}
+{#
+  The scan status page: one centred card on the dot-grid canvas, in one of
+  three states built by the script. In progress: a 4px progress bar and the
+  current task, polled from /api/status every 3 seconds. Complete: the
+  check-circle, the report and CSV buttons. Failed: the x-circle and the error.
+#}
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Scan in Progress...</title>
-    <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&display=swap" rel="stylesheet">
+    <title>Scan in progress</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
     <style>
-        :root { --primary-color: #4285F4; --success-color: #1e8e3e; --background-color: #f8f9fa; --text-color: #3c4043; --border-color: #dfe1e5; --card-bg-color: #ffffff; }
-        body { font-family: 'Roboto', sans-serif; margin: 0; background-color: var(--background-color); color: var(--text-color); display: flex; align-items: center; justify-content: center; height: 100vh; }
-        .status-card { background-color: var(--card-bg-color); padding: 40px; border-radius: 8px; box-shadow: 0 4px 10px rgba(0,0,0,0.08); border: 1px solid var(--border-color); text-align: center; max-width: 600px; width: 100%; }
-        h1 { color: #202124; font-weight: 500; margin-top: 0; }
-        p { color: #5f6368; margin-bottom: 30px; line-height: 1.6; }
-        .progress-bar-container { background-color: #e9ecef; border-radius: 8px; height: 16px; width: 100%; margin: 20px 0; overflow: hidden; }
-        .progress-bar { background-color: var(--primary-color); height: 100%; width: 0%; border-radius: 8px; transition: width 0.4s linear; }
-        .loader { border: 4px solid #f3f3f3; border-top: 4px solid var(--primary-color); border-radius: 50%; width: 40px; height: 40px; animation: spin 1s linear infinite; margin: 20px auto; }
-        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
-        .status-message { font-weight: 500; height: 24px; }
-        .button-group { display: flex; gap: 15px; justify-content: center; margin-top: 20px; }
-        .btn { text-decoration: none; display: inline-block; background-color: var(--primary-color); color: white; padding: 12px 20px; border-radius: 5px; border: none; cursor: pointer; font-size: 16px; font-weight: 500; transition: background-color 0.2s ease, box-shadow 0.2s ease; }
-        .btn:hover { box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
-        .btn.secondary { background-color: #e8eaed; color: var(--text-color); }
-        .success-icon { font-size: 48px; color: var(--success-color); }
+{% include "_design.css" %}
+        body { min-height: 100vh; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px; padding: 24px; }
+        .status-card { width: 100%; max-width: 448px; padding: 32px; }
+        .notice { width: 100%; max-width: 448px; }
+        .brand { margin-bottom: 28px; font-size: 13px; font-weight: 600; letter-spacing: -0.01em; color: var(--ink); }
+        .status-card h1 { font-size: 22px; margin-bottom: 6px; }
+        .scope-line { margin-bottom: 20px; font-family: var(--font-mono); font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
+        .lede { margin-bottom: 20px; color: var(--muted); }
+        .progress-row { display: flex; align-items: center; gap: 12px; margin: 4px 0 10px; }
+        .progress-bar-container { flex: 1; height: 4px; border-radius: 2px; background: var(--zinc-100); overflow: hidden; }
+        .progress-bar { display: block; width: 0%; height: 100%; border-radius: 2px; background: var(--ink); transition: width 0.4s linear; }
+        .progress-text { min-width: 4ch; text-align: right; font-family: var(--font-mono); font-size: 12px; font-variant-numeric: tabular-nums; color: var(--ink); }
+        .status-message { min-height: 21px; font-size: 14px; color: var(--body); }
+        .state-icon { display: flex; align-items: center; justify-content: center; width: 56px; height: 56px; margin-bottom: 20px; border-radius: 50%; }
+        .state-icon.ok { background: var(--emerald-50); color: var(--emerald-600); }
+        .state-icon.failed { background: var(--rose-50); color: var(--rose-700); }
+        .button-group { display: flex; flex-direction: column; gap: 10px; margin-top: 24px; }
+        .button-group .btn { padding: 11px 14px; }
+        .error-box { margin: 0 0 16px; padding: 10px 12px; border: 1px solid var(--hairline); border-radius: var(--radius-control); background: var(--canvas); font-family: var(--font-mono); font-size: 12.5px; line-height: 1.55; color: var(--body); white-space: pre-wrap; overflow-wrap: anywhere; }
+        .job-line { margin-top: 24px; padding-top: 14px; border-top: 1px solid var(--hairline); font-family: var(--font-mono); font-size: 11px; color: var(--faint); overflow-wrap: anywhere; }
+        .again { font-size: 13px; }
     </style>
 </head>
-<body>
-    {% if banner %}<div role="note" style="max-width: 640px; margin: 20px auto 0; padding: 12px 16px; border-left: 6px solid #f9ab00; background: #fef7e0; color: #5f4b00; font-weight: 500;">{{ banner }}</div>{% endif %}
-    <div id="status-card" class="status-card">
-        </div>
+<body class="dotgrid">
+    {% if banner %}<div role="note" class="notice notice-amber">{{ banner }}</div>{% endif %}
+    <main id="status-card" class="card status-card" aria-live="polite">
+        </main>
 
     <script>
         const job_id = "{{ job_id }}";
         const scope_id = "{{ scope_id }}";
+        const scope = "{{ scope }}";
         const signed_csv_url = "{{ signed_csv_url | safe }}"; 
         const card = document.getElementById('status-card');
+        const CHECK_CIRCLE = '<svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="m9 12 2 2 4-4"/></svg>';
+        const X_CIRCLE = '<svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="m15 9-6 6"/><path d="m9 9 6 6"/></svg>';
+
+        function escapeHtml(text) {
+            return String(text).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+        }
 
         // --- UI Update Functions  ---
         function showInProgressUI() {
-            document.title = "Scan in Progress...";
+            document.title = "Scan in progress";
             card.innerHTML = `
-                <h1>Scan in Progress</h1>
-                <p>Your request for job <strong>${job_id}</strong> is being processed. This may take several minutes.</p>
-                <div class="loader"></div>
-                <p id="status-message" class="status-message">Initializing...</p>
-                <div class="progress-bar-container">
-                    <div id="progress-bar" class="progress-bar"></div>
+                <div class="brand">CloudGauge</div>
+                <h1>Scan in progress</h1>
+                <p class="scope-line">${escapeHtml(scope)} ${escapeHtml(scope_id)}</p>
+                <p class="lede">Every check runs across the scope. This may take several minutes; the report opens from this page when it is ready.</p>
+                <div class="progress-row">
+                    <div class="progress-bar-container"><span id="progress-bar" class="progress-bar"></span></div>
+                    <span id="progress-text" class="progress-text">0%</span>
                 </div>
-                <p id="progress-text">0%</p>
+                <p id="status-message" class="status-message">Starting…</p>
+                <p class="job-line">Job ${escapeHtml(job_id)}</p>
             `;
         }
 
         function showReadyUI() {
-            document.title = "Report Ready!";
+            document.title = "Report ready";
             const report_url = `/report/${job_id}/${scope_id}`;
             card.innerHTML = `
-                <div class="success-icon">&#10003;</div>
-                <h1>Scan Complete!</h1>
-                <p>Your report is ready. You can now view the interactive report online or download the raw data as a CSV file.</p>
+                <div class="state-icon ok">${CHECK_CIRCLE}</div>
+                <h1>Scan complete</h1>
+                <p class="scope-line">${escapeHtml(scope)} ${escapeHtml(scope_id)}</p>
+                <p class="lede">The report is ready: open it to review the findings, or download every row as a CSV file.</p>
                 <div class="button-group">
-                    <a href="${report_url}" target="_blank" class="btn">View Interactive Report</a>
-                    <a href="${signed_csv_url}" class="btn secondary">Download CSV Report</a>
+                    <a href="${report_url}" target="_blank" class="btn btn-primary">View interactive report</a>
+                    <a href="${signed_csv_url}" class="btn btn-outline">Download CSV</a>
                 </div>
+                <p class="job-line">Job ${escapeHtml(job_id)}</p>
             `;
         }
 
         function showErrorUI(message) {
-            document.title = "Scan Failed!";
+            document.title = "Scan failed";
             card.innerHTML = `
-                <div class="success-icon" style="color: var(--error-color);">&#10007;</div>
-                <h1>Scan Failed</h1>
-                <p>An error occurred while processing your request for job <strong>${job_id}</strong>.</p>
-                <p style="font-family: monospace; background-color: #f1f3f4; padding: 10px; border-radius: 4px;">${message || 'Unknown error. Please check the application logs.'}</p>
+                <div class="state-icon failed">${X_CIRCLE}</div>
+                <h1>Scan failed</h1>
+                <p class="scope-line">${escapeHtml(scope)} ${escapeHtml(scope_id)}</p>
+                <p class="lede">The scan stopped before the report was written. The last message was:</p>
+                <pre class="error-box">${escapeHtml(message || 'Unknown error. Check the application logs.')}</pre>
+                <a class="again" href="/">Start another scan</a>
+                <p class="job-line">Job ${escapeHtml(job_id)}</p>
             `;
         }
 

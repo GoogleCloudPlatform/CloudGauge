@@ -142,16 +142,20 @@ def test_csv_report_rows():
 
 def test_report_scores_and_overview():
     html = generate_html_report('organization', '123456789', 'job-42', **SCENARIOS['score boundaries'])
-    scores = re.findall(r'<span class="score-badge score-(\w+)">(\d+)%</span>', html)
+    scores = re.findall(r'<span class="score score-(\w+)">(\d+)%</span>', html)
     assert scores == [('medium', '90'), ('high', '91'), ('low', '70'), ('medium', '71')]
+    # The bar next to each score is as wide as the score, in its colour.
+    assert re.findall(r'<span class="bar-fill score-(\w+)" style="width: (\d+)%">', html) == scores
     counts = dict(re.findall(r'<h3>([\w ]+)</h3><p class="count">(\d+)</p>', html))
     assert counts == {'Action Required': '3', 'Investigation Recommended': '1', 'Compliant': '31', 'Errors': '3'}
 
 
 def test_org_policies_count_toward_security():
     html = generate_html_report('organization', '123456789', 'job-42', **SCENARIOS['org policies only'])
-    assert '<strong>Organization Policies (1/4 Compliant)</strong>' in html
-    assert '<span class="score-badge score-low">25% Compliant</span>' in html  # 1 compliant out of 4 policies
+    assert ('<span class="check-title"><strong>Organization Policies</strong>'
+            '<span class="check-summary">3 policies differ from the recommended value</span></span>') in html
+    assert '<span class="status-badge pill pill-action-required">1/4 Compliant</span>' in html
+    assert '<span class="score-pill pill pill-low">25% compliant</span>' in html  # 1 compliant out of 4 policies
 
 
 def test_remediation_placeholders_are_numbered_in_display_order():
@@ -168,9 +172,12 @@ def test_remediation_placeholders_are_numbered_in_display_order():
 def test_grouped_check_keeps_the_most_severe_status():
     html = generate_html_report('project', 'web-prod', 'job-42', **SCENARIOS['sample findings only'])
     item = html[html.index('<strong>Project IAM Hygiene</strong>'):]
-    assert item.index('<span class="status-badge">Action Required</span>') < item.index('</li>')
-    assert "<td>web-prod</td><td>user:alice@example.com</td><td>roles/owner</td>" in item  # both records' details
-    assert "<td>data-lake</td><td>allUsers</td><td>roles/viewer</td>" in item
+    assert item.index('<span class="status-badge pill pill-action-required">Action Required</span>') < item.index('</details>')
+    # Both records' details, as chips (Project, Member and Role are resource columns).
+    assert ('<td class="nowrap code"><code class="chip">web-prod</code></td><td class="nowrap code"><code class="chip">user:alice@example.com</code></td>'
+            '<td class="nowrap code"><code class="chip">roles/owner</code></td>') in item
+    assert ('<td class="nowrap code"><code class="chip">data-lake</code></td><td class="nowrap code"><code class="chip">allUsers</code></td>'
+            '<td class="nowrap code"><code class="chip">roles/viewer</code></td>') in item
 
 
 def test_report_is_self_contained():
@@ -180,14 +187,14 @@ def test_report_is_self_contained():
     for delimiter in ('{{', '{%', '{#'):
         assert delimiter not in html
     assert '<script src=' not in html and 'rel="stylesheet"' in html  # the Google Fonts link, as before
-    handlers = {'showSection', 'toggleSubSection', 'getGeminiSuggestions', 'generateAiSummary', 'fetchInsights',
+    handlers = {'showSection', 'setAllChecks', 'getGeminiSuggestions', 'generateAiSummary', 'copySummary', 'fetchInsights',
                 'renderTablePage'}  # renderTablePage is in HTML built by the script
     assert set(re.findall(r'onclick="(\w+)\(', html)) == handlers
     paging = {'showMoreRows', 'showAllRows'}  # only emitted under tables longer than one page
     long_table = {SECURITY: [{'Check': 'Public Buckets', 'Status': 'Action Required',
                               'Finding': [{'Project': 'p1', 'Bucket': f'b{i}'} for i in range(ROWS_PER_PAGE + 10)]}]}
     assert paging <= set(re.findall(r'onclick="(\w+)\(', generate_html_report('project', 'p1', 'job-42', **long_table)))
-    for handler in handlers | paging | {'scheduleRowFilter', 'applyRowFilter', 'sortTable'}:  # defined in the inlined script
+    for handler in handlers | paging | {'scheduleRowFilter', 'applyRowFilter', 'sortTable', 'toggleClamp'}:  # defined in the inlined script
         assert re.search(rf'function {handler}\(', html), handler
     assert sorted(set(re.findall(r"fetch\('([^']+)'", html))) == ['/api/get-insights', '/api/get-suggestions', '/api/get-summary']
     assert 'JSON.stringify({ scope_id: "123456789", job_id: "job-42" })' in html
@@ -202,12 +209,12 @@ def table_check(name, rows, status='Action Required'):
 
 def check_names(html):
     """Check titles in page order (a bare <strong> regex would also match strings in the inlined script)."""
-    return re.findall(r'<div class="check-content">\s*<strong>([^<]+)</strong>', html)
+    return re.findall(r'<span class="check-title"><strong>([^<]+)</strong>', html)
 
 
 def detail_tables(html):
     """The details tables only: the page also has the Review Scores table and <tr> strings in the script."""
-    return re.findall(r"<table class='details-table'>.*?</table>", html)
+    return re.findall(r"<table class='data-table details-table'>.*?</table>", html)
 
 
 def test_checks_are_ordered_by_severity_then_name():
@@ -222,14 +229,16 @@ def test_checks_are_ordered_by_severity_then_name():
     ]}
     html = generate_html_report('project', 'p1', 'job-42', **results)
     assert check_names(html) == ['A Action', 'Y Action', 'M Investigation', 'Z Error', 'N Informational', 'A Compliant', 'B Compliant']
-    assert re.search(r'<div class="section-counts">\s*<span class="count-action-required">2 Action Required</span>\s*'
-                     r'<span class="count-investigation">1 Investigation Recommended</span>\s*<span class="count-error">1 Error</span>\s*'
-                     r'<span class="count-informational">1 Informational</span>\s*<span class="count-compliant">2 Compliant</span>', html)
+
+    def count(status_class, n, status):
+        return rf'<span class="count-{status_class}"><span class="dot dot-{status_class}"></span><span class="n">{n}</span> {status}</span>\s*'
+    assert re.search(r'<div class="section-counts">\s*' + count('action-required', 2, 'Action Required') + count('investigation', 1, 'Investigation Recommended')
+                     + count('error', 1, 'Error') + count('informational', 1, 'Informational') + count('compliant', 2, 'Compliant') + '</div>', html)
 
 
 def summaries(html):
     return [(name, unescape(summary)) for name, summary in
-            re.findall(r'<strong>([^<]+)</strong>\s*<div class="check-summary">([^<]+)</div>', html)]
+            re.findall(r'<strong>([^<]+)</strong><span class="check-summary">([^<]+)</span>', html)]
 
 
 def test_check_summary_counts_findings_and_projects():
@@ -283,21 +292,23 @@ def test_rows_are_capped_in_the_page_but_not_in_the_csv():
     assert generate_csv_data(results).count('Public Buckets,Action Required,') == MAX_ROWS_PER_CHECK + 100
 
 
-def test_toolbar_has_the_filter_and_the_csv_download():
+def test_header_has_the_csv_download_and_the_toolbar_the_filter():
     html = generate_html_report('organization', '123456789', 'job-42', **SCENARIOS['sample scan'])
-    assert '<input id="row-filter" type="search"' in html and 'oninput="scheduleRowFilter()"' in html
-    assert '<a class="toolbar-link" href="/report/job-42/123456789/csv">Download CSV (all rows)</a>' in html
+    assert '<input id="row-filter" type="search" class="input"' in html and 'oninput="scheduleRowFilter()"' in html
+    assert '<a class="btn btn-outline btn-sm" href="/report/job-42/123456789/csv">Download CSV</a>' in html
+    assert '<dl class="report-meta">\n' in html and '<dt>Scope</dt><dd>Organization 123456789</dd>' in html and '<dt>Report ID</dt><dd>job-42</dd>' in html
     # The link is a URL: IDs are percent-encoded, not just HTML-escaped.
     html = generate_html_report('project', 'a b/c?d', 'job 1', **SCENARIOS['sample scan'])
     assert 'href="/report/job%201/a%20b%2Fc%3Fd/csv"' in html
 
 
-def test_filter_box_is_hidden_on_the_overview():
-    """The filter acts on a category page's checks; the Overview has none, so only the CSV link shows there."""
+def test_toolbar_is_hidden_on_the_overview():
+    """The filter and Expand/Collapse all act on a category page's checks; the Overview has none, so the toolbar hides there."""
     html = generate_html_report('organization', '123456789', 'job-42', **SCENARIOS['sample scan'])
     assert '<div class="report-toolbar no-filter">' in html  # the Overview is the page shown first
-    assert '.report-toolbar.no-filter #row-filter, .report-toolbar.no-filter #filter-status { display: none; }' in html
+    assert '.report-toolbar.no-filter { display: none; }' in html
     assert "toolbar.classList.toggle('no-filter', !(targetSection && targetSection.querySelector('.checks-list')))" in html
+    assert 'onclick="setAllChecks(true)">Expand all</button>' in html and 'onclick="setAllChecks(false)">Collapse all</button>' in html
     overview = re.search(r'<div id="overview-section" class="content-section">(.*?)<div id="[\w-]+-section" class="content-section"', html, re.S).group(1)
     assert 'checks-list' not in overview and html.count('class="checks-list"') == 4  # one per category page
 
@@ -328,10 +339,10 @@ def test_a_category_without_results_says_so():
     for section_id, title in (('security-identity', 'Security &amp; Identity'), ('reliability-resilience', 'Reliability &amp; Resilience'),
                               ('operational-excellence-observability', 'Operational Excellence &amp; Observability')):
         page = pages[section_id]
-        assert f'<div class="empty-state" role="note"><span class="icon">&#10003;</span>No findings in this category — all {title} checks were compliant.</div>' in page
-        assert '<span class="score-badge score-high">100% Compliant</span>' in page
+        assert f'<div class="empty-state" role="note"><span class="dot dot-compliant"></span>No findings in this category — all {title} checks were compliant.</div>' in page
+        assert '<span class="score-pill pill pill-high">100% compliant</span>' in page
         assert 'checks-list' not in page and 'section-counts' not in page and 'filter-empty' not in page
-        assert 'section-footer' not in page  # no "Get Detailed Insights" / console link without findings
+        assert 'section-footer' not in page  # no "Get detailed insights" / console link without findings
     assert 'active-assist/list/security/recommendations' not in html
     # The security footer and the cost footer return with content.
     html = generate_html_report('organization', '123456789', 'job-42', **SCENARIOS['sample scan'])
@@ -340,7 +351,7 @@ def test_a_category_without_results_says_so():
     assert all('empty-state" role="note"' not in page for page in pages.values())
     # Org policies alone give Security a list; the other three are empty.
     pages = category_pages(generate_html_report('organization', '123456789', 'job-42', **SCENARIOS['org policies only']))
-    assert 'Organization Policies (1/4 Compliant)' in pages['security-identity'] and 'empty-state" role="note"' not in pages['security-identity']
+    assert '<strong>Organization Policies</strong>' in pages['security-identity'] and 'empty-state" role="note"' not in pages['security-identity']
     assert sum('No findings in this category' in page for page in pages.values()) == 3
 
 
@@ -367,12 +378,13 @@ def test_projects_a_check_could_not_cover_are_one_error_item_per_category():
     assert check_names(cost) == ['Projects not checked']
     assert dict(summaries(security))['Projects not checked'] == '3 skipped checks across 2 of 10 projects (20%)'
     assert dict(summaries(cost))['Projects not checked'] == '1 skipped check across 1 of 10 projects (10%)'
-    assert security.count('<span class="status-badge">Error</span>') == 1 and cost.count('<span class="status-badge">Error</span>') == 1
+    assert security.count('<span class="status-badge pill pill-error">Error</span>') == 1 and cost.count('<span class="status-badge pill pill-error">Error</span>') == 1
     assert ('<th>Project</th><th>Skipped check</th><th>Reason</th>' in security
-            and '<tr><td>p3</td><td>VM External IPs</td><td>503 Policy checks are unavailable</td></tr>' in security)
+            and ('<tr><td class="nowrap code"><code class="chip">p3</code></td><td class="prose">VM External IPs</td>'
+                 '<td class="prose">503 Policy checks are unavailable</td></tr>') in security)
     assert 'remediation-placeholder' not in cost  # an Error item gets no Gemini remediation box
     # The score counts the item as one failing check: Security 1 of 3, Cost 0 of 1.
-    assert '<span class="score-badge score-low">33% Compliant</span>' in security and '<span class="score-badge score-low">0% Compliant</span>' in cost
+    assert '<span class="score-pill pill pill-low">33% compliant</span>' in security and '<span class="score-pill pill pill-low">0% compliant</span>' in cost
     assert 'No findings in this category' not in cost and 'class="checks-list"' in cost
     assert html.count('No findings in this category') == 2  # Reliability and Operations, which have no records at all
     csv = generate_csv_data(results)
@@ -389,7 +401,7 @@ def test_a_page_whose_checks_the_filter_hides_says_so():
     assert "note.hidden = !term || matchedHere > 0;" in html
     assert "`No checks in this category match \\u201C${shownTerm}\\u201D.`" in html
     assert "matching ${elsewhere === 1 ? 'check is' : 'checks are'} on other pages." in html
-    assert '.empty-state.filter-empty { color: var(--light-text-color); font-size: 14px; }' in html
+    assert '.empty-state.filter-empty { color: var(--muted); font-size: 13px; }' in html
     # A category without results has no list to filter, so no note either.
     html = generate_html_report('organization', '123456789', 'job-42', **SCENARIOS['no results'])
     assert 'class="empty-state filter-empty"' not in html and html.count('No findings in this category') == 4
@@ -408,10 +420,11 @@ def test_finding_text_is_escaped():
     """Plan item B3: finding text is inserted as text (the legacy report inserted it as raw HTML)."""
     html = generate_html_report('organization', '123456789', 'job-42', **SCENARIOS['html in findings'])
     assert 'Rule &lt;b&gt;allow-all&lt;/b&gt; &amp; &#34;default&#34; open to 0.0.0.0/0' in html
-    assert '<td>&lt;script&gt;alert(1)&lt;/script&gt;</td><td>roles/owner&#39;s</td>' in html
+    assert ('<td class="nowrap code"><code class="chip">&lt;script&gt;alert(1)&lt;/script&gt;</code></td>'
+            '<td class="nowrap code"><code class="chip">roles/owner&#39;s</code></td>') in html
     assert '<script>alert(1)' not in html and '<b>allow-all' not in html
-    # The status icons are character references written once, not escaped a second time.
-    assert '<span class="icon">&#10007;</span>' in html and '&amp;#' not in html
+    # Escaped once: no double-escaped entities anywhere in the page.
+    assert '&amp;#' not in html and '&amp;lt;' not in html and '&amp;amp;' not in html
 
 
 def test_text_details_keep_their_line_breaks():

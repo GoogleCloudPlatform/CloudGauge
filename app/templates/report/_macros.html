@@ -14,42 +14,70 @@
   limitations under the License.
 #}
 {#
-  Building blocks of the report's category sections. Tables are emitted on a
-  single line, as the legacy report did; getGeminiSuggestions() in _script.js
-  reads the details tables and the fix-N placeholders.
+  Building blocks of the report's category sections.
 
-  Large scans (app.reporting.context, "Layout for large organizations"): rows
-  after the first rows_per_page carry the hidden attribute and _script.js
-  reveals them ("Show 50 more"), sorts columns, and filters rows. A table
-  holds at most max_rows_per_check rows; the note under it points to the CSV.
+  Every check is an accordion (a native <details>): the summary row shows the
+  status dot, the check's name, its one-line summary and the status pill, so a
+  collapsed item still says what it found; the body holds the table. Items that
+  need a human (Action Required, Investigation Recommended, Error) open on
+  load, Compliant and Informational ones are collapsed (CheckItem.open).
+  Organization Policies is an accordion like the others, with its "18/128
+  Compliant" pill. Each item has an id (<section id>-<check slug>) so a link
+  can open one check.
 
-  Cells (app.reporting.layouts.Cell) render by kind: plain text, stacked
-  lines, a title with a muted second line, a count that discloses its list, a
-  bulleted list, or a message clamped to three lines. Everything a cell holds
-  is in the page as text, so sorting and the filter box see it. A check whose
-  rows carry a Fix gets one remediation block under its table instead of a
-  Fix column; the Gemini button leaves those checks alone.
+  Tables are emitted on a single line, as the legacy report did;
+  getGeminiSuggestions() in _script.js reads the details tables and the fix-N
+  placeholders. Large scans (app.reporting.context, "Layout for large
+  organizations"): rows after the first rows_per_page carry the hidden
+  attribute and _script.js reveals them ("Show 50 more"), sorts columns, and
+  filters rows. A table holds at most max_rows_per_check rows; the note under
+  it points to the CSV.
+
+  Cells (app.reporting.layouts.Cell) render by kind and column role: a
+  resource is a monospace chip, a resource list is chips (many of them behind
+  "37 projects"), numbers and times are monospace, and the briefings' richer
+  cells are a title with a muted second line, stacked lines, a bulleted list,
+  or a message clamped to three lines. Everything a cell holds is in the page
+  as text, so sorting and the filter box see it. A check whose rows carry a
+  Fix gets one remediation block under its table instead of a Fix column; the
+  Gemini button leaves those checks alone.
 
   A page is never blank: a category with nothing to list shows its
   empty_message, and a page whose checks are all hidden by the filter shows
   the .filter-empty note (filled in by applyRowFilter in _script.js).
 #}
+{% macro chevron_icon() -%}
+<svg class="chevron" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg>
+{%- endmacro %}
+
 {% macro disclosure(summary, body) -%}
 <details class="cell-more"><summary>{{ summary }}</summary>{% if body is string %}<span class="more-body">{{ body }}</span>{% else %}<ul class="cell-list more-body">{% for line in body %}<li>{{ line }}</li>{% endfor %}</ul>{% endif %}</details>
 {%- endmacro %}
 
+{% macro chip(value) -%}
+<code class="chip{% if value|length > 40 %} chip-long{% endif %}">{{ value }}</code>
+{%- endmacro %}
+
+{% macro chip_list(lines, tail) -%}
+{% for line in lines %}{{ chip(line) }}{% if not loop.last %} {% endif %}{% endfor %}{% if tail %} <span class="muted">{{ tail }}</span>{% endif %}
+{%- endmacro %}
+
 {% macro render_cell(cell) -%}
 <td{% if cell.classes %} class="{{ cell.classes }}"{% endif %}>
-{%- if cell.kind == "stack" -%}
+{%- if cell.kind == "chips" -%}
+{% if cell.text %}<details class="cell-more"><summary>{{ cell.text }}</summary><span class="more-body chip-list">{{ chip_list(cell.lines, cell.body) }}</span></details>{% else %}{{ chip_list(cell.lines, cell.body) }}{% endif %}
+{%- elif cell.kind == "stack" -%}
 {% for line in cell.lines %}{% if loop.first %}{{ line }}{% else %}<br><span class="muted">{{ line }}</span>{% endif %}{% endfor %}
 {%- elif cell.kind == "rich" -%}
-<span class="cell-title">{{ cell.text }}</span>{% if cell.secondary or cell.more %}<span class="cell-secondary">{{ cell.secondary }}{% if cell.more %}{{ disclosure(cell.more[0], cell.more[1]) }}{% endif %}</span>{% endif %}
+<span class="cell-title">{{ cell.text }}</span>{% if cell.secondary or cell.more or cell.code %}<span class="cell-secondary">{{ cell.secondary }}{% if cell.more %}{{ disclosure(cell.more[0], cell.more[1]) }}{% endif %}{% if cell.code %}<code class="cell-code">{{ cell.code }}</code>{% endif %}</span>{% endif %}
 {%- elif cell.kind == "disclose" -%}
 {{ disclosure(cell.text, cell.body) }}
 {%- elif cell.kind == "list" -%}
 {% if cell.lines %}<ul class="cell-list">{% for line in cell.lines %}<li>{{ line }}</li>{% endfor %}</ul>{% endif %}{% if cell.more %}{{ disclosure(cell.more[0], cell.more[1]) }}{% endif %}
 {%- elif cell.kind == "article" -%}
 <span class="cell-title">{{ cell.text }}</span>{% if cell.body %}<div class="clamp">{{ cell.body }}</div>{% if cell.more %}<button class="link-btn clamp-toggle" type="button" onclick="toggleClamp(this)" data-more="{{ cell.more[0] }}" data-less="{{ cell.more[1] }}" aria-expanded="false"></button>{% endif %}{% endif %}
+{%- elif "code" in cell.css and cell.text -%}
+{{ chip(cell.text) }}
 {%- else -%}
 {{ cell.text }}
 {%- endif -%}
@@ -59,7 +87,7 @@
 {% macro details_cell(details, rows_per_page) -%}
 {% if details is not none -%}
 {% if details.kind == "table" -%}
-<table class='details-table'><thead><tr>{% for header in details.display_headers %}<th>{{ header }}</th>{% endfor %}</tr></thead><tbody>{% for row in details.cells %}<tr{% if loop.index > rows_per_page %} hidden{% endif %}>{% for cell in row %}{{ render_cell(cell) }}{% endfor %}</tr>{% endfor %}</tbody></table>
+<table class='data-table details-table'><thead><tr>{% for header in details.display_headers %}<th>{{ header }}</th>{% endfor %}</tr></thead><tbody>{% for row in details.cells %}<tr{% if loop.index > rows_per_page %} hidden{% endif %}>{% for cell in row %}{{ render_cell(cell) }}{% endfor %}</tr>{% endfor %}</tbody></table>
 {%- else -%}
 {{ details.lines|join("<br>"|safe) }}
 {%- endif %}
@@ -68,98 +96,103 @@
 
 {% macro org_policy_rows(categories) -%}
 {% for category in categories -%}
-<tr class="category-header"><td colspan="4">{{ category.name }}</td></tr>
+<tr class="group-row"><td colspan="4">{{ category.name }}</td></tr>
 {%- for row in category.rows -%}
-<tr><td>{{ row.display_name }}</td><td>{{ row.expected_value }}</td><td>{{ row.current_value }}</td><td class='status-text-{{ row.status_class }}'>{{ row.status }}</td></tr>
+<tr><td class="prose">{{ row.display_name }}</td><td class="state"><code>{{ row.expected_value }}</code></td><td class="state"><code>{{ row.current_value }}</code></td><td class="state"><span class="pill pill-{{ row.status_class }} status-text-{{ row.status_class }}">{{ row.status }}</span></td></tr>
 {%- endfor %}
 {% endfor %}
 {%- endmacro %}
 
-{% macro org_policy_item(org_policies) %}
-<li class="status-{{ org_policies.status_class }}">
-    <span class="icon">{{ org_policies.icon }}</span>
-    <div class="check-content">
-        <strong>Organization Policies ({{ org_policies.compliant }}/{{ org_policies.total }} Compliant)</strong>
-        <div class="details">
-            <button class="btn toggle-btn" onclick="toggleSubSection(this)" style="margin-top: 5px;">View Details</button>
-            <div class="toggle-container" style="display:none; margin-top: 10px;">
-                <table class="styled-table">
+{% macro org_policy_item(org_policies, section_id) %}
+{% set differing = org_policies.total - org_policies.compliant %}
+<li class="status-{{ org_policies.status_class }}" id="{{ section_id }}-organization-policies">
+    <details class="check"{% if org_policies.open %} open{% endif %}>
+        <summary>
+            {{ chevron_icon() }}
+            <span class="dot dot-{{ org_policies.status_class }}" aria-hidden="true"></span>
+            <span class="check-title"><strong>Organization Policies</strong><span class="check-summary">{% if differing %}{{ differing }} polic{{ 'y differs' if differing == 1 else 'ies differ' }} from the recommended value{% else %}Every policy is set to the recommended value{% endif %}</span></span>
+            <span class="status-badge pill pill-{{ org_policies.status_class }}">{{ org_policies.compliant }}/{{ org_policies.total }} Compliant</span>
+        </summary>
+        <div class="check-content">
+            <div class="details">
+                <table class="data-table org-policy-table">
                     <thead><tr><th>Policy</th><th>Expected Value</th><th>Current Value</th><th>Status</th></tr></thead>
                     <tbody>{{ org_policy_rows(org_policies.categories) }}</tbody>
                 </table>
             </div>
         </div>
-    </div>
-    <span class="status-badge">{{ org_policies.compliant }}/{{ org_policies.total }} Compliant</span>
+    </details>
 </li>
 {% endmacro %}
 
-{% macro check_item(check, rows_per_page, csv_href) %}
-<li class="status-{{ check.status_class }}">
-    <span class="icon">{{ check.icon }}</span>
-    <div class="check-content">
-        <strong>{{ check.check_name }}</strong>
-        {% if check.summary %}
-        <div class="check-summary">{{ check.summary }}</div>
-        {% endif %}
-        <div class="details">{{ details_cell(check.details, rows_per_page) }}</div>
-        {% if check.details is not none and check.details.kind == "table" and check.details.rows|length > rows_per_page %}
-        <div class="table-controls">Showing <span class="shown-count">{{ "{:,}".format(rows_per_page) }}</span> of {{ "{:,}".format(check.details.rows|length) }} rows
-            <button class="link-btn" onclick="showMoreRows(this)">Show {{ rows_per_page }} more</button>
-            <button class="link-btn" onclick="showAllRows(this)">Show all</button></div>
-        {% endif %}
-        {% if check.details is not none and check.details.omitted_rows %}
-        <div class="table-note">Only the first {{ "{:,}".format(check.details.total_rows - check.details.omitted_rows) }} of {{ "{:,}".format(check.details.total_rows) }} rows are included in this page. The complete list is in the <a href="{{ csv_href }}">CSV report</a>.</div>
-        {% endif %}
-        {% if check.details is not none and check.details.fix_lines %}
-        <div class="fix-block"><strong>Fix</strong><pre>{{ check.details.fix_lines|join("\n") }}</pre></div>
-        {% endif %}
-        {% if check.fix_id is not none %}
-        <div class='remediation-placeholder' id='fix-{{ check.fix_id }}'></div>
-        {% endif %}
-    </div>
-    <span class="status-badge">{{ check.status }}</span>
+{% macro check_item(check, section_id, rows_per_page, csv_href) %}
+<li class="status-{{ check.status_class }}" id="{{ section_id }}-{{ check.slug }}">
+    <details class="check"{% if check.open %} open{% endif %}>
+        <summary>
+            {{ chevron_icon() }}
+            <span class="dot dot-{{ check.status_class }}" aria-hidden="true"></span>
+            <span class="check-title"><strong>{{ check.check_name }}</strong>{% if check.summary %}<span class="check-summary">{{ check.summary }}</span>{% endif %}</span>
+            <span class="status-badge pill pill-{{ check.status_class }}">{{ check.status }}</span>
+        </summary>
+        <div class="check-content">
+            <div class="details">{{ details_cell(check.details, rows_per_page) }}</div>
+            {% if check.details is not none and check.details.kind == "table" and check.details.rows|length > rows_per_page %}
+            <div class="table-controls">Showing <span class="shown-count">{{ "{:,}".format(rows_per_page) }}</span> of {{ "{:,}".format(check.details.rows|length) }} rows
+                <button class="link-btn" onclick="showMoreRows(this)">Show {{ rows_per_page }} more</button>
+                <button class="link-btn" onclick="showAllRows(this)">Show all</button></div>
+            {% endif %}
+            {% if check.details is not none and check.details.omitted_rows %}
+            <div class="table-note">Only the first {{ "{:,}".format(check.details.total_rows - check.details.omitted_rows) }} of {{ "{:,}".format(check.details.total_rows) }} rows are included in this page. The complete list is in the <a href="{{ csv_href }}">CSV report</a>.</div>
+            {% endif %}
+            {% if check.details is not none and check.details.fix_lines %}
+            <div class="fix-block"><strong>Fix</strong><pre>{{ check.details.fix_lines|join("\n") }}</pre></div>
+            {% endif %}
+            {% if check.fix_id is not none %}
+            <div class='remediation-placeholder' id='fix-{{ check.fix_id }}'></div>
+            {% endif %}
+        </div>
+    </details>
 </li>
 {% endmacro %}
 
 {% macro category_section(section, scope_id, rows_per_page, csv_href) %}
 <div id="{{ section.section_id }}-section" class="content-section" style="display: none;">
-    <div class="checks-section">
+    <section class="card">
         <div class="section-header">
             <h2>{{ section.title }}</h2>
-            <span class="score-badge score-{{ section.score_class }}">{{ section.score_display }}% Compliant</span>
+            <span class="score-pill pill pill-{{ section.score_class }}">{{ section.score_display }}% compliant</span>
         </div>
         {% if section.status_counts %}
         <div class="section-counts">
             {%- for item in section.status_counts %}
-            <span class="count-{{ item.status_class }}">{{ item.count }} {{ item.status }}</span>
+            <span class="count-{{ item.status_class }}"><span class="dot dot-{{ item.status_class }}"></span><span class="n">{{ item.count }}</span> {{ item.status }}</span>
             {%- endfor %}
         </div>
         {% endif %}
         {% if section.empty_message %}
-        <div class="empty-state" role="note"><span class="icon">&#10003;</span>{{ section.empty_message }}</div>
+        <div class="empty-state" role="note"><span class="dot dot-compliant"></span>{{ section.empty_message }}</div>
         {% else %}
         <ul class="checks-list">
             {% if section.org_policies is not none %}
-            {{ org_policy_item(section.org_policies) }}
+            {{ org_policy_item(section.org_policies, section.section_id) }}
             {% endif %}
             {% for check in section.checks %}
-            {{ check_item(check, rows_per_page, csv_href) }}
+            {{ check_item(check, section.section_id, rows_per_page, csv_href) }}
             {% endfor %}
         </ul>
         <div class="empty-state filter-empty" role="status" hidden></div>
         {% endif %}
         {% if section.footer == "cost" %}
         <div class="section-footer">
-            <p class="insights-intro">For a detailed breakdown of potential savings, use the button below to query the Recommender API (this may be slow).</p>
-            <button id="insights-btn" class="btn" onclick="fetchInsights(this)"><span class="loader"></span>Get Detailed Insights</button>
-            <div id="insights-placeholder" style="margin-top: 20px;"></div>
+            <p class="insights-intro">For a detailed breakdown of potential savings, query the Recommender API (this may be slow).</p>
+            <button id="insights-btn" class="btn btn-outline" onclick="fetchInsights(this)">Get detailed insights</button>
+            <div id="insights-placeholder"></div>
         </div>
         {% elif section.footer == "security" %}
         <div class="section-footer">
-            <p>To get more security insights, <a href="https://console.cloud.google.com/active-assist/list/security/recommendations?organizationId={{ scope_id }}&supportedpurview=project" target="_blank">click here to go to your console</a>.</p>
+            <p>For more security insights, <a href="https://console.cloud.google.com/active-assist/list/security/recommendations?organizationId={{ scope_id }}&supportedpurview=project" target="_blank" rel="noopener">open Active Assist in the console</a>.</p>
         </div>
         {% endif %}
-    </div>
+    </section>
 </div>
 {% endmacro %}
