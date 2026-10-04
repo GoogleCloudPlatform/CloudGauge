@@ -31,8 +31,7 @@ import traceback
 
 from app.checks.categories import categorize_findings
 from app.checks.runner import list_projects, run_all_checks
-from app.reporting.csv_report import generate_csv_data
-from app.reporting.html_report import generate_html_report
+from app.reporting.html_report import generate_reports
 from app.utils import ThrottledProgressReporter
 
 
@@ -86,13 +85,13 @@ def execute_scan_job(data, *, store, banner=None, fanout=None):
 
         store.update_status(job_id, scope_id, 5, "Initializing scan and listing resources...")
 
-        projects = None
-        if fanout is not None:
-            projects = list_projects(scope, scope_id)
-            if fanout.should_fan_out(projects):
-                fanout.dispatch(scope, scope_id, job_id, projects)
-                dispatched = True
-                return True
+        # The project list is the first step of every scan: the checks run over it, the report states it as its
+        # coverage, and a large scope is split into shards by it.
+        projects = list_projects(scope, scope_id)
+        if fanout is not None and fanout.should_fan_out(projects):
+            fanout.dispatch(scope, scope_id, job_id, projects)
+            dispatched = True
+            return True
 
         # --- Throttling logic setup ---
         # We will only update GCS if at least 2 seconds have passed since the last update.
@@ -115,10 +114,14 @@ def execute_scan_job(data, *, store, banner=None, fanout=None):
             all_results["Organization Policies"] = org_policy_data
 
         total_projects = 1 if scope == 'project' else (len(projects) if projects is not None else None)
-        html_report = generate_html_report(scope, scope_id, job_id, banner=banner, total_projects=total_projects, **all_results)
-        csv_report = generate_csv_data(all_results)
+        # Synthetic scans (the ones with a banner) neither compare with real scans nor enter the history.
+        previous = None if banner else store.read_previous_summary(scope, scope_id, job_id)
+        html_report, csv_report, summary = generate_reports(scope, scope_id, job_id, all_results, banner=banner,
+                                                            total_projects=total_projects, previous=previous)
 
         store.upload_reports(job_id, scope_id, html_report, csv_report)
+        if not banner:
+            store.write_scan_summary(summary)
 
         store.update_status(job_id, scope_id, 100, "Scan complete!", status="completed")
 

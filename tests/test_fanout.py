@@ -54,14 +54,20 @@ def projects(n, prefix='p'):
 
 
 def coverage_line(html):
-    """The report's coverage note as one line of text, e.g. "3 of 3 projects scanned (100%); organization-level checks completed"."""
-    match = re.search(r'<strong>Coverage:</strong>(.*?)</span>', html, re.S)
+    """The header's Coverage line as text, e.g. "3 of 3 projects · organization-level checks completed"."""
+    match = re.search(r'<dt>Coverage</dt><dd class="coverage[^"]*"><span class="dot dot-[\w-]+"></span>(.*?)</dd>', html, re.S)
     return ' '.join(html_unescape(match.group(1)).split()) if match else None
 
 
 def coverage_dot(html):
-    """The status dot on the coverage note: ``compliant`` when every project and the scope-level checks ran, else ``investigation``."""
-    return re.search(r'<p role="note" class="coverage-note">\s*<span class="dot dot-([\w-]+)"></span>', html).group(1)
+    """The dot on the header's Coverage line: ``compliant`` when every project and the scope-level checks ran, else ``investigation``."""
+    return re.search(r'<dt>Coverage</dt><dd class="coverage[^"]*"><span class="dot dot-([\w-]+)">', html).group(1)
+
+
+def coverage_note(html):
+    """The note under the overview counts (only an incomplete scan has one), as one line of text; ``None`` without."""
+    match = re.search(r'<p role="note" class="coverage-note">.*?<strong>Coverage:</strong>(.*?)</span>', html, re.S)
+    return ' '.join(html_unescape(match.group(1)).split()) if match else None
 
 
 class Queue:
@@ -444,7 +450,7 @@ def test_shard_failure_is_retried_then_becomes_error_rows(store, queue, monkeypa
     assert marker['status'] == 'failed' and marker['attempt'] == 3 and 'quota exceeded' in marker['error']
     names = [spec.name for spec in registry.project_check_plan('organization', SCOPE_ID, JOB, projects(2), [], [])]
     errors = store.read_all_findings(JOB, shard_id='shard-001')
-    assert sorted(f['Check'] for f in errors) == sorted(names) and len(names) == 18  # v14: + Service Health Incidents
+    assert sorted(f['Check'] for f in errors) == sorted(names) and len(names) == 19  # v14: + Service Health Incidents; v15: + GKE Supported Versions
     assert all(f['Status'] == 'Error' and f['Finding'][0]['Error'].startswith(
         'Not checked for 2 projects (p-000, p-001): the scan failed after 3 attempts. Last error: ') for f in errors)
     assert 'quota exceeded' in errors[0]['Finding'][0]['Error']
@@ -504,9 +510,10 @@ def test_aggregate_merges_the_shards_into_one_report(store, queue, monkeypatch):
     assert '<strong>Open Firewall Rules</strong>' in html and 'allow-all' in html
     assert 'No firewall rules found open to 0.0.0.0/0.' not in html  # shard-002's placeholder was dropped
     assert html.count('All key contact categories are configured.') == 1
-    assert coverage_line(html) == '3 of 3 projects scanned (100%); organization-level checks completed.'
+    assert coverage_line(html) == '3 of 3 projects · organization-level checks completed'
     assert 'shard' not in html.lower()  # how the scan ran is not the reader's concern
-    assert coverage_dot(html) == 'compliant'  # complete: the emerald dot
+    assert coverage_dot(html) == 'compliant' and coverage_note(html) is None  # complete: the emerald dot, no note
+    assert 'none — first scan of this organization' in html  # nothing to compare with yet
     assert 'Disable SA key creation' in html  # the org policies came from the scope shard
     rows = csv_rows(store.read_report(JOB, SCOPE_ID, 'csv'))
     assert ['Open Firewall Rules', 'Action Required', 'p-000', 'allow-all', 'default'] in rows
@@ -527,7 +534,8 @@ def test_aggregate_records_missing_shards_as_error_rows(store, queue, monkeypatc
     fan = finished_job(store, queue, monkeypatch, skip={'shard-002', SCOPE_SHARD})
     assert fan.aggregate(BODY) is True
     html = store.read_report(JOB, SCOPE_ID, 'html')
-    assert coverage_line(html) == ('2 of 3 projects scanned (67%), 1 not scanned; organization-level checks did not finish. '
+    assert coverage_line(html) == '2 of 3 projects · 1 not scanned · organization-level checks did not finish'
+    assert coverage_note(html) == ('2 of 3 projects scanned (67%), 1 not scanned; organization-level checks did not finish. '
                                    'Checks that could not run are listed as errors in their sections.')
     assert coverage_dot(html) == 'investigation' and 'shard' not in html.lower()
     assert 'Not checked for 1 project (p-002): the scan did not finish; the results are missing from this report.' in html
@@ -569,13 +577,26 @@ def test_coverage_line_is_worded_for_the_reader():
     coverage = {'total_projects': 1000, 'projects_scanned': 996, 'projects_partial': 2, 'projects_not_scanned': 2,
                 'total_shards': 51, 'shards_succeeded': 49, 'shards_failed': 1, 'shards_missing': 1, 'scope_checks': 'timed_out'}
     html = generate_html_report('organization', '123', JOB, coverage=coverage)
-    assert coverage_line(html) == ('996 of 1,000 projects scanned (>99%), 2 partially scanned (some checks did not finish in time), '
+    assert coverage_line(html) == '996 of 1,000 projects · 2 partially scanned · 2 not scanned · organization-level checks timed out'
+    assert coverage_note(html) == ('996 of 1,000 projects scanned (>99%), 2 partially scanned (some checks did not finish in time), '
                                    '2 not scanned; organization-level checks timed out. '
                                    'Checks that could not run are listed as errors in their sections.')
-    assert 'shard' not in html.lower()
+    assert coverage_dot(html) == 'investigation' and 'shard' not in html.lower()
     folder = generate_html_report('folder', '456', JOB, coverage={**coverage, 'projects_scanned': 1000, 'projects_partial': 0,
                                                                  'projects_not_scanned': 0, 'scope_checks': 'success'})
-    assert coverage_line(folder) == '1,000 of 1,000 projects scanned (100%); folder-level checks completed.'
+    assert coverage_line(folder) == '1,000 of 1,000 projects · folder-level checks completed' and coverage_note(folder) is None
+
+
+def test_single_task_scans_state_their_coverage_too():
+    """A scan that ran in one task covered every project it listed: the header says so, in the same words as a sharded scan."""
+    from app.reporting.html_report import generate_html_report
+    org = generate_html_report('organization', '123', JOB, total_projects=3)
+    assert coverage_line(org) == '3 of 3 projects · organization-level checks completed' and coverage_dot(org) == 'compliant'
+    assert coverage_note(org) is None
+    project = generate_html_report('project', 'p-000', JOB, total_projects=1)
+    assert coverage_line(project) == '1 project'  # no scope-level checks to mention
+    unknown = generate_html_report('organization', '123', JOB)  # the scan could not count its projects
+    assert coverage_line(unknown) is None and '<dt>Coverage</dt>' not in unknown
 
 
 def test_error_rows_name_projects_not_shards():
@@ -628,7 +649,7 @@ def test_sweep_finishes_the_job_when_a_shard_has_died(store, queue, monkeypatch)
     marker = store.read_markers(JOB)['shard-002']
     assert marker['status'] == 'failed' and marker['swept'] == 1 and 'crashed on every attempt' in marker['error']
     errors = store.read_all_findings(JOB, shard_id='shard-002')
-    assert len(errors) == 18 and all(f['Status'] == 'Error' for f in errors)  # one per project-level check (v14: 18)
+    assert len(errors) == 19 and all(f['Status'] == 'Error' for f in errors)  # one per project-level check (v15: 19)
     assert queue.calls == [('/run-aggregation', BODY, f'{JOB}-aggregate', None)]
     assert store.read_status(JOB, SCOPE_ID)['current_task'] == 'The scan of 1 project failed; merging the results of the others...'
     assert all(f['Finding'][0]['Error'] == 'Not checked for 1 project (p-002): the scan crashed on every attempt.' for f in errors)
@@ -827,9 +848,10 @@ def test_sharded_scan_end_to_end_matches_a_single_task_scan(gcp, monkeypatch):
     status = json.loads(status_blob.download_as_text())
     assert (status['status'], status['progress'], status['completed_shards'], status['failed_shards']) == ('completed', 100, 4, 0)
     html = gcp.bucket.blob(f'job-e2e/{ORG_ID}_report.html').download_as_text()
-    assert 'Coverage:</strong> 50 of 50 projects scanned (100%)' in html and 'SYNTHETIC LOAD TEST' in html
+    assert coverage_line(html) == '50 of 50 projects · organization-level checks completed' and 'SYNTHETIC LOAD TEST' in html
     assert 'pill-error">Error<' not in html
     assert [name for name in gcp.bucket.objects if name.startswith('intermediate/')] == []
+    assert [name for name in gcp.bucket.objects if name.startswith('scopes/')] == []  # synthetic scans enter no history
     # The sweep fires later and finds the job complete.
     assert gcp.tasks.drain(client) == 1 and gcp.tasks.deliveries[-1][0] == '/sweep'
 
@@ -841,6 +863,7 @@ def test_sharded_scan_end_to_end_matches_a_single_task_scan(gcp, monkeypatch):
     assert scan_job.execute_scan_job({**job, 'job_id': 'job-inline'}, store=store, banner=banner_for(provider)) is True
     inline_html, inline_csv = store.read_report('job-inline', ORG_ID, 'html'), store.read_report('job-inline', ORG_ID, 'csv')
     assert check_statuses(html) == check_statuses(inline_html) and len(check_statuses(html)) > 25
+    assert coverage_line(inline_html) == coverage_line(html)  # both paths state what they covered, in the same words
     assert html.count('status-badge') == inline_html.count('status-badge')  # one item per check, not one per shard
     assert report_rows(sharded_csv) == report_rows(inline_csv) and len(report_rows(inline_csv)) > 100
     assert len(sharded_csv.splitlines()) == len(inline_csv.splitlines())  # same records: same headers and spacers too
@@ -867,7 +890,8 @@ def test_sharded_scan_survives_a_crashing_shard(gcp, monkeypatch):
     status = json.loads(gcp.bucket.blob(f'job-crash/{ORG_ID}_status.json').download_as_text())
     assert (status['status'], status['failed_shards']) == ('completed', 1)
     html = gcp.bucket.blob(f'job-crash/{ORG_ID}_report.html').download_as_text()
-    assert coverage_line(html) == ('30 of 50 projects scanned (60%), 20 not scanned; organization-level checks completed. '
+    assert coverage_line(html) == '30 of 50 projects · 20 not scanned · organization-level checks completed'
+    assert coverage_note(html) == ('30 of 50 projects scanned (60%), 20 not scanned; organization-level checks completed. '
                                    'Checks that could not run are listed as errors in their sections.')
     assert ('Not checked for 20 projects (syn-42-00020, syn-42-00021, ' in html and 'syn-42-00039): the scan failed after 3 attempts. '
             'Last error: container out of memory' in html)

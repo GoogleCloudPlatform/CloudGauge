@@ -72,11 +72,12 @@ RESOURCE, RESOURCE_LIST, NUMBER, TIME, STATE, PROSE = "resource", "resource-list
 COLUMN_ROLES = {
     **dict.fromkeys(("Project", "Project ID", "Instance", "VM", "Cluster", "Node Pool", "Bucket", "Service Account", "Principal", "Member",
                      "Role", "Rule Name", "VPC", "Network", "Subnet", "MIG Name", "Sink Name", "Destination", "Resource", "Resource Name",
-                     "Region", "Metric", "ID", "Incident ID", "Policy"), RESOURCE),
+                     "Region", "Location", "Metric", "ID", "Incident ID", "Policy", "Version"), RESOURCE),
     **dict.fromkeys(("Projects", "Project IDs", "Locations", "VMs Not Reporting", "Standalone VMs", "Source Ranges", "Ports"), RESOURCE_LIST),
     **dict.fromkeys(("Rule Count", "Est. Monthly Saving", "Usage", "Retention", "Impacted projects"), NUMBER),
     **dict.fromkeys(("Date", "When (UTC)", "Started", "Ended"), TIME),
-    **dict.fromkeys(("Status", "State", "Relevance", "Type", "Finding Type", "Tier", "Category", "Expected Value", "Current Value"), STATE),
+    # "Component" ("Control plane", "Node pool pool-2"): a state, so its digits survive in a row's identity (app.reporting.changes).
+    **dict.fromkeys(("Status", "State", "Relevance", "Type", "Finding Type", "Tier", "Category", "Expected Value", "Current Value", "Component"), STATE),
     **dict.fromkeys(("Finding", "Issue", "Error", "Reason", "Detail", "Details", "Summary", "Recommendation", "Insight", "Incident",
                      "Notification", "Subject", "Products", "Skipped check", "Missing Categories"), PROSE),
 }

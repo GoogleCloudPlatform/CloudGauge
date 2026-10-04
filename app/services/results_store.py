@@ -31,6 +31,12 @@ cleanup removes everything:
 - ``intermediate/{job_id}/manifest.json``: the shard plan written by the dispatcher
 - ``intermediate/{job_id}/markers/{shard_id}.json``: written once by each finished shard
 
+Scan history (``app.reporting.changes``) adds one small object per completed
+scan, filed by scope so the next scan of the same scope finds its predecessor
+with one listing and nothing is ever rewritten:
+
+- ``scopes/{scope}/{scope_id}/{generated_ts}_{job_id}.json``: the scan's summary
+
 Checks receive a ``GcsResultsStore`` (or a ``ShardSink`` bound to a shard) as
 their keyword-only ``sink`` argument.
 """
@@ -48,6 +54,7 @@ from app.services import gcp
 MANIFEST_FILE = "manifest.json"
 MARKERS_DIR = "markers"
 SHARDS_DIR = "shards"
+SCOPES_DIR = "scopes"
 ORG_POLICY_FILES = ("best_practices.json", "current_policies.json")
 READ_WORKERS = 16  # parallel downloads when reading a job's findings back
 DELETE_WORKERS = 16  # parallel deletions when cleaning a job's intermediate files up
@@ -331,6 +338,43 @@ class GcsResultsStore:
                 logging.error(f"[{job_id}] Unreadable marker {blob.name}: {e}")
                 markers[shard_id] = {"shard_id": shard_id, "status": "failed", "error": f"unreadable marker: {e}"}
         return markers
+
+    # --- Scan history: one summary per completed scan, filed by scope ---
+    @staticmethod
+    def summaries_prefix(scope, scope_id):
+        """Where a scope's scan summaries live: ``scopes/organization/123/``."""
+        return f"{SCOPES_DIR}/{scope}/{scope_id}/"
+
+    def write_scan_summary(self, summary):
+        """Files a finished scan's summary (``app.reporting.changes.summarize``) under its scope.
+
+        Named ``<generated_ts>_<job_id>.json`` so a listing is in time order and
+        nothing is ever rewritten. Errors are logged, not raised: the reports are
+        already uploaded, and a missing summary costs only the next comparison.
+        """
+        name = f"{self.summaries_prefix(summary['scope'], summary['scope_id'])}{summary['generated_ts']}_{summary['job_id']}.json"
+        try:
+            self.bucket().blob(name).upload_from_string(json.dumps(summary), content_type='application/json')
+        except Exception as e:
+            logging.error(f"[{summary.get('job_id')}] Could not file the scan summary {name}: {e}")
+
+    def read_previous_summary(self, scope, scope_id, job_id):
+        """The newest summary of the scope's earlier scans (never ``job_id``'s own), or ``None``.
+
+        ``None`` also when the listing or the download fails (logged): a report
+        without the comparison beats no report.
+        """
+        prefix = self.summaries_prefix(scope, scope_id)
+        try:
+            bucket = self.bucket()
+            names = sorted(blob.name for blob in bucket.list_blobs(prefix=prefix) if blob.name.endswith(".json"))
+            for name in reversed(names):
+                if name[len(prefix):-len(".json")].partition("_")[2] == job_id:
+                    continue  # a retried render: compare with the scan before, not with ourselves
+                return json.loads(bucket.blob(name).download_as_text())
+        except Exception as e:
+            logging.error(f"[{job_id}] Could not read the previous scan summary under {prefix}: {e}")
+        return None
 
 
 class ShardSink:

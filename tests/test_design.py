@@ -88,6 +88,8 @@ def render(results):
 def ui_copy(page):
     """The fixed headings and button labels of a page (the labels its script sets included), not the data shown."""
     copy = re.findall(r'<h[12][^>]*>([^<{]+)</h[12]>', page)  # the status page's headings are in its script's template literals
+    for heading, attribution in re.findall(r'<h2>([^<{]+)<span class="attribution">([^<]+)</span></h2>', page):
+        copy += [heading, attribution]  # "AI analysis" with its "Powered by Gemini"
     copy += re.findall(r'<(?:button|a)\b[^>]*class="(?:btn|link-btn)[^"]*"[^>]*>([^<$]+)</(?:button|a)>', page)
     copy += re.findall(r'textContent = "([^"]+)"', page)
     return [unescape(text).strip() for text in copy]
@@ -153,9 +155,9 @@ def test_the_primary_button_is_ink_on_white(pages):
     primary = rule(DESIGN, '.btn-primary')
     assert (primary['background'], primary['border-color'], primary['color']) == ('var(--ink)', 'var(--ink)', '#fff')
     assert rule(DESIGN, '.btn-outline')['border-color'] == 'var(--control-border)'
-    # One primary action per page: start the scan, get the summary, open the report.
+    # One primary action per page: start the scan, generate the summary, open the report. Copy controls stay outline.
     assert re.findall(r'class="btn btn-primary[^"]*"[^>]*>([^<]+)<', pages['index']) == ['Start scan']
-    assert re.findall(r'class="btn btn-primary[^"]*"[^>]*>([^<]+)<', pages['report']) == ['Get AI summary']
+    assert re.findall(r'class="btn btn-primary[^"]*"[^>]*>([^<]+)<', pages['report']) == ['Generate executive summary']
     assert re.findall(r'class="btn btn-primary[^"]*"[^>]*>([^<]+)<', pages['status']) == ['View interactive report']
 
 
@@ -250,11 +252,36 @@ def test_headings_are_sentence_case_and_status_names_keep_theirs(pages):
             assert sentence_case(text), (name, text)
     assert 'Review your cloud environment' in ui_copy(pages['index'])
     assert {'Scan in progress', 'Scan complete', 'Scan failed', 'View interactive report', 'Download CSV'} <= set(ui_copy(pages['status']))
-    assert {'CloudGauge report', 'Overview', 'Review scores', 'Gemini', 'Executive summary', 'Get AI summary', 'Get remediation suggestions',
-            'Download CSV', 'Expand all', 'Collapse all'} <= set(ui_copy(pages['report']))
+    assert {'CloudGauge report', 'Overview', 'Review scores', 'AI analysis', 'Powered by Gemini', 'Executive summary',
+            'Generate executive summary', 'Draft fixes', 'Download CSV', 'Expand all', 'Collapse all', 'Copy'} <= set(ui_copy(pages['report']))
     assert set(CATEGORY_ORDER) <= set(ui_copy(pages['report']))
     assert re.findall(r'<span class="status-badge pill pill-[\w-]+">([^<]+)</span>', pages['report'])
     assert set(re.findall(r'<span class="status-badge pill pill-[\w-]+">([^<]+)</span>', pages['report'])) <= set(STATUS_CLASSES)
+
+
+def test_ai_analysis_names_what_it_does_and_credits_gemini_quietly(pages):
+    report = pages['report']
+    assert '<h2>AI analysis <span class="attribution">Powered by Gemini</span></h2>' in report
+    assert '<p>Generate an executive summary, or draft fixes for failing findings.</p>' in report
+    attribution = rule(REPORT_STYLES, '.attribution')
+    assert (attribution['color'], attribution['font-weight']) == ('var(--muted)', '400')  # text, not a pill: pills mean status
+    assert 'onclick="generateAiSummary()">Generate executive summary<' in report and 'onclick="getGeminiSuggestions(this)">Draft fixes<' in report
+    assert 'Get AI summary' not in report and 'Get remediation suggestions' not in report
+
+
+def test_every_fix_block_has_the_same_copy_control():
+    """A gcloud line is a gcloud line: built-in fixes and AI-drafted ones share one title row with one Copy button."""
+    copy_button = '<button type="button" class="btn btn-outline btn-sm copy-btn" onclick="copyFix(this)">Copy</button>'
+    report = render({SECURITY: [{'Check': 'Audit Logging', 'Status': 'Action Required', 'Finding': [
+        {'Project': 'web-prod', 'Issue': 'Data access logs off', 'Fix': 'gcloud projects set-iam-policy web-prod policy.yaml'}]}]})
+    assert f'<div class="fix-block"><div class="fix-head"><strong>Fix</strong>{copy_button}</div><pre>gcloud projects set-iam-policy web-prod policy.yaml</pre></div>' in report
+    # The AI-drafted block is built by the script with the same row (plus its AI-generated pill), and the executive summary's
+    # Copy is the same control; all three go through one copyText helper.
+    script = report.split('<script>')[-1]
+    assert f'<strong>Suggested fix</strong> <span class="pill pill-sky">AI-generated</span>\'\n        + \'{copy_button}' in script
+    assert 'id="copy-summary-btn" class="btn btn-outline btn-sm" onclick="copySummary(this)"' in report
+    assert script.count('return copyText(btn,') == 2 and 'async function copyText(btn, text)' in script
+    assert rule(REPORT_STYLES, '.fix-head .copy-btn')['margin-left'] == 'auto'
 
 
 def test_setup_and_status_pages_are_one_centred_card_on_a_dot_grid(pages):

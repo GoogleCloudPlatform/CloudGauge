@@ -61,6 +61,7 @@ import threading
 import time
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from datetime import datetime, timezone
+from html import unescape
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -77,7 +78,7 @@ from app.utils import configure_logging  # noqa: E402
 
 # One pair per check item: the title and the status pill in its accordion's summary row.
 CHECK_STATUS = re.compile(r'<span class="check-title"><strong>([^<]+)</strong>.*?<span class="status-badge[^"]*">([^<]+)</span>', re.S)
-COVERAGE_NOTE = re.compile(r'<strong>Coverage:</strong>(.*?)</span>', re.S)
+COVERAGE_LINE = re.compile(r'<dt>Coverage</dt><dd class="coverage[^"]*"><span class="dot dot-[\w-]+"></span>(.*?)</dd>', re.S)
 
 
 def peak_rss_mb():
@@ -87,11 +88,11 @@ def peak_rss_mb():
 
 
 def coverage_text(html):
-    """The report's coverage line as plain text, or ``None`` (single-task reports have none)."""
-    match = COVERAGE_NOTE.search(html)
+    """The header's Coverage line as plain text, or ``None`` when the scan could not count its projects."""
+    match = COVERAGE_LINE.search(html)
     if not match:
         return None
-    return " ".join(match.group(1).replace("&middot;", "·").split())
+    return " ".join(unescape(match.group(1)).split())
 
 
 def parse_args(argv=None):

@@ -34,6 +34,10 @@ body { display: flex; min-height: 100vh; }
 .report-header h1 { margin-bottom: 10px; }
 .report-meta { display: grid; grid-template-columns: max-content 1fr; gap: 3px 14px; margin: 0; font-family: var(--font-mono); font-size: 12px; color: var(--muted); }
 .report-meta dd { margin: 0; overflow-wrap: anywhere; }
+.report-meta .coverage .dot { width: 7px; height: 7px; margin-right: 8px; vertical-align: 1px; }
+.report-meta .coverage-incomplete { color: var(--body); }
+.report-meta a { color: var(--ink); text-decoration: underline; text-underline-offset: 3px; text-decoration-color: var(--zinc-300); }
+.report-meta a:hover { text-decoration-color: currentColor; }
 
 /* Toolbar: the filter box and the accordion controls; hidden on the Overview, which has no checks. */
 .report-toolbar { display: flex; align-items: center; gap: 12px; }
@@ -42,15 +46,42 @@ body { display: flex; min-height: 100vh; }
 #filter-status { font-size: 13px; color: var(--muted); }
 .toolbar-actions { display: inline-flex; gap: 14px; margin-left: auto; }
 
-/* Overview: four counts, the coverage line, the scores, the Gemini card. */
+/* Overview: four counts (with their change since the last scan), the coverage note when a scan is incomplete,
+   the scores, the Changes card, the AI analysis card. */
 .kpi-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
 .kpi { display: grid; grid-template-columns: auto 1fr; align-items: center; column-gap: 8px; padding: 16px 18px 14px; background: var(--surface); border: 1px solid var(--hairline); border-radius: var(--radius-card); }
 .kpi h3 { font-size: 13px; font-weight: 500; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .kpi .count { grid-column: 1 / -1; margin: 14px 0 0; font-size: 48px; font-weight: 300; letter-spacing: -0.04em; line-height: 1; color: var(--ink); font-variant-numeric: tabular-nums; }
 .kpi-unit { grid-column: 1 / -1; margin-top: 6px; font-size: 12px; color: var(--muted); }
+.kpi-delta { display: block; margin-top: 2px; color: var(--faint); }
+.kpi-delta .mono { color: var(--muted); }
 .coverage-note { display: flex; align-items: flex-start; gap: 10px; padding: 2px 4px; font-size: 13px; color: var(--muted); line-height: 1.5; }
 .coverage-note .dot { margin-top: 6px; }
 .coverage-note strong { font-weight: 500; color: var(--body); }
+/* Changes since last scan: numbers in mono, the score's arrow a muted glyph (a delta is not a status). */
+.card-meta { margin-left: auto; font-family: var(--font-mono); font-size: 12px; color: var(--muted); text-align: right; }
+.card-meta a { color: var(--muted); text-decoration: underline; text-underline-offset: 3px; text-decoration-color: var(--zinc-300); }
+.card-meta a:hover { color: var(--ink); text-decoration-color: currentColor; }
+.changes-table td { padding: 9px 12px; vertical-align: top; }
+.changes-table td:first-child { padding-left: 0; }
+.changes-table th:last-child, .changes-table td:last-child { padding-right: 0; }
+.changes-table th:first-child { padding-left: 0; }
+.changes-table tbody tr:hover > td { background: transparent; }
+.changes-table td.num { font-size: 13px; }
+.changes-table .delta { display: inline-block; min-width: 4.5ch; margin-left: 6px; font-family: var(--font-mono); font-size: 12px; font-variant-numeric: tabular-nums; color: var(--muted); text-align: left; }
+.changes-table .delta-flat { color: var(--faint); }
+.changes-table .status-change { display: block; font-size: 13px; }
+.changes-table .status-change + .status-change { margin-top: 3px; }
+.changes-table .status-change a { color: var(--ink); font-weight: 500; text-decoration: none; }
+.changes-table .status-change a:hover { text-decoration: underline; text-underline-offset: 3px; }
+.changes-table details.cell-more { display: block; margin-top: 3px; }
+.changes-table details.cell-more summary { cursor: pointer; color: var(--muted); font-size: 12px; list-style: none; text-decoration: underline; text-underline-offset: 3px; text-decoration-color: var(--zinc-300); }
+.changes-table details.cell-more summary::-webkit-details-marker { display: none; }
+.changes-table details.cell-more .more-body { display: block; margin-top: 3px; }
+.changes-foot { margin: 12px 0 0; font-size: 12px; line-height: 1.6; color: var(--muted); }
+.changes-foot + .changes-foot { margin-top: 4px; }
+.pill-new { padding: 1px 7px; border-color: transparent; font-size: 11px; line-height: 16px; }  /* the same label the tables' New marker shows */
+.attribution { margin-left: 8px; font-size: 12px; font-weight: 400; color: var(--muted); vertical-align: 1px; }
 .card h2 { margin-bottom: 12px; }
 .card-title-row { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
 .card-title-row h2, .card-title-row h3 { margin: 0; }
@@ -154,10 +185,28 @@ details.check > summary .status-badge { margin-top: 1px; }
 .org-policy-table td.state code { font-size: 12px; }
 
 /* One remediation block per failing finding: the check's own fix when it knows one (fix-block), Gemini's
-   suggestion otherwise (filled into the remediation placeholder by getGeminiSuggestions). Fixes are commands. */
+   suggestion otherwise (filled into the remediation placeholder by getGeminiSuggestions). Fixes are commands;
+   every block has the same title row with a Copy control (fix_block in _macros.html, suggestedFixHtml). */
 .fix-block { margin-top: 12px; padding-left: 12px; border-left: 2px solid var(--hairline); }
 .fix-block strong { font-size: 13px; font-weight: 500; color: var(--ink); }
+.fix-head { display: flex; align-items: center; gap: 8px; min-height: 28px; }
+.fix-head .copy-btn { margin-left: auto; }
 .fix-block pre, .remediation-placeholder pre { margin: 6px 0 0; padding: 10px 12px; border: 1px solid var(--hairline); border-radius: var(--radius-control); background: var(--canvas); color: var(--body); font-size: 12.5px; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
+
+/* Since the previous scan (app.reporting.changes): the chip after a status pill, the CSS-generated "New" marker on
+   rows the previous scan did not have (so it is not part of the row's text), and the resolved rows under a table. */
+.change-chip { flex: none; margin-top: 3px; font-family: var(--font-mono); font-size: 11.5px; color: var(--muted); white-space: nowrap; }
+.change-chip-note { color: var(--faint); }
+tr.row-new > td:first-child::before, .line-new::before { content: "New"; display: inline-block; margin-right: 8px; padding: 1px 7px; border-radius: 999px; background: var(--zinc-100); color: var(--zinc-700); font: 500 11px/16px var(--font-sans); vertical-align: 1px; white-space: nowrap; }
+.resolved-list { margin-top: 10px; font-size: 13px; }
+.resolved-list summary { cursor: pointer; color: var(--muted); list-style: none; }
+.resolved-list summary::-webkit-details-marker { display: none; }
+.resolved-list summary::before { content: "\25B8"; display: inline-block; width: 12px; color: var(--faint); }
+.resolved-list[open] summary::before { content: "\25BE"; }
+.resolved-list summary:hover { color: var(--ink); }
+.resolved-list ul { margin: 6px 0 0 12px; padding-left: 16px; font-family: var(--font-mono); font-size: 12px; line-height: 1.7; color: var(--body); }
+.resolved-list li::marker { color: var(--faint); }
+.resolved-list p { margin: 4px 0 0 12px; font-size: 12px; }
 
 @media (max-width: 1100px) {
     .kpi-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }

@@ -48,6 +48,29 @@ INCIDENTS = (
     ("syn-inc-005", "Compute Engine VM creation failures in europe-west2", "Compute Engine", "europe-west2", "CLOSED", 140, 139),  # outside a 90-day window
 )
 INCIDENT_RELEVANCES = ("IMPACTED", "RELATED", "PARTIALLY_RELATED")
+# GKE versions the synthetic ``getServerConfig`` offers (GKE Supported Versions judges clusters against them):
+# the supported minors newest first, as the API lists them, two patches each; the REGULAR channel offers the
+# newer three. ``GKE_RETIRED_VERSION`` is the minor some clusters still run after it left the lists.
+GKE_MINORS = ("1.33", "1.32", "1.31", "1.30")
+GKE_CHANNEL_MINORS = GKE_MINORS[:3]
+GKE_VERSIONS = tuple(f"{minor}.{patch}-gke.{build}" for minor in GKE_MINORS for patch, build in ((4, 1289000), (1, 1035000)))
+GKE_RETIRED_VERSION = "1.29.8-gke.1057000"
+
+
+def gke_version(minor):
+    """The newest offered version of ``minor``."""
+    return GKE_VERSIONS[GKE_MINORS.index(minor) * 2]
+
+
+def gke_cluster_versions(index):
+    """``(control plane version, node pool versions)`` of project ``index``'s cluster: most run a current minor
+    with one pool a minor behind; one project in ten runs the retired minor, two in ten the oldest supported one."""
+    bucket = index % 10
+    if bucket == 0:
+        return GKE_RETIRED_VERSION, (GKE_RETIRED_VERSION, GKE_RETIRED_VERSION)
+    if bucket in (1, 2):
+        return gke_version("1.30"), (gke_version("1.30"), GKE_RETIRED_VERSION if bucket == 1 else gke_version("1.30"))
+    return gke_version("1.32"), (gke_version("1.32"), gke_version("1.31"))
 # Advisory Notifications of the organization: (type, subject, days ago, HTML body, ((attachment name, headers, rows), ...)).
 ADVISORY_TYPES = ("NOTIFICATION_TYPE_SECURITY_MSA", "NOTIFICATION_TYPE_SECURITY_PRIVACY_ADVISORY",
                   "NOTIFICATION_TYPE_SENSITIVE_ACTIONS", "NOTIFICATION_TYPE_THREAT_HORIZONS")
@@ -149,7 +172,8 @@ class GkeCluster:
     name: str
     location: str
     release_channel: bool
-    node_pools: tuple  # (name, auto_upgrade)
+    master_version: str
+    node_pools: tuple  # (name, auto_upgrade, version)
     recommendations: tuple
 
 
@@ -304,9 +328,12 @@ class SyntheticOrg:
             backups=_chance(rng, 0.7), pitr=_chance(rng, 0.5), retained_backups=rng.choice([7, 14, 30, 60]),
         ) for i in range(rng.randint(1, 2) if (size != "empty" and _chance(rng, 0.12)) else 0))
 
+        # Versions come from the project index, not ``rng``: they were added later (v15) and must not shift
+        # the attributes drawn after them.
+        master_version, (default_version, spot_version) = gke_cluster_versions(index)
         gke_clusters = tuple(GkeCluster(
-            name=f"cluster-{c}", location=rng.choice(zones), release_channel=_chance(rng, 0.6),
-            node_pools=(("default-pool", _chance(rng, 0.7)), ("spot-pool", _chance(rng, 0.5))),
+            name=f"cluster-{c}", location=rng.choice(zones), release_channel=_chance(rng, 0.6), master_version=master_version,
+            node_pools=(("default-pool", _chance(rng, 0.7), default_version), ("spot-pool", _chance(rng, 0.5), spot_version)),
             recommendations=tuple(["Upgrade to a supported GKE version."] if _chance(rng, 0.3) else []),
         ) for c in range(1 if (any(vm.gke for vm in vms) and _chance(rng, 0.8)) else 0))
 

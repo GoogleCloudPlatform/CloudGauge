@@ -45,6 +45,11 @@
   A page is never blank: a category with nothing to list shows its
   empty_message, and a page whose checks are all hidden by the filter shows
   the .filter-empty note (filled in by applyRowFilter in _script.js).
+
+  When the scan has a predecessor (app.reporting.changes), a check also shows
+  what changed: a chip after its status pill, a "New" marker on the rows the
+  previous scan did not have, and the resolved rows under its table (see the
+  comment above change_chip). Without one, none of that markup is emitted.
 #}
 {% macro chevron_icon() -%}
 <svg class="chevron" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg>
@@ -60,6 +65,38 @@
 
 {% macro chip_list(lines, tail) -%}
 {% for line in lines %}{{ chip(line) }}{% if not loop.last %} {% endif %}{% endfor %}{% if tail %} <span class="muted">{{ tail }}</span>{% endif %}
+{%- endmacro %}
+
+{#
+  Since the previous scan (app.reporting.changes): a chip after a check's status
+  pill when its rows changed ("+3 new · −5 resolved", or "not compared"), an
+  entry of the Overview card's "Status changes" column, and the collapsed list
+  of resolved rows under a table. Rows the previous scan did not have carry
+  class="row-new"; the "New" marker is CSS-generated so it is not part of the
+  row's text for sorting, filtering, the CSV, or the Gemini prompt.
+#}
+{% macro change_chip(change) -%}
+{% if change is not none and change.chip %}<span class="change-chip{% if change.note %} change-chip-note{% endif %}" title="{{ change.chip_title }}">{{ change.chip }}</span>{% endif %}
+{%- endmacro %}
+
+{% macro change_entry(entry, section_id) -%}
+<span class="status-change"><a href="#{{ section_id }}{% if entry.slug %}-{{ entry.slug }}{% endif %}" onclick="showSection('{{ section_id }}')">{{ entry.check_name }}</a> {% if entry.before %}<span class="muted">{{ entry.before }} →</span> {% endif %}{{ entry.after }}</span>
+{%- endmacro %}
+
+{% macro resolved_list(change) -%}
+{% if change is not none and change.resolved %}
+<details class="resolved-list"><summary>Resolved since last scan (<span class="mono">{{ "{:,}".format(change.resolved) }}</span>)</summary>
+<ul>{% for item in change.resolved_items %}<li>{{ item }}</li>{% endfor %}</ul>{% if change.resolved_omitted %}<p class="muted">… and {{ "{:,}".format(change.resolved_omitted) }} more.</p>{% endif %}</details>
+{% endif %}
+{%- endmacro %}
+
+{#
+  One remediation block, whoever wrote it: the title row ("Fix", or "Suggested
+  fix" with the AI-generated pill) with a Copy control, then the commands.
+  suggestedFixHtml() in _script.js emits the same markup for Gemini's drafts.
+#}
+{% macro fix_block(lines) -%}
+<div class="fix-block"><div class="fix-head"><strong>Fix</strong><button type="button" class="btn btn-outline btn-sm copy-btn" onclick="copyFix(this)">Copy</button></div><pre>{{ lines|join("\n") }}</pre></div>
 {%- endmacro %}
 
 {% macro render_cell(cell) -%}
@@ -87,9 +124,9 @@
 {% macro details_cell(details, rows_per_page) -%}
 {% if details is not none -%}
 {% if details.kind == "table" -%}
-<table class='data-table details-table'><thead><tr>{% for header in details.display_headers %}<th>{{ header }}</th>{% endfor %}</tr></thead><tbody>{% for row in details.cells %}<tr{% if loop.index > rows_per_page %} hidden{% endif %}>{% for cell in row %}{{ render_cell(cell) }}{% endfor %}</tr>{% endfor %}</tbody></table>
+<table class='data-table details-table'><thead><tr>{% for header in details.display_headers %}<th>{{ header }}</th>{% endfor %}</tr></thead><tbody>{% for row in details.cells %}<tr{% if details.new_rows and details.new_rows[loop.index0] %} class="row-new"{% endif %}{% if loop.index > rows_per_page %} hidden{% endif %}>{% for cell in row %}{{ render_cell(cell) }}{% endfor %}</tr>{% endfor %}</tbody></table>
 {%- else -%}
-{{ details.lines|join("<br>"|safe) }}
+{% for line in details.lines %}{% if details.new_rows and details.new_rows[loop.index0] %}<span class="line-new">{{ line }}</span>{% else %}{{ line }}{% endif %}{% if not loop.last %}<br>{% endif %}{% endfor %}
 {%- endif %}
 {%- endif %}
 {%- endmacro %}
@@ -98,7 +135,7 @@
 {% for category in categories -%}
 <tr class="group-row"><td colspan="4">{{ category.name }}</td></tr>
 {%- for row in category.rows -%}
-<tr><td class="prose">{{ row.display_name }}</td><td class="state"><code>{{ row.expected_value }}</code></td><td class="state"><code>{{ row.current_value }}</code></td><td class="state"><span class="pill pill-{{ row.status_class }} status-text-{{ row.status_class }}">{{ row.status }}</span></td></tr>
+<tr{% if row.new %} class="row-new"{% endif %}><td class="prose">{{ row.display_name }}</td><td class="state"><code>{{ row.expected_value }}</code></td><td class="state"><code>{{ row.current_value }}</code></td><td class="state"><span class="pill pill-{{ row.status_class }} status-text-{{ row.status_class }}">{{ row.status }}</span></td></tr>
 {%- endfor %}
 {% endfor %}
 {%- endmacro %}
@@ -112,6 +149,7 @@
             <span class="dot dot-{{ org_policies.status_class }}" aria-hidden="true"></span>
             <span class="check-title"><strong>Organization Policies</strong><span class="check-summary">{% if differing %}{{ differing }} polic{{ 'y differs' if differing == 1 else 'ies differ' }} from the recommended value{% else %}Every policy is set to the recommended value{% endif %}</span></span>
             <span class="status-badge pill pill-{{ org_policies.status_class }}">{{ org_policies.compliant }}/{{ org_policies.total }} Compliant</span>
+            {{ change_chip(org_policies.change) }}
         </summary>
         <div class="check-content">
             <div class="details">
@@ -120,6 +158,7 @@
                     <tbody>{{ org_policy_rows(org_policies.categories) }}</tbody>
                 </table>
             </div>
+            {{ resolved_list(org_policies.change) }}
         </div>
     </details>
 </li>
@@ -133,6 +172,7 @@
             <span class="dot dot-{{ check.status_class }}" aria-hidden="true"></span>
             <span class="check-title"><strong>{{ check.check_name }}</strong>{% if check.summary %}<span class="check-summary">{{ check.summary }}</span>{% endif %}</span>
             <span class="status-badge pill pill-{{ check.status_class }}">{{ check.status }}</span>
+            {{ change_chip(check.change) }}
         </summary>
         <div class="check-content">
             <div class="details">{{ details_cell(check.details, rows_per_page) }}</div>
@@ -144,8 +184,9 @@
             {% if check.details is not none and check.details.omitted_rows %}
             <div class="table-note">Only the first {{ "{:,}".format(check.details.total_rows - check.details.omitted_rows) }} of {{ "{:,}".format(check.details.total_rows) }} rows are included in this page. The complete list is in the <a href="{{ csv_href }}">CSV report</a>.</div>
             {% endif %}
+            {{ resolved_list(check.change) }}
             {% if check.details is not none and check.details.fix_lines %}
-            <div class="fix-block"><strong>Fix</strong><pre>{{ check.details.fix_lines|join("\n") }}</pre></div>
+            {{ fix_block(check.details.fix_lines) }}
             {% endif %}
             {% if check.fix_id is not none %}
             <div class='remediation-placeholder' id='fix-{{ check.fix_id }}'></div>

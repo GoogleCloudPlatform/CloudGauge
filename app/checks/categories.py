@@ -83,6 +83,8 @@ CATEGORY_MAP = {
     "Personalized Service Health API Coverage": "Reliability & Resilience",
     "Advisory Notifications": "Security & Identity",
     "Advisory Notifications Settings": "Security & Identity",
+    # v15: clusters and node pools on GKE minors that are no longer offered.
+    "GKE Supported Versions": "Reliability & Resilience",
 }
 
 

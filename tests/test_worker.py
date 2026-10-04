@@ -25,6 +25,7 @@ that changed between processes (it came from a ``set``). The new CSV uses
 import ast
 import functools
 import inspect
+import json
 import re
 import textwrap
 import threading
@@ -137,16 +138,23 @@ def test_scan_job_matches_legacy(legacy_client, client, gcp, scripted_scan):
         (98, 'Generating final HTML and CSV reports...', 'running', 'application/json'),
         (100, 'Scan complete!', 'completed', 'application/json'),
     ]
-    # Same writes in the same order; every intermediate file deleted afterwards.
-    assert run.uploads == legacy_run.uploads
+    # Same writes in the same order, plus the scan summary (v15) once the reports are up; every intermediate file deleted afterwards.
+    summaries = [name for name in run.uploads if name.startswith('scopes/')]
+    assert len(summaries) == 1 and re.fullmatch(rf'scopes/{SCOPE}/{SCOPE_ID}/\d{{8}}T\d{{6}}Z_{JOB_ID}\.json', summaries[0])
+    assert run.uploads.index(summaries[0]) > run.uploads.index(REPORT_CSV)
+    assert [name for name in run.uploads if name not in summaries] == legacy_run.uploads
     assert run.deleted == legacy_run.deleted
     assert len(run.deleted) == len(scripted_scan.findings) + 2  # plus the two org-policy files
     assert all(name.startswith(f'intermediate/{JOB_ID}/') for name in run.deleted)
 
-    assert sorted(run.objects) == sorted(legacy_run.objects) == sorted([REPORT_HTML, REPORT_CSV, STATUS])
+    assert sorted(run.objects) == sorted([*legacy_run.objects, *summaries]) == sorted([REPORT_HTML, REPORT_CSV, STATUS, *summaries])
+    summary = json.loads(run.objects[summaries[0]][0])
+    assert (summary['version'], summary['job_id'], summary['scope'], summary['scope_id']) == (1, JOB_ID, SCOPE, SCOPE_ID)
+    assert {finding['Check'] for finding in scripted_scan.findings} <= set(summary['checks'])
     (html, html_type), (legacy_html, legacy_html_type) = run.objects[REPORT_HTML], legacy_run.objects[REPORT_HTML]
     assert html_type == legacy_html_type == 'text/html'
     assert report_facts(html) == report_facts(legacy_html)  # same findings; the layout differs (plan item 6b)
+    assert 'none — first scan of this organization' in html  # the bucket was empty: nothing to compare with
     (csv_text, csv_type), (legacy_csv, legacy_csv_type) = run.objects[REPORT_CSV], legacy_run.objects[REPORT_CSV]
     assert csv_type == legacy_csv_type == 'text/csv'
     assert csv_sections(csv_text) == csv_sections(legacy_csv)
@@ -177,6 +185,37 @@ def test_report_generation_error_matches_legacy(legacy_client, client, gcp, scri
     assert run.statuses == legacy_run.statuses
     assert run.statuses[-1][1:3] == ("A critical error occurred: 'str' object has no attribute 'values'", 'error')
     assert run.deleted == legacy_run.deleted
+
+
+def test_a_second_scan_of_the_scope_compares_with_the_first(client, gcp, scripted_scan):
+    """New app only (v15): the second scan's report shows what changed since the first, and the CSV flags the new rows."""
+    def html_of(job_id):
+        return gcp.bucket.objects[f'{job_id}/{SCOPE_ID}_report.html'][0]
+
+    assert client.post('/run-scan', json={**PAYLOAD, 'job_id': 'job-1'}).status_code == 200
+    assert 'none — first scan of this organization' in html_of('job-1')
+
+    # Between the scans: alice's owner role was removed and a CI account was granted editor.
+    scripted_scan.findings = [f for f in samples.all_findings() if f['Check'] != 'Project IAM Hygiene'] + [
+        {'Check': 'Project IAM Hygiene', 'Status': 'Action Required', 'Finding': [
+            {'Project': 'data-lake', 'Member': 'allUsers', 'Role': 'roles/viewer'},
+            {'Project': 'ml-dev', 'Member': 'serviceAccount:ci@ml-dev.iam.gserviceaccount.com', 'Role': 'roles/editor'}]}]
+    assert client.post('/run-scan', json={**PAYLOAD, 'job_id': 'job-2'}).status_code == 200
+    html = html_of('job-2')
+    assert f'<a href="/report/job-1/{SCOPE_ID}">view</a>' in html  # the header's Previous scan line
+    assert '<h2>Changes since last scan</h2>' in html
+    assert '+1 new · −1 resolved' in html
+    assert '<tr class="row-new"><td class="nowrap code"><code class="chip">ml-dev</code></td>' in html
+    assert '<li>web-prod · user:alice@example.com · roles/owner</li>' in html
+    csv_text = gcp.bucket.objects[f'job-2/{SCOPE_ID}_report.csv'][0]
+    iam_rows = [row for row in csv_sections(csv_text)['Security & Identity'] if row and row[0] == 'Project IAM Hygiene']
+    assert [(row[2], row[-1]) for row in iam_rows] == [('data-lake', ''), ('ml-dev', 'yes')]
+    summaries = sorted(name for name in gcp.bucket.objects if name.startswith(f'scopes/{SCOPE}/{SCOPE_ID}/'))
+    assert [name.rpartition('_')[2] for name in summaries] == ['job-1.json', 'job-2.json']
+
+    # A retried render of job-2 compares with job-1 again, never with job-2's own summary.
+    assert client.post('/run-scan', json={**PAYLOAD, 'job_id': 'job-2'}).status_code == 200
+    assert f'<a href="/report/job-1/{SCOPE_ID}">view</a>' in html_of('job-2') and '+1 new · −1 resolved' in html_of('job-2')
 
 
 @pytest.mark.parametrize('kwargs', [
@@ -269,6 +308,9 @@ BETA_V1_CHECKS = ['check_cloud_sql_security', 'check_vpc_configuration', 'check_
 V14_CHECKS = {'check_service_health_incidents', 'check_org_advisories', 'check_project_advisories'}
 # ... and beta v1's organization-level Personalized Service Health probe, which the per-project check replaces.
 RETIRED_CHECKS = {'check_service_health_status'}
+# v15: GKE Supported Versions, after Service Health Incidents in the common list.
+V15_CHECKS = {'check_gke_supported_versions'}
+LATER_CHECKS = V14_CHECKS | V15_CHECKS
 
 
 def finished_checks(progress_updates):
@@ -280,21 +322,21 @@ def test_runner_runs_the_beta_v1_check_plan(scope, scope_id, beta, monkeypatch):
     """Both runners call the same check functions with the same arguments and report the same progress.
 
     The reference is upstream beta v1's ``run_all_checks``: the legacy plan plus four Security checks.
-    The v14 checks come after them in the plan, and beta's retired probe is left out of the comparison.
+    The v14 and v15 checks come after them in the plan, and beta's retired probe is left out of the comparison.
     """
     zones, regions = ['us-central1-a'], ['us-central1', 'global']
     names = [spec.func.__name__ for spec in registry.build_check_plan(scope, scope_id, JOB_ID, PROJECTS, zones, regions)]
-    assert len(names) == (25 if scope == 'organization' else 20)
+    assert len(names) == (26 if scope == 'organization' else 21)
     # Same order as beta v1's plan lists, which append the four checks after "Service Quota Limits".
     beta_plan = ast.parse(textwrap.dedent(inspect.getsource(beta.run_all_checks)))
     beta_lists = [[entry.elts[2].id for entry in node.elts if isinstance(entry, ast.Tuple)]
                   for node in ast.walk(beta_plan) if isinstance(node, ast.List)]
     beta_common, beta_org_only = [plan for plan in beta_lists if plan]
     beta_names = beta_common + (beta_org_only if scope == 'organization' else [])
-    shared = [name for name in names if name not in V14_CHECKS]
+    shared = [name for name in names if name not in LATER_CHECKS]
     assert shared == [name for name in beta_names if name not in RETIRED_CHECKS]
     assert names[14:18] == BETA_V1_CHECKS
-    assert names[18] == 'check_service_health_incidents'
+    assert names[18:20] == ['check_service_health_incidents', 'check_gke_supported_versions']
     assert names[-1] == ('check_org_advisories' if scope == 'organization' else 'check_project_advisories')
     calls = {'beta': {}, 'new': {}}
     sink = RecordingSink()
@@ -326,12 +368,12 @@ def test_runner_runs_the_beta_v1_check_plan(scope, scope_id, beta, monkeypatch):
         assert (args[:len(beta_args)], beta_kwargs, kwargs) == (beta_args, {}, {'sink': sink}), name
         assert args[len(beta_args):] == (({},) if name in ('run_cost_recommendations', 'run_network_insights') else ()), name
     for name in names:
-        if name in V14_CHECKS:
+        if name in LATER_CHECKS:
             assert calls['new'][name][1] == {'sink': sink}, name
     # Checks finish in any order, so compare progress as sets of messages; both runners end their checks at 95%.
     assert len(progress) == len(names) and len(beta_progress) == len(beta_names)
     assert progress[-1]['progress'] == beta_progress[-1]['progress'] == 95
-    assert finished_checks(progress) - {registry.SERVICE_HEALTH_CHECK, registry.ADVISORIES_CHECK} == \
+    assert finished_checks(progress) - {registry.SERVICE_HEALTH_CHECK, registry.GKE_VERSIONS_CHECK, registry.ADVISORIES_CHECK} == \
            finished_checks(beta_progress) - {'Personalized Service Health'}
     assert sink.findings == []
 
@@ -339,11 +381,12 @@ def test_runner_runs_the_beta_v1_check_plan(scope, scope_id, beta, monkeypatch):
 @pytest.mark.parametrize('scope', ['organization', 'project'])
 def test_check_plan_is_the_legacy_plan_plus_the_beta_v1_checks(scope, legacy):
     """No legacy check was dropped: the plan is the checks legacy ``run_all_checks`` names, plus the four
-    beta v1 checks and the v14 checks (legacy's Personalized Service Health probe is retired)."""
+    beta v1 checks and the v14 and v15 checks (legacy's Personalized Service Health probe is retired)."""
     names = [spec.func.__name__ for spec in registry.build_check_plan(scope, SCOPE_ID, JOB_ID, PROJECTS, [], ['global'])]
     legacy_names = set(legacy.run_all_checks.__code__.co_names)
     advisories = 'check_org_advisories' if scope == 'organization' else 'check_project_advisories'
-    assert [name for name in names if name not in legacy_names] == BETA_V1_CHECKS + ['check_service_health_incidents', advisories]
+    assert [name for name in names if name not in legacy_names] == \
+           BETA_V1_CHECKS + ['check_service_health_incidents', 'check_gke_supported_versions', advisories]
     if scope == 'organization':  # the one legacy check the plan no longer runs
         assert {name for name in legacy_names if name.startswith('check_')} - set(names) == RETIRED_CHECKS
 

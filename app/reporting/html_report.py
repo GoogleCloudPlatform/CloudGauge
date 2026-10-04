@@ -29,7 +29,9 @@ from urllib.parse import quote
 
 from jinja2 import Environment, PackageLoader, StrictUndefined
 
+from app.reporting.changes import summarize
 from app.reporting.context import build_report_context
+from app.reporting.csv_report import generate_csv_data
 
 REPORT_TEMPLATE = "report/report.html"
 
@@ -55,7 +57,7 @@ def render_report(context):
     return report_environment().get_template(REPORT_TEMPLATE).render(context.template_vars())
 
 
-def generate_html_report(scope, scope_id, job_id, banner=None, coverage=None, total_projects=None, **all_results):
+def generate_html_report(scope, scope_id, job_id, banner=None, coverage=None, total_projects=None, previous=None, **all_results):
     """
     Generates a dynamic and interactive HTML report from the scan results.
 
@@ -65,11 +67,14 @@ def generate_html_report(scope, scope_id, job_id, banner=None, coverage=None, to
         job_id (str): The unique ID for this scan job.
         banner (str, optional): A notice shown at the top of the report (the
             synthetic load mode uses it). ``None`` renders nothing.
-        coverage (dict, optional): A sharded scan's coverage, shown above the
-            overview (``app.fanout.build_coverage``). ``None`` renders nothing.
+        coverage (dict, optional): A sharded scan's coverage
+            (``app.fanout.build_coverage``), for the header's Coverage line.
+            Scans that ran in one task pass ``total_projects`` instead.
         total_projects (int, optional): Projects in the scope, for the checks'
-            summary lines ("312 of 1,000 projects"). Sharded scans take it
-            from ``coverage``.
+            summary lines ("312 of 1,000 projects") and the Coverage line.
+            Sharded scans take it from ``coverage``.
+        previous (dict, optional): The previous scan's summary
+            (``app.reporting.changes``): the report then shows what changed.
         **all_results: The dictionary of categorized findings.
 
     Returns:
@@ -77,4 +82,19 @@ def generate_html_report(scope, scope_id, job_id, banner=None, coverage=None, to
     """
     print(f"[{job_id}] 📊 Generating final report for {scope}: {scope_id}...")
     return render_report(build_report_context(scope, scope_id, job_id, all_results, banner=banner, coverage=coverage,
-                                              total_projects=total_projects))
+                                              total_projects=total_projects, previous=previous))
+
+
+def generate_reports(scope, scope_id, job_id, all_results, *, banner=None, coverage=None, total_projects=None, previous=None):
+    """Everything a finished scan uploads: ``(html, csv, summary)``.
+
+    The HTML and the CSV come from one context, so a row the page marks *New*
+    is the row the CSV marks. ``summary`` is what the next scan of this scope
+    compares with (``app.reporting.changes.summarize``); the caller files it
+    with ``GcsResultsStore.write_scan_summary`` once the reports are uploaded.
+    """
+    print(f"[{job_id}] 📊 Generating final report for {scope}: {scope_id}...")
+    context = build_report_context(scope, scope_id, job_id, all_results, banner=banner, coverage=coverage,
+                                   total_projects=total_projects, previous=previous)
+    csv_report = generate_csv_data(all_results, row_matchers=context.row_matchers if context.changes else None)
+    return render_report(context), csv_report, summarize(context)

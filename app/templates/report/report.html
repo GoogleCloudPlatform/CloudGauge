@@ -20,11 +20,15 @@
 
   Layout: a fixed sidebar (the sections, each with its worst status and the
   number of items that need a human) and one page at a time in the main column.
-  The Overview is the four counts, the coverage line, the review scores and the
-  Gemini actions; each category page is a list of accordions (_macros.html).
+  The Overview is the four counts, the coverage note when a scan is incomplete,
+  the review scores, what changed since the previous scan (when there is one)
+  and the AI analysis actions; each category page is a list of accordions
+  (_macros.html).
 #}
-{% from "report/_macros.html" import category_section %}
+{% from "report/_macros.html" import category_section, change_entry %}
 {% set csv_href = "/report/" ~ (job_id|pathsegment) ~ "/" ~ (scope_id|pathsegment) ~ "/csv" %}
+{# Status changes the Changes card shows per category before "N more" (app.reporting.changes.INLINE_STATUS_CHANGES). #}
+{% set inline_status_changes = 3 %}
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -58,6 +62,12 @@
                 <dl class="report-meta">
                     <dt>Scope</dt><dd>{{ scope_title }} {{ scope_id }}</dd>
                     <dt>Report ID</dt><dd>{{ job_id }}</dd>
+{% if coverage %}
+                    <dt>Coverage</dt><dd class="coverage{% if not coverage.complete %} coverage-incomplete{% endif %}"><span class="dot dot-{{ 'compliant' if coverage.complete else 'investigation' }}"></span>{{ coverage.header_text }}</dd>
+{% endif %}
+                    <dt>Previous scan</dt><dd class="previous-scan">
+                    {%- if changes %}{{ changes.previous_generated_at }} <a href="/report/{{ changes.previous_job_id|pathsegment }}/{{ scope_id|pathsegment }}">view</a>
+                    {%- else %}none — first scan of this {{ scope }}{% endif %}</dd>
                 </dl>
             </div>
             <a class="btn btn-outline btn-sm" href="{{ csv_href }}">Download CSV</a>
@@ -77,18 +87,17 @@
         <div id="overview-section" class="content-section">
             <h2 class="sr-only">Overview</h2>
             <div class="kpi-grid">
-                <div class="kpi"><span class="dot dot-action-required"></span><h3>Action Required</h3><p class="count">{{ overview.action_count }}</p><span class="kpi-unit">checks</span></div>
-                <div class="kpi"><span class="dot dot-investigation"></span><h3>Investigation Recommended</h3><p class="count">{{ overview.investigation_count }}</p><span class="kpi-unit">checks</span></div>
-                <div class="kpi"><span class="dot dot-compliant"></span><h3>Compliant</h3><p class="count">{{ overview.compliant_count }}</p><span class="kpi-unit">checks</span></div>
-                <div class="kpi"><span class="dot dot-error"></span><h3>Errors</h3><p class="count">{{ overview.error_count }}</p><span class="kpi-unit">checks</span></div>
+{% for label, cls, count, key in (("Action Required", "action-required", overview.action_count, "action_count"), ("Investigation Recommended", "investigation", overview.investigation_count, "investigation_count"), ("Compliant", "compliant", overview.compliant_count, "compliant_count"), ("Errors", "error", overview.error_count, "error_count")) %}
+                <div class="kpi"><span class="dot dot-{{ cls }}"></span><h3>{{ label }}</h3><p class="count">{{ count }}</p><span class="kpi-unit">checks{% if changes %}<span class="kpi-delta">{% set delta = changes.overview_deltas.get(key, 0) %}{% if delta %}<span class="mono">{{ '+' if delta > 0 else '−' }}{{ delta|abs }}</span> since last scan{% else %}unchanged since last scan{% endif %}</span>{% endif %}</span></div>
+{% endfor %}
             </div>
-{% if coverage %}
+{% if coverage and not coverage.complete %}
             <p role="note" class="coverage-note">
-                <span class="dot dot-{{ 'compliant' if coverage.complete else 'investigation' }}"></span>
+                <span class="dot dot-investigation"></span>
                 <span><strong>Coverage:</strong> {{ "{:,}".format(coverage.projects_scanned) }} of {{ "{:,}".format(coverage.total_projects) }} projects scanned ({{ coverage.scanned_pct }}%)
                 {%- if coverage.projects_partial %}, {{ "{:,}".format(coverage.projects_partial) }} partially scanned (some checks did not finish in time){% endif %}
                 {%- if coverage.projects_not_scanned %}, {{ "{:,}".format(coverage.projects_not_scanned) }} not scanned{% endif %}; {{ coverage.checks_label }} {{ coverage.scope_checks_text }}.
-                {%- if not coverage.complete %} Checks that could not run are listed as errors in their sections.{% endif %}</span>
+                Checks that could not run are listed as errors in their sections.</span>
             </p>
 {% endif %}
             <section class="card">
@@ -106,14 +115,52 @@
                     </tbody>
                 </table>
             </section>
+{% if changes %}
+            <section class="card changes-card" id="changes">
+                <div class="card-title-row">
+                    <h2>Changes since last scan</h2>
+                    <span class="card-meta">compared with <a href="/report/{{ changes.previous_job_id|pathsegment }}/{{ scope_id|pathsegment }}"><time>{{ changes.previous_generated_at }}</time></a>{% if changes.population %} · {{ changes.population }}{% endif %}</span>
+                </div>
+                <table class="data-table changes-table">
+                    <thead><tr><th>Category</th><th class="num">Score</th><th class="num">Resolved</th><th class="num">New</th><th>Status changes</th></tr></thead>
+                    <tbody>
+                    {% for row in changes.categories %}
+                        <tr>
+                            <td class="score-name"><a href="#{{ row.section_id }}" onclick="showSection('{{ row.section_id }}')">{{ row.category_name }}</a></td>
+                            <td class="num"><span class="score">{{ row.score_display }}%</span> <span class="delta delta-{{ row.delta_class }}">{% if row.delta_class == 'up' %}&#9650; {% elif row.delta_class == 'down' %}&#9660; {% endif %}{{ row.delta_display }}</span></td>
+                            <td class="num">{{ "{:,}".format(row.resolved) if row.resolved else "—" }}</td>
+                            <td class="num">{{ "{:,}".format(row.new) if row.new else "—" }}</td>
+                            <td class="prose status-changes">
+                            {%- if not row.entries %}<span class="muted">none</span>{% endif -%}
+                            {%- for entry in row.entries[:inline_status_changes] %}
+                                {{ change_entry(entry, row.section_id) }}
+                            {%- endfor -%}
+                            {%- if row.entries|length > inline_status_changes %}
+                                <details class="cell-more"><summary>{{ row.entries|length - inline_status_changes }} more</summary><span class="more-body">
+                                {%- for entry in row.entries[inline_status_changes:] %}
+                                {{ change_entry(entry, row.section_id) }}
+                                {%- endfor %}
+                                </span></details>
+                            {%- endif %}
+                            </td>
+                        </tr>
+                    {% endfor %}
+                    </tbody>
+                </table>
+                {% if changes.retired_checks %}
+                <p class="changes-foot">No longer checked: {{ changes.retired_checks|join(", ") }}.</p>
+                {% endif %}
+                <p class="changes-foot">New and resolved rows are counted per check on the category pages; rows the previous scan did not have are marked <span class="pill pill-new">New</span>. Briefings are not compared.</p>
+            </section>
+{% endif %}
             <section class="card gemini-card">
                 <div>
-                    <h2>Gemini</h2>
-                    <p>Summarize this report for leadership, or draft a fix for each failing finding.</p>
+                    <h2>AI analysis <span class="attribution">Powered by Gemini</span></h2>
+                    <p>Generate an executive summary, or draft fixes for failing findings.</p>
                 </div>
                 <div class="gemini-actions">
-                    <button id="summaryBtn" class="btn btn-primary" onclick="generateAiSummary()">Get AI summary</button>
-                    <button id="suggestionsBtn" class="btn btn-outline" onclick="getGeminiSuggestions(this)">Get remediation suggestions</button>
+                    <button id="summaryBtn" class="btn btn-primary" onclick="generateAiSummary()">Generate executive summary</button>
+                    <button id="suggestionsBtn" class="btn btn-outline" onclick="getGeminiSuggestions(this)">Draft fixes</button>
                 </div>
                 <div id="gemini-status" class="gemini-status" role="status" hidden></div>
             </section>

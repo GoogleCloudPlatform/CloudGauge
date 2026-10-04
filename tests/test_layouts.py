@@ -202,7 +202,9 @@ def test_a_check_that_knows_its_fix_shows_it_under_the_table_not_in_a_column():
     html = generate_html_report('organization', '123', 'job-42', **results)
     coverage = item(html, COVERAGE_CHECK)
     assert '<th>Project</th><th>Issue</th></tr>' in coverage and '<th>Fix</th>' not in html
-    assert ('<div class="fix-block"><strong>Fix</strong><pre>gcloud services enable servicehealth.googleapis.com --project=p-2\n'
+    assert ('<div class="fix-block"><div class="fix-head"><strong>Fix</strong>'
+            '<button type="button" class="btn btn-outline btn-sm copy-btn" onclick="copyFix(this)">Copy</button></div>'
+            '<pre>gcloud services enable servicehealth.googleapis.com --project=p-2\n'
             'gcloud services enable servicehealth.googleapis.com --project=p-3</pre></div>') in coverage
     assert coverage.index('class="fix-block"') < coverage.index("class='remediation-placeholder'")  # the placeholder stays for the script
     contacts = item(html, 'Essential Contacts')

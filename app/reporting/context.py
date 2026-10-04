@@ -43,11 +43,13 @@ groups by project (hundreds of groups would bury the findings) and instead:
   is not mistaken for a compliant one. Its summary line counts skipped checks.
 """
 import re
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, field, fields, replace
 from datetime import datetime, timezone
 
 from markupsafe import Markup
 
+from app.reporting.changes import (IDENTITY_SEPARATOR, ORG_POLICIES_CHECK, RowMatcher, compare, identities_for, summarize,
+                                   text_identities)
 from app.reporting.layouts import lay_out
 
 # The report's sections, in display order. The sidebar in report.html links to them.
@@ -115,6 +117,9 @@ class Details:
     display_headers: tuple = ()  # the table as shown: the raw columns, or a check's layout of them
     cells: tuple = ()  # rows of ``app.reporting.layouts.Cell``, one per row of ``rows``
     fix_lines: tuple = ()  # the distinct values of a ``Fix`` column, shown under the table instead of in it
+    roles: tuple = ()  # the layout role of each raw column (app.reporting.layouts.column_roles)
+    identities: tuple = ()  # the identity of every row, shown or not (app.reporting.changes), in row order
+    new_rows: tuple = ()  # one flag per row of ``cells``: not in the previous scan (empty without a previous scan)
 
 
 @dataclass(frozen=True)
@@ -128,6 +133,7 @@ class CheckItem:
     summary: str | None = None  # "12 findings across 3 projects"; None when it would only repeat the table
     slug: str = ""  # the item's anchor within its section ("open-firewall-rules"); #<section id>-<slug> opens it
     open: bool = True  # expanded when the page loads: what needs a human is, Compliant and Informational are not
+    change: object = None  # app.reporting.changes.CheckChange since the previous scan, or None
 
 
 @dataclass(frozen=True)
@@ -145,6 +151,7 @@ class OrgPolicyRow:
     current_value: str
     status: str
     status_class: str
+    new: bool = False  # differs from the recommended value now and did not in the previous scan
 
 
 @dataclass(frozen=True)
@@ -161,6 +168,7 @@ class OrgPolicySummary:
     total: int
     status_class: str
     icon: str
+    change: object = None  # app.reporting.changes.CheckChange since the previous scan, or None
 
     @property
     def open(self):
@@ -214,11 +222,13 @@ SCOPE_CHECKS_TEXT = {"success": "completed", "timed_out": "timed out", "failed":
 
 @dataclass(frozen=True)
 class Coverage:
-    """How much of the scope a sharded scan covered (shown above the overview cards).
+    """How much of the scope the scan covered: the header's Coverage line and, when incomplete, a note.
 
     Worded for the reader: projects and "organization-level checks", never
     shards, which are how the scan is run, not what the reader knows. The shard
-    counts of ``app.fanout.build_coverage`` stay in the logs.
+    counts of ``app.fanout.build_coverage`` stay in the logs. A scan that ran in
+    one task covered every project it listed (``complete_for``); a sharded scan
+    reports what its shards managed (``from_dict``).
     """
     total_projects: int
     projects_scanned: int
@@ -247,6 +257,30 @@ class Coverage:
             complete=complete,
         )
 
+    @classmethod
+    def complete_for(cls, total_projects, scope):
+        """The coverage of a scan that ran in one task: every one of its ``total_projects`` projects."""
+        return cls.from_dict({"total_projects": total_projects, "projects_scanned": total_projects, "projects_partial": 0,
+                              "projects_not_scanned": 0, "scope_checks": "success"}, scope)
+
+    @property
+    def header_text(self):
+        """The header's Coverage line: ``"996 of 1,000 projects · 2 partially scanned · 2 not scanned · organization-level checks timed out"``.
+
+        A complete scan of one project says ``"1 project"``; project scans have no scope-level checks to mention.
+        """
+        if self.total_projects == 1 and self.complete:
+            parts = ["1 project"]
+        else:
+            parts = [f"{self.projects_scanned:,} of {self.total_projects:,} project{'' if self.total_projects == 1 else 's'}"]
+        if self.projects_partial:
+            parts.append(f"{self.projects_partial:,} partially scanned")
+        if self.projects_not_scanned:
+            parts.append(f"{self.projects_not_scanned:,} not scanned")
+        if self.checks_label != "project-level checks":
+            parts.append(f"{self.checks_label} {self.scope_checks_text}")
+        return " · ".join(parts)
+
 
 @dataclass(frozen=True)
 class ReportContext:
@@ -259,13 +293,18 @@ class ReportContext:
     sections: tuple  # one Section per category, in REPORT_CATEGORY_ORDER (empty ones carry an empty_message)
     # A notice rendered above the overview (the synthetic load mode sets it). None: nothing is rendered.
     banner: str | None = None
-    # Sharded scans only: what the report covers. None: nothing is rendered.
+    # What the report covers (the header's Coverage line). None when the scan could not count its projects.
     coverage: Coverage | None = None
     # Projects in the scanned scope, when known (summary lines then say "312 of 1,000 projects").
     total_projects: int | None = None
     rows_per_page: int = ROWS_PER_PAGE
     max_rows_per_check: int = MAX_ROWS_PER_CHECK
     generated_at: str = ""  # when the report was rendered, "2026-10-03 20:11 UTC" (the sidebar's footer)
+    generated_ts: str = ""  # the same instant as "20261003T201100Z": the scan summary is filed under it
+    # Since the previous scan of this scope (app.reporting.changes.Changes). None: first scan, nothing is compared.
+    changes: object = None
+    # Check name → app.reporting.changes.RowMatcher, for the CSV's "New since last scan" column.
+    row_matchers: dict = field(default_factory=dict)
 
     def template_vars(self):
         """The top-level template variables (a shallow dict of the fields)."""
@@ -286,8 +325,9 @@ def slug_for(check_name):
 
 
 def generated_now():
-    """The current time as the report states it (UTC, to the minute)."""
-    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    """The current time as the report states it (UTC, to the minute) and as a file-name stamp: ``("2026-10-03 20:11 UTC", "20261003T201100Z")``."""
+    now = datetime.now(timezone.utc)
+    return now.strftime("%Y-%m-%d %H:%M UTC"), now.strftime("%Y%m%dT%H%M%SZ")
 
 
 def empty_category_message(category_name):
@@ -362,15 +402,17 @@ def build_details(details_list, max_rows=MAX_ROWS_PER_CHECK, check_name=None):
         project_count = len({row[project_column] for row in rows}) if project_column is not None else None
         shown = tuple(rows[:max_rows])
         display_headers, cells, fix_lines = lay_out(check_name, header_cells, shown, details_list[:max_rows])
+        roles, identities = identities_for(header_cells, rows)
         return Details(kind="table", headers=header_cells, rows=shown, total_rows=len(rows),
                        omitted_rows=max(0, len(rows) - max_rows), project_column=project_column, project_count=project_count,
-                       display_headers=display_headers, cells=cells, fix_lines=fix_lines)
+                       display_headers=display_headers, cells=cells, fix_lines=fix_lines, roles=roles, identities=identities)
     return _text_details(details_list, max_rows)
 
 
 def _text_details(details_list, max_rows):
     lines = tuple(str(d) for d in details_list)
-    return Details(kind="text", lines=lines[:max_rows], total_rows=len(lines), omitted_rows=max(0, len(lines) - max_rows))
+    return Details(kind="text", lines=lines[:max_rows], total_rows=len(lines), omitted_rows=max(0, len(lines) - max_rows),
+                   identities=text_identities(lines))
 
 
 def summarize_details(details, status, total_projects=None, check_name=None):
@@ -449,7 +491,7 @@ def build_org_policy_summary(org_policy_data):
     return OrgPolicySummary(tuple(categories), compliant_policy_count, total_policies, status_class, icon)
 
 
-def build_report_context(scope, scope_id, job_id, all_results, banner=None, coverage=None, total_projects=None):
+def build_report_context(scope, scope_id, job_id, all_results, banner=None, coverage=None, total_projects=None, previous=None):
     """
     Builds the data for the HTML report.
 
@@ -461,15 +503,26 @@ def build_report_context(scope, scope_id, job_id, all_results, banner=None, cove
             ``"Organization Policies"`` entry ``(best_practices, current_policies)``.
         banner (str, optional): A notice to show at the top of the report.
         coverage (dict, optional): A sharded scan's coverage (``app.fanout.build_coverage``).
+            A scan that ran in one task passes ``total_projects`` instead and is
+            complete by definition.
         total_projects (int, optional): Projects in the scope; the summary lines
             then give the share of projects a check found something in.
             Defaults to the coverage's total for sharded scans.
+        previous (dict, optional): The summary of the scope's previous scan
+            (``app.reporting.changes.summarize``); the report then shows what
+            changed since. ``None``: a first scan, nothing is compared.
 
     Returns:
         ReportContext: Everything the report templates display.
     """
     if total_projects is None and coverage:
         total_projects = coverage["total_projects"]
+    if coverage:
+        coverage_model = Coverage.from_dict(coverage, scope)
+    elif total_projects is not None:
+        coverage_model = Coverage.complete_for(total_projects, scope)
+    else:
+        coverage_model = None
 
     # --- CALCULATE SCORES AND DATA FOR ALL SECTIONS ---
     org_policy_summary = None
@@ -566,7 +619,8 @@ def build_report_context(scope, scope_id, job_id, all_results, banner=None, cove
         for category_name, score in category_scores.items()
     )
 
-    return ReportContext(
+    generated_at, generated_ts = generated_now()
+    context = ReportContext(
         scope=scope,
         scope_id=scope_id,
         job_id=job_id,
@@ -575,7 +629,48 @@ def build_report_context(scope, scope_id, job_id, all_results, banner=None, cove
         score_summary=score_summary,
         sections=tuple(sections),
         banner=banner,
-        coverage=Coverage.from_dict(coverage, scope) if coverage else None,
+        coverage=coverage_model,
         total_projects=total_projects,
-        generated_at=generated_now(),
+        generated_at=generated_at,
+        generated_ts=generated_ts,
     )
+    return with_changes(context, previous)
+
+
+def with_changes(context, previous):
+    """The context with what changed since ``previous`` (a scan summary) folded in; unchanged when there is none.
+
+    The comparison needs the finished sections (statuses, identities), so it is
+    a second pass: each compared check gets its ``CheckChange``, its rows their
+    *new* flags, and the CSV its row matchers.
+    """
+    if not previous:
+        return context
+    slugs = {check.check_name: check.slug for section in context.sections for check in section.checks}
+    slugs[ORG_POLICIES_CHECK] = "organization-policies"
+    section_ids = {section.title: section.section_id for section in context.sections}
+    changes = compare(previous, summarize(context), slugs, section_ids)
+    if changes is None:
+        return context
+    matchers = {}
+    sections = []
+    for section in context.sections:
+        checks = []
+        for check in section.checks:
+            change = changes.checks.get(check.check_name)
+            details = check.details
+            if change is not None and details is not None and change.new_identities:
+                shown = len(details.cells) if details.kind == "table" else len(details.lines)
+                details = replace(details, new_rows=tuple(identity in change.new_identities for identity in details.identities[:shown]))
+                if details.kind == "table":  # the CSV writes text details as one cell, so only tables get a matcher
+                    matchers[check.check_name] = RowMatcher(details.headers, details.roles, change.new_identities)
+            checks.append(replace(check, change=change, details=details))
+        org_policies = section.org_policies
+        if org_policies is not None and ORG_POLICIES_CHECK in changes.checks:
+            change = changes.checks[ORG_POLICIES_CHECK]
+            categories = tuple(replace(category, rows=tuple(
+                replace(row, new=f"{category.name}{IDENTITY_SEPARATOR}{row.display_name}" in change.new_identities) for row in category.rows))
+                for category in org_policies.categories)
+            org_policies = replace(org_policies, categories=categories, change=change)
+        sections.append(replace(section, checks=tuple(checks), org_policies=org_policies))
+    return replace(context, sections=tuple(sections), changes=changes, row_matchers=matchers)

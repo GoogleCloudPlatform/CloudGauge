@@ -23,6 +23,8 @@ from typing import Any, Callable, NamedTuple
 
 from app.checks.advisories import check_org_advisories, check_project_advisories
 from app.checks.cost import run_cost_recommendations
+from app.checks.gke_versions import CHECK_NAME as GKE_VERSIONS_CHECK
+from app.checks.gke_versions import check_gke_supported_versions
 from app.checks.network import run_network_insights
 from app.checks.operations import (
     check_audit_logging,
@@ -76,10 +78,11 @@ def build_check_plan(scope, scope_id, job_id, all_projects, active_zones, active
     four Security checks at the end of the common list. The runner calls each one as
     ``func(*args, sink=...)``.
 
-    After them come the checks added since (v14): Service Health Incidents, over the
-    projects of every scope, and Advisory Notifications, read once from the organization
-    in an organization scan and per project otherwise. Beta v1's organization-level
-    Personalized Service Health probe is retired: the per-project check covers it.
+    After them come the checks added since: Service Health Incidents (v14) and GKE
+    Supported Versions (v15), over the projects of every scope, and Advisory
+    Notifications (v14), read once from the organization in an organization scan and
+    per project otherwise. Beta v1's organization-level Personalized Service Health
+    probe is retired: the per-project check covers it.
 
     The two checks that query by location (Cost-Saving Recommendations, Network
     Insights) take one argument more than in beta v1: ``location_errors``, project ID
@@ -109,6 +112,7 @@ def build_check_plan(scope, scope_id, job_id, all_projects, active_zones, active
         CheckSpec("Security & Identity", "GCS Uniform Bucket-Level Access", check_storage_ubla, (scope_id, all_projects, job_id)),
         CheckSpec("Security & Identity", "VM External IPs", check_vm_external_ips, (scope_id, all_projects, job_id)),
         CheckSpec("Reliability & Resilience", SERVICE_HEALTH_CHECK, check_service_health_incidents, (scope_id, all_projects, job_id)),
+        CheckSpec("Reliability & Resilience", GKE_VERSIONS_CHECK, check_gke_supported_versions, (scope_id, all_projects, job_id)),
     ]
 
     if scope == 'organization':

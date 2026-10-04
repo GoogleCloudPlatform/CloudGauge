@@ -54,8 +54,8 @@ from googleapiclient.errors import HttpError
 
 from app.checks.cost import COST_RECOMMENDERS
 from app.checks.network import NETWORK_INSIGHT_TYPES
-from app.synthetic.world import (ADVISORY_TYPES, BEST_PRACTICES_CSV, HOST_PROJECT, INCIDENTS, ORG_ADVISORIES, PROJECT_ADVISORY,
-                                 QUOTA_METRICS, REGIONS, SyntheticOrg)
+from app.synthetic.world import (ADVISORY_TYPES, BEST_PRACTICES_CSV, GKE_CHANNEL_MINORS, GKE_MINORS, GKE_VERSIONS, HOST_PROJECT,
+                                 INCIDENTS, ORG_ADVISORIES, PROJECT_ADVISORY, QUOTA_METRICS, REGIONS, SyntheticOrg, gke_version)
 
 # Median latency of each API relative to ``latency_ms``.
 API_LATENCY_SCALE = {
@@ -430,11 +430,21 @@ class SyntheticGcp:
         profile, clusters = self.world.project(project_id), []
         for cluster in profile.gke_clusters:
             entry = {"name": cluster.name, "location": cluster.location,
-                     "nodePools": [{"name": name, "management": {"autoUpgrade": auto}} for name, auto in cluster.node_pools]}
+                     "currentMasterVersion": cluster.master_version, "currentNodeVersion": cluster.node_pools[0][2],
+                     "nodePools": [{"name": name, "version": version, "management": {"autoUpgrade": auto}}
+                                   for name, auto, version in cluster.node_pools]}
             if cluster.release_channel:
                 entry["releaseChannel"] = {"channel": "REGULAR"}
             clusters.append(entry)
         return {"clusters": clusters}
+
+    def _h_container_projects_locations_getServerConfig(self, kw, project_id):
+        """The versions GKE offers in a location (the same everywhere): the static lists and the REGULAR channel's."""
+        self.call("container", "projects.locations.getServerConfig", project_id=project_id, style="http")
+        channel_versions = [v for v in GKE_VERSIONS if v.rsplit(".", 2)[0] in GKE_CHANNEL_MINORS]
+        return {"defaultClusterVersion": gke_version(GKE_MINORS[1]),
+                "validMasterVersions": list(GKE_VERSIONS), "validNodeVersions": list(GKE_VERSIONS),
+                "channels": [{"channel": "REGULAR", "defaultVersion": gke_version(GKE_MINORS[1]), "validVersions": channel_versions}]}
 
     def _h_recommender_projects_locations_recommenders_recommendations_list(self, kw, project_id):
         parent = kw["parent"]

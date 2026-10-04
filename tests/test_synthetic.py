@@ -234,7 +234,9 @@ def test_organization_scan_covers_every_section_and_org_check(gcp):
                   'VM Rightsizing', 'VPC IP Address Utilization', 'Quota Utilization (&gt;80%)', 'OS Config Agent Coverage',
                   # v14: the briefings and the scored checks behind them
                   'Service Health Incidents', 'Personalized Service Health API Coverage',
-                  'Advisory Notifications', 'Advisory Notifications Settings'):
+                  'Advisory Notifications', 'Advisory Notifications Settings',
+                  # v15
+                  'GKE Supported Versions'):
         assert check in html, check
     assert 'Action Required' in html and 'Compliant' in html and 'Informational' in html
 
@@ -337,7 +339,7 @@ def test_offline_harness_runs_a_sharded_scan(gcp, tmp_path, capsys):
     assert code == 0
     out = capsys.readouterr().out
     assert 'RESULT: ok (status=completed)' in out and 'Sharded: 4 shards of 3, 2 at a time' in out
-    assert 'coverage: 7 of 7 projects scanned (100%); organization-level checks completed.' in out
+    assert 'coverage: 7 of 7 projects · organization-level checks completed' in out
     result = json.loads(json_path.read_text())
     sharding = result['sharding']
     assert (sharding['shards'], sharding['shard_attempts'], sharding['shard_retries'], sharding['failed_shards']) == (4, 4, 0, 0)

@@ -274,8 +274,8 @@ function applyRowFilter() {
     }
 }
 
-// --- Gemini (the two actions on the Overview card, see report.html) ---
-// "Get AI summary" writes the executive summary into the card under the actions. "Get remediation suggestions" asks
+// --- AI analysis (the two actions on the Overview card, see report.html) ---
+// "Generate executive summary" writes the executive summary into the card under the actions. "Draft fixes" asks
 // Gemini for a gcloud command for every failing finding that does not already show a Fix and writes each one into
 // the finding's remediation placeholder on its category page; the status line under the actions says what happened,
 // because the fixes land on pages other than the one the button is on. Gemini's text is escaped before it is marked
@@ -321,15 +321,26 @@ async function generateAiSummary() {
     }
 }
 
-async function copySummary(btn) {
-    const content = document.getElementById("ai-summary-content").querySelector('.prose-block');
+// Copies `text` and says so on the button for two seconds. The executive summary's Copy and every fix block's Copy
+// (fix_block in _macros.html, suggestedFixHtml below) share it, so the two controls behave the same.
+async function copyText(btn, text) {
     try {
-        await navigator.clipboard.writeText((content || {}).innerText || '');
+        await navigator.clipboard.writeText(text || '');
         btn.textContent = "Copied";
     } catch (error) {
         btn.textContent = "Couldn't copy";
     }
     setTimeout(() => { btn.textContent = "Copy"; }, 2000);
+}
+
+function copySummary(btn) {
+    const content = document.getElementById("ai-summary-content").querySelector('.prose-block');
+    return copyText(btn, (content || {}).innerText || '');
+}
+
+function copyFix(btn) {
+    const pre = btn.closest('.fix-block').querySelector('pre');
+    return copyText(btn, pre ? pre.textContent : '');
 }
 
 // --- Cost insights (the Cost Optimization footer's "Get detailed insights", see _macros.html) ---
@@ -461,8 +472,10 @@ function fixesSummary(declined) {
     return text;
 }
 
+// The title row of an AI-drafted fix: the same markup as fix_block in _macros.html, with the AI-generated pill.
 function suggestedFixHtml() {
-    return '<strong>Suggested fix</strong> <span class="pill pill-sky">AI-generated</span>';
+    return '<div class="fix-head"><strong>Suggested fix</strong> <span class="pill pill-sky">AI-generated</span>'
+        + '<button type="button" class="btn btn-outline btn-sm copy-btn" onclick="copyFix(this)">Copy</button></div>';
 }
 
 async function getGeminiSuggestions(btn) {

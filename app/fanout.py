@@ -59,8 +59,7 @@ from app.checks.categories import categorize_findings, merge_shard_findings
 from app.checks.registry import project_check_plan, scope_check_plan, shard_check_names
 from app.checks.runner import error_finding, record_error, run_check_plan
 from app.config import JOB_TIME_LIMIT_FACTOR, MIN_JOB_TIME_LIMIT_SECONDS
-from app.reporting.csv_report import generate_csv_data
-from app.reporting.html_report import generate_html_report
+from app.reporting.html_report import generate_reports
 from app.services.resource_manager import get_active_compute_locations
 from app.services.results_store import ShardSink
 
@@ -435,9 +434,12 @@ class FanOut:
 
             self.store.update_status(job_id, scope_id, 98, "Generating final HTML and CSV reports...", **fields)
             coverage = build_coverage(manifest, markers)
-            html_report = generate_html_report(scope, scope_id, job_id, banner=self.banner, coverage=coverage, **all_results)
-            csv_report = generate_csv_data(all_results)
+            previous = None if self.banner else self.store.read_previous_summary(scope, scope_id, job_id)
+            html_report, csv_report, summary = generate_reports(scope, scope_id, job_id, all_results, banner=self.banner,
+                                                                coverage=coverage, previous=previous)
             self.store.upload_reports(job_id, scope_id, html_report, csv_report)
+            if not self.banner:
+                self.store.write_scan_summary(summary)
             self.store.update_status(job_id, scope_id, 100, "Scan complete!", status="completed",
                                      **self._status_fields(manifest, markers, phase="completed"))
             self.store.cleanup_intermediate(job_id)
