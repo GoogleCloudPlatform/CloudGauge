@@ -40,7 +40,7 @@ from app.checks.categories import CATEGORY_ORDER
 from app.checks.registry import CheckSpec
 from app.extensions import EXTENSION_KEY
 from app.utils import ThrottledProgressReporter
-from helpers import assert_same_response, csv_sections, report_facts
+from helpers import assert_same_csv_tables, assert_same_response, csv_sections, report_facts
 
 SCOPE, SCOPE_ID, JOB_ID = 'organization', '123456789', 'job-42'
 PAYLOAD = {'scope': SCOPE, 'scope_id': SCOPE_ID, 'job_id': JOB_ID}
@@ -157,7 +157,7 @@ def test_scan_job_matches_legacy(legacy_client, client, gcp, scripted_scan):
     assert 'none — first scan of this organization' in html  # the bucket was empty: nothing to compare with
     (csv_text, csv_type), (legacy_csv, legacy_csv_type) = run.objects[REPORT_CSV], legacy_run.objects[REPORT_CSV]
     assert csv_type == legacy_csv_type == 'text/csv'
-    assert csv_sections(csv_text) == csv_sections(legacy_csv)
+    assert_same_csv_tables(csv_text, legacy_csv)  # same tables; ours in page order, the legacy writer's in arrival order (v15.1)
     assert list(csv_sections(csv_text)) == ['Organization Policies', *CATEGORY_ORDER]  # new: always this order
     assert csv_sections(csv_text)['Organization Policies'] == [['Category', 'Policy', 'Expected Value', 'Current Value', 'Status'],
                                                                *samples.ORG_POLICY_CSV_ROWS]

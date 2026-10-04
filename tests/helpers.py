@@ -250,3 +250,39 @@ def csv_sections(text):
         else:
             sections[current].append(row)
     return sections
+
+
+def csv_tables(section_rows):
+    """Splits one category section of the CSV into its tables.
+
+    A table is a ``Check, Status, ...`` header row and the rows under it; the
+    spacer rows between tables are dropped. Lets a test compare two CSVs table
+    by table regardless of the order the tables come in (since v15.1 the writer
+    lists them as the page does, the legacy writer kept arrival order).
+    """
+    tables, current = [], None
+    for row in section_rows:
+        if not row:
+            current = None
+        elif row[0] == 'Check':
+            current = [row]
+            tables.append(current)
+        elif current is not None:
+            current.append(row)
+        else:
+            tables.append([row])  # a row outside any table: kept, so nothing is silently dropped
+    return tables
+
+
+def assert_same_csv_tables(csv_text, legacy_csv_text):
+    """The two CSV reports have the same sections (in any order: the legacy worker
+    built its categories from a set), the same Organization Policies rows, and
+    in each category the same tables with the same rows — in any table order
+    (see ``csv_tables``)."""
+    ours, theirs = csv_sections(csv_text), csv_sections(legacy_csv_text)
+    assert set(ours) == set(theirs)
+    for title in ours:
+        if title == 'Organization Policies':
+            assert ours[title] == theirs[title]
+        else:
+            assert sorted(csv_tables(ours[title])) == sorted(csv_tables(theirs[title])), title

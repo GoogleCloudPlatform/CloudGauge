@@ -18,13 +18,36 @@ shared ``evaluate_org_policies`` instead of a second copy of that logic, and
 that a report compared with a previous scan adds a trailing ``New since last
 scan`` column (``yes`` or empty) to every structured row, so an action plan
 can be filtered on it in a spreadsheet. The existing columns do not move.
+
+Since v15.1 a category's tables come in the order the report page lists its
+checks (``in_page_order``) rather than in the order the check results arrived,
+so two scans of an unchanged estate produce identical files.
 """
 import csv
 import io
 
-from app.reporting.context import evaluate_org_policies
+from app.reporting.context import display_rank, evaluate_org_policies, group_findings
 
 NEW_COLUMN = "New since last scan"
+
+
+def in_page_order(results):
+    """One category's finding records in the order the report page lists its checks.
+
+    By the check's most severe status — Action Required, Investigation
+    Recommended, Error, Informational, Compliant — then by check name, the
+    same key as ``app.reporting.context`` uses for the page. A check with
+    several records (its findings and a *Projects not checked* record, say)
+    keeps them together, in the order they were produced. Which shard finished
+    first no longer shows in the file.
+    """
+    status_of_check = {name: group["Status"] for name, group in group_findings(results).items()}
+
+    def key(record):
+        name = record.get('Check')
+        return (display_rank(status_of_check.get(name, record.get('Status'))), str(name or ''))
+
+    return sorted(results, key=key)
 
 
 def generate_csv_data(all_results, row_matchers=None):
@@ -63,7 +86,7 @@ def generate_csv_data(all_results, row_matchers=None):
         writer.writerow([title])
         trackers = {}  # a check's rows may span several records; one tracker numbers them in order
 
-        for finding_group in results:
+        for finding_group in in_page_order(results):
             check_name = finding_group.get('Check', 'Unnamed Check')
             status = finding_group.get('Status', 'N/A')
             details = finding_group.get('Finding')

@@ -34,7 +34,7 @@ import samples
 from app.reporting.context import MAX_ROWS_PER_CHECK, ROWS_PER_PAGE
 from app.reporting.csv_report import generate_csv_data
 from app.reporting.html_report import generate_html_report, report_environment
-from helpers import csv_sections, report_facts
+from helpers import assert_same_csv_tables, csv_sections, csv_tables, report_facts
 
 SECURITY, COST, RELIABILITY, OPERATIONS = ('Security & Identity', 'Cost Optimization', 'Reliability & Resilience',
                                            'Operational Excellence & Observability')
@@ -111,8 +111,11 @@ def test_html_report_matches_legacy_for_each_scope(scope, scope_id, legacy_repor
 
 @pytest.mark.parametrize('name', [name for name in SCENARIOS if name != 'mixed detail types'])
 def test_csv_report_matches_legacy(name, legacy_reports):
+    """Same sections, same tables, same rows as the legacy CSV. The tables of a
+    category may come in a different order: since v15.1 they are listed as the
+    page lists its checks, where the legacy writer kept arrival order."""
     results = SCENARIOS[name]
-    assert generate_csv_data(results) == legacy_reports.generate_csv_data(results)
+    assert_same_csv_tables(generate_csv_data(results), legacy_reports.generate_csv_data(results))
 
 
 def test_csv_report_raises_like_legacy_on_mixed_detail_types(legacy_reports):
@@ -137,6 +140,54 @@ def test_csv_report_rows():
         [],
         ['Check', 'Status', 'Details'],
         ['VM Rightsizing', 'Compliant', ''],
+    ]
+
+
+def csv_check_order(section_rows):
+    """The check names of a CSV section, in file order, one per table."""
+    return [table[1][0] for table in csv_tables(section_rows)]
+
+
+def test_csv_tables_come_in_the_page_order_whatever_the_arrival_order():
+    """A category's tables are listed as the page lists its checks — by severity,
+    then by name — not in the order the results arrived, so two scans of an
+    unchanged estate give identical files even when the shards finish in a
+    different order (v15.1)."""
+    results = SCENARIOS['score boundaries']  # arrival order: Compliant first, then the failing ones
+    csv_data = generate_csv_data(results)
+    sections = csv_sections(csv_data)
+    assert csv_check_order(sections[OPERATIONS]) == (
+        [f'Operations Action Required {i}' for i in range(2)]
+        + [f'Operations Informational {i}' for i in range(4)]
+        + [f'Operations Compliant {i}' for i in range(5)])
+    assert csv_check_order(sections[RELIABILITY]) == (
+        [f'Reliability Error {i}' for i in range(3)] + [f'Reliability Compliant {i}' for i in range(7)])
+    # The same order as the page, for every category.
+    html = generate_html_report('organization', '123456789', 'job-42', **results)
+    page_order = [unescape(name) for name in re.findall(r'<span class="check-title"><strong>(.*?)</strong>', html)]
+    for category, prefix in ((SECURITY, 'Security'), (COST, 'Cost'), (RELIABILITY, 'Reliability'), (OPERATIONS, 'Operations')):
+        assert csv_check_order(sections[category]) == [name for name in page_order if name.startswith(prefix)]
+    # Reversed arrival order, identical file.
+    reversed_results = {category: list(reversed(records)) for category, records in results.items()}
+    assert generate_csv_data(reversed_results) == csv_data
+
+
+def test_csv_keeps_the_records_of_one_check_together_in_their_own_order():
+    """A check with several records — its findings and a *Projects not checked*
+    record, say — is one block in the file, placed by its most severe status,
+    its records in the order they were produced."""
+    results = {RELIABILITY: [
+        {'Check': 'Essential Contacts', 'Status': 'Compliant', 'Finding': 'All projects have contacts.'},
+        {'Check': 'GKE Hygiene', 'Status': 'Error', 'Finding': [{'Project': 'web-prod', 'Reason': 'permission denied'}]},
+        {'Check': 'Cloud SQL PITR', 'Status': 'Investigation Recommended', 'Finding': [{'Instance': 'db-1'}]},
+        {'Check': 'GKE Hygiene', 'Status': 'Action Required', 'Finding': [{'Cluster': 'prod', 'Issue': 'no release channel'}]},
+    ]}
+    tables = csv_tables(csv_sections(generate_csv_data(results))[RELIABILITY])
+    assert [(table[1][0], table[1][1]) for table in tables] == [
+        ('GKE Hygiene', 'Error'),  # the check ranks as Action Required (its worst status) ...
+        ('GKE Hygiene', 'Action Required'),  # ... and its records keep their own order
+        ('Cloud SQL PITR', 'Investigation Recommended'),
+        ('Essential Contacts', 'Compliant'),
     ]
 
 

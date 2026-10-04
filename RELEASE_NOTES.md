@@ -12,6 +12,26 @@ Versions are the image tags (`v5` … `v15`); the commit is the one that shipped
 
 ---
 
+## v15.1 — Scorecard page *(in progress)*
+
+### Fixed: the CSV lists a category's tables as the page does
+
+- The CSV wrote each category's check tables in the order the results
+  **arrived** — which, under the sharded scan, is whichever shard finished
+  first. Two scans of an unchanged estate could therefore differ in the file
+  (the v15 production scan placed *Advisory Notifications Settings* after
+  *Advisory Notifications*; the canary scan had placed it before) although
+  the page, which sorts, was identical. The tables now come in the page's order:
+  by the check's most severe status (Action Required, Investigation
+  Recommended, Error, Informational, Compliant), then by name; a check with
+  several records keeps them together and in order. Columns, rows and the
+  `New since last scan` column are unchanged, and *Changes since last scan* was
+  never affected (it matches rows by identity, not position).
+- Tests: the same results fed in two arrival orders produce byte-identical
+  CSV, and each category's table order equals the page's; the legacy parity
+  tests for the CSV compare tables as a set rather than byte for byte, since
+  the legacy writer kept arrival order.
+
 ## v15 — Changes since last scan, and GKE Supported Versions
 
 The first release of the QTR-brief line: a scan of a scope now knows about the
