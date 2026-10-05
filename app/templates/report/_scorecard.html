@@ -54,7 +54,7 @@
         {% if scorecard.since %}
         {% set since = scorecard.since %}
         <p class="since-line">Since the previous scan (<a href="/report/{{ since.previous_job_id|pathsegment }}/{{ scope_id|pathsegment }}"><time>{{ since.previous_at }}</time></a>):
-        <span class="mono">{{ "{:,}".format(since.new) }}</span> new rows · <span class="mono">{{ "{:,}".format(since.resolved) }}</span> resolved
+        <span class="mono">{{ "{:,}".format(since.new) }}</span> new findings · <span class="mono">{{ "{:,}".format(since.resolved) }}</span> resolved
         {%- if since.projects_then and since.projects_then != since.projects_now %} · {{ "{:,}".format(since.projects_then) }} → {{ "{:,}".format(since.projects_now) }} projects{% endif %}
         {%- if since.headline %} · status changes: {{ since.headline|join('; ') }}{% if since.more_status_changes %} and <a href="#changes" onclick="showSection('overview')">{{ since.more_status_changes }} more</a>{% endif %}{% else %} · no status changes{% endif %}.</p>
         {% else %}
@@ -63,10 +63,10 @@
     </section>
 
     <section class="card" aria-label="Top actions">
-        <div class="card-title-row"><h2>Top actions</h2><span class="card-meta">by status, then projects affected, then rows</span></div>
+        <div class="card-title-row"><h2>Top actions</h2><span class="card-meta">ranked by status, then projects affected, then findings</span></div>
         {% if scorecard.actions %}
         <table class="data-table actions-table">
-            <thead><tr><th class="num">#</th><th>Check</th><th>Category</th><th>Status</th><th class="num">Projects</th><th class="num">Rows</th>{% if scorecard.since %}<th>Since last scan</th>{% endif %}</tr></thead>
+            <thead><tr><th class="num">#</th><th>Check</th><th>Category</th><th>Status</th><th class="num">Projects</th><th class="num">Findings</th>{% if scorecard.since %}<th>Since last scan</th>{% endif %}</tr></thead>
             <tbody>
             {% for action in scorecard.actions %}
                 <tr>
@@ -75,7 +75,7 @@
                     <td class="muted category-cell">{{ action.category }}</td>
                     <td><span class="pill pill-{{ action.status_class }}">{{ action.status }}</span></td>
                     <td class="num">{{ "{:,}".format(action.projects) if action.projects is not none else "—" }}</td>
-                    <td class="num">{{ "{:,}".format(action.rows) }}</td>
+                    <td class="num">{{ "{:,}".format(action.findings) }}</td>
                     {% if scorecard.since %}<td class="since-cell">{{ action.since or "—" }}</td>{% endif %}
                 </tr>
             {% endfor %}

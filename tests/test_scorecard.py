@@ -132,7 +132,7 @@ def test_deltas_come_from_the_comparison_and_are_absent_on_a_first_scan():
 
 # --- Top actions ---
 
-def test_actions_rank_by_status_then_projects_then_rows_then_name():
+def test_actions_rank_by_status_then_projects_then_findings_then_name():
     results = {
         SECURITY: [check('Beta', 'Action Required', rows(2)), check('Alpha', 'Action Required', rows(2)),
                    check('Wide', 'Action Required', rows(5)), check('Deep', 'Action Required', rows(9, project='p0')),
@@ -140,7 +140,7 @@ def test_actions_rank_by_status_then_projects_then_rows_then_name():
                    check('Broken', 'Error', 'boom'), check('FYI', 'Informational', 'note')],
     }
     actions = card(results).actions
-    assert [(a.rank, a.check_name, a.projects, a.rows) for a in actions] == [
+    assert [(a.rank, a.check_name, a.projects, a.findings) for a in actions] == [
         (1, 'Wide', 5, 5), (2, 'Alpha', 2, 2), (3, 'Beta', 2, 2), (4, 'Deep', 1, 9), (5, 'Later', 50, 50)]
     assert {a.status for a in actions} == {'Action Required', 'Investigation Recommended'}  # errors and FYIs are not actions
     assert all(a.category == 'Security' and a.section_id == 'security-identity' for a in actions)  # the stoplight's name, not the category's
@@ -151,7 +151,7 @@ def test_text_findings_rank_by_their_lines_with_no_project_count():
     results = {OPERATIONS: [check('Logs', 'Action Required', 'Project `a` has no sink.'), check('Logs', 'Action Required', 'Project `b` has no sink.'),
                             check('Table', 'Action Required', rows(1))]}
     actions = card(results).actions
-    assert [(a.check_name, a.projects, a.rows) for a in actions] == [('Table', 1, 1), ('Logs', None, 2)]  # one line per record
+    assert [(a.check_name, a.projects, a.findings) for a in actions] == [('Table', 1, 1), ('Logs', None, 2)]  # one line per record
 
 
 def test_ten_actions_and_a_count_of_the_rest():
@@ -263,7 +263,8 @@ def test_the_table_links_each_action_to_its_check_and_marks_a_shipped_fix_quietl
     assert '>Essential Contacts</a> <span class="fix-tag">fix in report</span></td>' in page
     assert page.count('<span class="fix-tag">') == 1 and 'AI-drafted' not in page
     assert '<th>Since last scan</th>' not in page  # first scan: no column of dashes
-    assert re.findall(r'<th[^>]*>([^<]+)</th>', page) == ['#', 'Check', 'Category', 'Status', 'Projects', 'Rows']
+    assert re.findall(r'<th[^>]*>([^<]+)</th>', page) == ['#', 'Check', 'Category', 'Status', 'Projects', 'Findings']
+    assert '<span class="card-meta">ranked by status, then projects affected, then findings</span>' in page  # the rule, in the words of the columns
 
 
 def test_a_second_scan_adds_the_since_column_and_the_since_line():
@@ -274,7 +275,7 @@ def test_a_second_scan_adds_the_since_column_and_the_since_line():
     page = section(html)
     assert '<th>Since last scan</th>' in page
     assert re.search(r'Since the previous scan \(<a href="/report/job-1/123456789"><time>[^<]+</time></a>\):\s*'
-                     r'<span class="mono">0</span> new rows · <span class="mono">2</span> resolved'
+                     r'<span class="mono">0</span> new findings · <span class="mono">2</span> resolved'
                      r' · status changes: Project IAM Hygiene Action Required → Compliant\.</p>', page)
     assert 'and <a href="#changes" onclick="showSection(\'overview\')">' not in page  # one change: nothing more to link
 
@@ -346,7 +347,7 @@ def test_the_action_plan_lists_the_actions_then_the_policies_with_owner_and_date
         'Organization Policies': (samples.BEST_PRACTICES, samples.CURRENT_POLICIES)}
     scorecard = card(results)
     table = list(csv.reader(io.StringIO(action_plan_csv(scorecard))))
-    assert table[0] == list(ACTION_PLAN_COLUMNS) == ['Priority', 'Check', 'Category', 'Status', 'Projects affected', 'Resources', 'Fix in report', 'Owner', 'Target date']
+    assert table[0] == list(ACTION_PLAN_COLUMNS) == ['Priority', 'Check', 'Category', 'Status', 'Projects affected', 'Findings', 'Fix in report', 'Owner', 'Target date']
     assert table[1:] == [
         ['1', 'Keys', 'Security', 'Action Required', '3', '3', '', '', ''],
         ['2', 'Essential Contacts', 'Stability', 'Action Required', '1', '1', FIX_IN_REPORT, '', ''],
@@ -368,14 +369,14 @@ def test_the_markdown_copy_carries_the_page():
     assert lines[2] == f'Generated {scorecard.generated_at} · compared with {scorecard.since.previous_at} · 4 of 4 projects'
     assert lines[4] == '| Stoplight | Category | Score | Since last scan | State | Evidence |'
     assert '| Security | Security & Identity | 43% | +14 | At risk | 3 of 7 checks compliant |' in lines
-    assert 'Since the previous scan' in text and 'status changes: Project IAM Hygiene Action Required → Compliant.' in text
-    assert '| # | Check | Category | Status | Projects | Rows | Fix in report | Since last scan |' in lines
+    assert 'Since the previous scan' in text and '0 new findings · 2 resolved · status changes: Project IAM Hygiene Action Required → Compliant.' in text
+    assert '| # | Check | Category | Status | Projects | Findings | Fix in report | Since last scan |' in lines
     assert '| 1 | Quota Utilization (>80%) | Operations | Action Required | 1 | 1 | — | — |' in lines
     assert 'Organization Policies: 3 of 4 organization policies differ from the recommendation.' in lines
     assert 'Could not check: Open Firewall Rules.' in lines
     first_scan = markdown(card(second)).splitlines()
     assert '| Stoplight | Category | Score | State | Evidence |' in first_scan  # no delta column before there is a previous scan
-    assert '| # | Check | Category | Status | Projects | Rows | Fix in report |' in first_scan
+    assert '| # | Check | Category | Status | Projects | Findings | Fix in report |' in first_scan
     assert 'First scan of this organization — changes appear from the next scan.' in first_scan
 
 

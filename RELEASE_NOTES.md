@@ -37,22 +37,26 @@ deltas.
   out of the scored ones, projects with findings and, for Stability, the Service
   Health briefing's tally ("1 incident impacted you in 90 days, 0 active").
   Velocity & Innovation has no checks yet, so it has no stoplight.
-- **The since line.** Under the stoplights, one sentence: new and resolved rows
-  since the previous scan (linked), the scope's size when it changed, the first
-  three status changes — regressions first — and "N more" linking to the
-  Overview's Changes card. A first scan says so: "First scan of this
+- **The since line.** Under the stoplights, one sentence: new and resolved
+  findings since the previous scan (linked), the scope's size when it changed,
+  the first three status changes — regressions first — and "N more" linking to
+  the Overview's Changes card. A first scan says so: "First scan of this
   organization — changes appear from the next scan".
 - **Top actions.** The ten failing checks (Action Required, then Investigation
-  Recommended), ranked by status, then projects affected, then rows, then name;
-  each links to its finding and shows category, status, projects, rows and,
-  after a previous scan, what changed ("+3 new · was Compliant"). A check that
-  ships its own command (Essential Contacts, Personalized Service Health API
-  Coverage, Advisory Notifications Settings, GKE Supported Versions) carries a
-  quiet *fix in report* tag; the others get theirs from **Draft fixes**.
-  Footers: the Organization Policies tally ("4 of 30 organization policies
-  differ from the recommendation", linked), the checks that could not run and
-  how many more failing checks the category pages hold. A scan with nothing
-  failing says "No failing checks — nothing to take away from this scan."
+  Recommended), ranked by status, then projects affected, then findings, then
+  name — the card's note says so in those words, and the table shows all three
+  keys, so the order is never a mystery; each links to its finding and shows,
+  after a previous scan, what changed ("+3 new · was Compliant"). *Findings* is
+  the count the category pages already use ("1,204 findings across 312 of
+  1,000 projects"); the page, the Markdown copy and the action-plan CSV all
+  call it that. A check that ships its own command (Essential Contacts,
+  Personalized Service Health API Coverage, Advisory Notifications Settings,
+  GKE Supported Versions) carries a quiet *fix in report* tag; the others get
+  theirs from **Draft fixes**. Footers: the Organization Policies tally ("4 of
+  30 organization policies differ from the recommendation", linked), the checks
+  that could not run and how many more failing checks the category pages hold.
+  A scan with nothing failing says "No failing checks — nothing to take away
+  from this scan."
 - **The executive summary lives here.** Gemini's executive summary is generated
   and read on the Scorecard, in an **Executive summary · Powered by Gemini**
   card that says what it will do until it is generated ("Not generated yet.
@@ -63,7 +67,7 @@ deltas.
 - **Three exports, one model.** **Print** prints the Scorecard alone, on one A4
   page (the report header above it included; the buttons and an empty summary
   card hidden). **Download action plan (CSV)** writes the ranked actions —
-  `Priority, Check, Category, Status, Projects affected, Resources, Fix in
+  `Priority, Check, Category, Status, Projects affected, Findings, Fix in
   report, Owner, Target date`, the last two blank for the owner to fill in — as
   `cloudgauge-action-plan-<scope id>-<date>.csv`. **Copy as Markdown** puts the
   stoplights, the since line and the actions on the clipboard as Markdown

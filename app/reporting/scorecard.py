@@ -54,7 +54,7 @@ INLINE_STATUS_CHANGES = 3
 # The Stability line adds this check's tally: incidents that affected the scope in the last 90 days.
 INCIDENTS_CHECK = "Service Health Incidents"
 # The action-plan CSV: the ranked actions, then two blank columns for the owner to fill in.
-ACTION_PLAN_COLUMNS = ("Priority", "Check", "Category", "Status", "Projects affected", "Resources", "Fix in report", "Owner", "Target date")
+ACTION_PLAN_COLUMNS = ("Priority", "Check", "Category", "Status", "Projects affected", "Findings", "Fix in report", "Owner", "Target date")
 FIX_IN_REPORT = "yes"
 
 
@@ -74,7 +74,7 @@ class Stoplight:
 
 @dataclass(frozen=True)
 class Action:
-    """One of the Top actions: a failing check, ranked by status, then projects affected, then rows."""
+    """One of the Top actions: a failing check, ranked by status, then projects affected, then findings."""
     rank: int
     check_name: str
     section_id: str
@@ -83,7 +83,7 @@ class Action:
     status: str
     status_class: str
     projects: int | None  # distinct projects in the check's rows; None when its table has no project column
-    rows: int
+    findings: int  # the check's rows (one per finding), or its lines for text details
     fix_in_report: bool  # the check ships its command (the Fix block under its table); the others are drafted on request
     since: str  # "+1 new · −21 resolved · was Compliant", "not compared (new check)"; "" when nothing moved or on a first scan
 
@@ -192,9 +192,9 @@ def build_stoplights(context):
     return tuple(stoplights)
 
 
-def rank_key(item, projects, rows):
-    # Action Required before Investigation Recommended, then the most projects, then the most rows, then the name.
-    return (display_rank(item.status), -(projects or 0), -rows, item.check_name)
+def rank_key(item, projects, findings):
+    # Action Required before Investigation Recommended, then the most projects, then the most findings, then the name.
+    return (display_rank(item.status), -(projects or 0), -findings, item.check_name)
 
 
 def build_actions(context):
@@ -206,15 +206,15 @@ def build_actions(context):
                 continue
             details = item.details
             projects = details.project_count if details is not None else None
-            rows = 0 if details is None else (details.total_rows if details.kind == "table" else len(details.lines))
-            candidates.append((rank_key(item, projects, rows), section, item, projects, rows))
+            findings = 0 if details is None else (details.total_rows if details.kind == "table" else len(details.lines))
+            candidates.append((rank_key(item, projects, findings), section, item, projects, findings))
     candidates.sort(key=lambda candidate: candidate[0])
     actions = tuple(
         Action(rank=rank, check_name=item.check_name, section_id=section.section_id, slug=item.slug,
                category=STOPLIGHT_OF[section.title], status=item.status, status_class=item.status_class,
-               projects=projects, rows=rows, fix_in_report=bool(item.details is not None and item.details.fix_lines),
+               projects=projects, findings=findings, fix_in_report=bool(item.details is not None and item.details.fix_lines),
                since=since_text(item.change))
-        for rank, (_, section, item, projects, rows) in enumerate(candidates[:TOP_ACTIONS], start=1))
+        for rank, (_, section, item, projects, findings) in enumerate(candidates[:TOP_ACTIONS], start=1))
     return actions, max(0, len(candidates) - TOP_ACTIONS)
 
 
@@ -268,7 +268,7 @@ def action_plan_csv(card):
     writer.writerow(ACTION_PLAN_COLUMNS)
     for action in card.actions:
         writer.writerow([action.rank, action.check_name, action.category, action.status,
-                         "" if action.projects is None else action.projects, action.rows,
+                         "" if action.projects is None else action.projects, action.findings,
                          FIX_IN_REPORT if action.fix_in_report else "", "", ""])
     if card.org_line:
         differ = card.org_line.split(" of ")[0]
@@ -296,18 +296,18 @@ def markdown(card):
         lines.append("| " + " | ".join(cells) + " |")
     lines.append("")
     if since:
-        line = f"Since the previous scan ({since.previous_at}): {since.new:,} new rows · {since.resolved:,} resolved"
+        line = f"Since the previous scan ({since.previous_at}): {since.new:,} new findings · {since.resolved:,} resolved"
         if since.projects_then and since.projects_then != since.projects_now:
             line += f" · {since.projects_then:,} → {since.projects_now:,} projects"
         line += (" · status changes: " + "; ".join(since.status_changes)) if since.status_changes else " · no status changes"
         lines.append(line + ".")
     else:
         lines.append(f"First scan of this {card.scope_title.lower()} — changes appear from the next scan.")
-    columns = ["#", "Check", "Category", "Status", "Projects", "Rows", "Fix in report"] + (["Since last scan"] if since else [])
+    columns = ["#", "Check", "Category", "Status", "Projects", "Findings", "Fix in report"] + (["Since last scan"] if since else [])
     lines += ["", "## Top actions", "", "| " + " | ".join(columns) + " |", "|---:|---|---|---|---:|---:|---|" + ("---|" if since else "")]
     for action in card.actions:
         cells = [str(action.rank), action.check_name, action.category, action.status,
-                 "—" if action.projects is None else f"{action.projects:,}", f"{action.rows:,}",
+                 "—" if action.projects is None else f"{action.projects:,}", f"{action.findings:,}",
                  FIX_IN_REPORT if action.fix_in_report else "—"] + ([action.since or "—"] if since else [])
         lines.append("| " + " | ".join(cells) + " |")
     if card.org_line:
