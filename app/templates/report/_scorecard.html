@@ -1,0 +1,98 @@
+{#
+  Copyright 2025 Google LLC
+
+  Licensed under the Apache License, Version 2.0 (the "License");
+  you may not use this file except in compliance with the License.
+  You may obtain a copy of the License at
+
+      https://www.apache.org/licenses/LICENSE-2.0
+
+  Unless required by applicable law or agreed to in writing, software
+  distributed under the License is distributed on an "AS IS" BASIS,
+  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+  See the License for the specific language governing permissions and
+  limitations under the License.
+#}
+{#
+  The Scorecard (v15.1): the review page, one page when printed. Variables come
+  from app.reporting.scorecard (``scorecard``, ``scorecard_exports``); logic
+  belongs there. The report header above it (scope, report ID, coverage,
+  previous scan) is part of the page on screen and in print, so the page
+  carries no meta line of its own.
+
+  Four stoplights (the lamp and the pill say the same thing; the lamp reads in
+  monochrome), the since line, the Top actions table with its footers, and the
+  Executive summary card, which is where Gemini's summary is generated and
+  read. The exports the buttons hand out (``scorecard_exports``) are embedded
+  in the report's script (SCORECARD_EXPORTS in _script.js).
+#}
+<div id="scorecard-section" class="content-section" style="display: none;">
+    <header class="scorecard-head">
+        <h2>Scorecard</h2>
+        <div class="scorecard-actions">
+            <button type="button" class="btn btn-outline btn-sm" onclick="printScorecard()">Print</button>
+            <button type="button" class="btn btn-outline btn-sm" onclick="downloadActionPlan()">Download action plan (CSV)</button>
+            <button type="button" class="btn btn-outline btn-sm" onclick="copyScorecardMarkdown(this)">Copy as Markdown</button>
+        </div>
+    </header>
+
+    <section class="card stoplights" aria-label="Stoplights">
+        <ul class="stoplight-list">
+        {% for light in scorecard.stoplights %}
+            <li class="stoplight">
+                <span class="lamp lamp-{{ light.score_class }}" aria-hidden="true"><i></i><i></i><i></i></span>
+                <div class="stoplight-text">
+                    <div class="stoplight-title"><a href="#{{ light.section_id }}" onclick="showSection('{{ light.section_id }}')">{{ light.name }}</a><span class="stoplight-category">{{ light.category }}</span></div>
+                    <p class="stoplight-evidence">{{ light.evidence }}</p>
+                </div>
+                <div class="stoplight-score"><span class="score">{{ light.score_display }}%</span>
+                {%- if light.delta_display is not none %} <span class="delta delta-{{ light.delta_class }}">{% if light.delta_class == 'up' %}&#9650; {% elif light.delta_class == 'down' %}&#9660; {% endif %}{{ light.delta_display }}</span>{% endif %}</div>
+                <span class="pill pill-{{ light.score_class }}">{{ light.state }}</span>
+            </li>
+        {% endfor %}
+        </ul>
+        {% if scorecard.since %}
+        {% set since = scorecard.since %}
+        <p class="since-line">Since the previous scan (<a href="/report/{{ since.previous_job_id|pathsegment }}/{{ scope_id|pathsegment }}"><time>{{ since.previous_at }}</time></a>):
+        <span class="mono">{{ "{:,}".format(since.new) }}</span> new rows · <span class="mono">{{ "{:,}".format(since.resolved) }}</span> resolved
+        {%- if since.projects_then and since.projects_then != since.projects_now %} · {{ "{:,}".format(since.projects_then) }} → {{ "{:,}".format(since.projects_now) }} projects{% endif %}
+        {%- if since.headline %} · status changes: {{ since.headline|join('; ') }}{% if since.more_status_changes %} and <a href="#changes" onclick="showSection('overview')">{{ since.more_status_changes }} more</a>{% endif %}{% else %} · no status changes{% endif %}.</p>
+        {% else %}
+        <p class="since-line">First scan of this {{ scope }} — changes appear from the next scan.</p>
+        {% endif %}
+    </section>
+
+    <section class="card" aria-label="Top actions">
+        <div class="card-title-row"><h2>Top actions</h2><span class="card-meta">by status, then projects affected, then rows</span></div>
+        {% if scorecard.actions %}
+        <table class="data-table actions-table">
+            <thead><tr><th class="num">#</th><th>Check</th><th>Category</th><th>Status</th><th class="num">Projects</th><th class="num">Rows</th>{% if scorecard.since %}<th>Since last scan</th>{% endif %}</tr></thead>
+            <tbody>
+            {% for action in scorecard.actions %}
+                <tr>
+                    <td class="num">{{ action.rank }}</td>
+                    <td class="action-name"><a href="#{{ action.section_id }}-{{ action.slug }}" onclick="showSection('{{ action.section_id }}')">{{ action.check_name }}</a>{% if action.fix_in_report %} <span class="fix-tag">fix in report</span>{% endif %}</td>
+                    <td class="muted category-cell">{{ action.category }}</td>
+                    <td><span class="pill pill-{{ action.status_class }}">{{ action.status }}</span></td>
+                    <td class="num">{{ "{:,}".format(action.projects) if action.projects is not none else "—" }}</td>
+                    <td class="num">{{ "{:,}".format(action.rows) }}</td>
+                    {% if scorecard.since %}<td class="since-cell">{{ action.since or "—" }}</td>{% endif %}
+                </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+        {% else %}
+        <div class="empty-state"><span class="dot dot-compliant"></span>No failing checks — nothing to take away from this scan.</div>
+        {% endif %}
+        {% if scorecard.org_line %}<p class="actions-foot"><a href="#security-identity-organization-policies" onclick="showSection('security-identity')">Organization Policies</a>: {{ scorecard.org_line }}.</p>{% endif %}
+        {% if scorecard.could_not_check %}<p class="actions-foot">Could not check: {{ scorecard.could_not_check|join(', ') }} — listed as errors on their category pages.</p>{% endif %}
+        {% if scorecard.more_actions %}<p class="actions-foot muted">{{ scorecard.more_actions }} more failing check{{ '' if scorecard.more_actions == 1 else 's' }} on the category pages.</p>{% endif %}
+    </section>
+
+    <section id="ai-summary-container" class="card scorecard-summary is-empty">
+        <div class="card-title-row"><h2>Executive summary <span class="attribution">Powered by Gemini</span></h2><span id="summary-pill" class="pill pill-sky" hidden>AI-generated</span><button id="copy-summary-btn" class="btn btn-outline btn-sm" onclick="copySummary(this)" hidden>Copy</button></div>
+        <p class="summary-empty">Not generated yet. Gemini reads this report's findings and writes a short summary of what stands out and what to do first.</p>
+        <div id="ai-summary-content"></div>
+        <button id="summaryBtn" class="btn btn-primary" onclick="generateAiSummary()">Generate executive summary</button>
+    </section>
+</div>

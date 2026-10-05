@@ -274,13 +274,16 @@ function applyRowFilter() {
     }
 }
 
-// --- AI analysis (the two actions on the Overview card, see report.html) ---
-// "Generate executive summary" writes the executive summary into the card under the actions. "Draft fixes" asks
-// Gemini for a gcloud command for every failing finding that does not already show a Fix and writes each one into
-// the finding's remediation placeholder on its category page; the status line under the actions says what happened,
-// because the fixes land on pages other than the one the button is on. Gemini's text is escaped before it is marked
-// up (renderMarkdown), so nothing quoted from a finding becomes HTML.
+// --- Gemini (see report.html and _scorecard.html) ---
+// "Generate executive summary", on the Scorecard, writes the executive summary into its card: the card starts empty
+// (is-empty: the intro line and the button), shows the pending line while Gemini writes, then the prose with its
+// AI-generated pill and Copy. "Draft fixes", on the Overview, asks Gemini for a gcloud command for every failing
+// finding that does not already show a Fix and writes each one into the finding's remediation placeholder on its
+// category page; the status line under the button says what happened, because the fixes land on pages other than
+// the one the button is on. Gemini's text is escaped before it is marked up (renderMarkdown), so nothing quoted from
+// a finding becomes HTML.
 const GEMINI_FOOTNOTE = "Written by Gemini from this report's findings. Check the details before acting on them.";
+let executiveSummaryMarkdown = '';  // the summary as Gemini wrote it, for "Copy as Markdown"
 
 function pendingHtml(text) {
     return `<div class="pending"><span class="spinner"></span><span>${text}</span></div>`;
@@ -291,11 +294,13 @@ async function generateAiSummary() {
     const container = document.getElementById("ai-summary-container");
     const content = document.getElementById("ai-summary-content");
     const copyBtn = document.getElementById("copy-summary-btn");
+    const pill = document.getElementById("summary-pill");
 
     btn.disabled = true;
     btn.textContent = "Writing summary…";
-    container.hidden = false;
+    container.classList.remove('is-empty');
     if (copyBtn) { copyBtn.hidden = true; }
+    if (pill) { pill.hidden = true; }
     content.innerHTML = pendingHtml("Gemini is reading the report and writing the summary…");
 
     try {
@@ -309,13 +314,17 @@ async function generateAiSummary() {
             throw new Error(err.error || `The server answered ${response.status}.`);
         }
         const data = await response.json();
+        executiveSummaryMarkdown = String(data.summary || '').trim();
         // Gemini tends to open with the heading the card already has.
-        const body = renderMarkdown(data.summary || '').replace(/^<h3>\s*executive summary\s*<\/h3>/i, '');
+        const body = renderMarkdown(executiveSummaryMarkdown).replace(/^<h3>\s*executive summary\s*<\/h3>/i, '');
         content.innerHTML = `<div class="prose-block">${body}</div><p class="footnote">${GEMINI_FOOTNOTE}</p>`;
         btn.textContent = "Summary ready";
+        btn.hidden = true;
         if (copyBtn) { copyBtn.hidden = false; }
+        if (pill) { pill.hidden = false; }
     } catch (error) {
         content.innerHTML = `<div class="notice notice-rose"><strong>Couldn't write the summary.</strong> ${escapeHtml(error.message)}</div>`;
+        container.classList.add('is-empty');  // still nothing to print or copy
         btn.textContent = "Retry summary";
         btn.disabled = false;
     }
@@ -600,4 +609,48 @@ async function getGeminiSuggestions(btn) {
     }
     btn.textContent = "Fixes added";
     setGeminiStatus(fixesSummary(declined), 'done');
+}
+
+// --- Scorecard (see _scorecard.html) ---
+// Print prints that page alone (body.print-scorecard, see the print rules in _styles.css). The action plan and the
+// Markdown copy are built on the server from the same model as the page (app.reporting.scorecard) and embedded
+// here with |tojson, like every other value in this script; once Gemini has written the executive summary, the
+// Markdown copy carries it too, as Gemini wrote it.
+const SCORECARD_EXPORTS = {{ scorecard_exports|tojson }};
+
+function scorecardExports() {
+    return SCORECARD_EXPORTS;
+}
+
+function printScorecard() {
+    document.body.classList.add('print-scorecard');
+    window.addEventListener('afterprint', () => document.body.classList.remove('print-scorecard'), { once: true });
+    window.print();
+}
+
+function downloadActionPlan() {
+    const exportsData = scorecardExports();
+    const blob = new Blob([exportsData.csv], { type: 'text/csv;charset=utf-8' });
+    const link = document.createElement('a');
+    link.href = URL.createObjectURL(blob);
+    link.download = exportsData.csv_name;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+}
+
+async function copyScorecardMarkdown(btn) {
+    let text = scorecardExports().markdown;
+    if (executiveSummaryMarkdown) {
+        text += `\n## Executive summary\n\n${executiveSummaryMarkdown}\n\n${GEMINI_FOOTNOTE}\n`;
+    }
+    const label = btn.textContent;
+    try {
+        await navigator.clipboard.writeText(text);
+        btn.textContent = "Copied";
+    } catch (error) {
+        btn.textContent = "Couldn't copy";
+    }
+    setTimeout(() => { btn.textContent = label; }, 2000);
 }

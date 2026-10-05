@@ -239,7 +239,8 @@ def test_report_is_self_contained():
         assert delimiter not in html
     assert '<script src=' not in html and 'rel="stylesheet"' in html  # the Google Fonts link, as before
     handlers = {'showSection', 'setAllChecks', 'getGeminiSuggestions', 'generateAiSummary', 'copySummary', 'copyFix', 'fetchInsights',
-                'renderTablePage'}  # renderTablePage is in HTML built by the script; copyFix also in the fix blocks it builds
+                'renderTablePage',  # renderTablePage is in HTML built by the script; copyFix also in the fix blocks it builds
+                'printScorecard', 'downloadActionPlan', 'copyScorecardMarkdown'}  # the Scorecard's buttons (v15.1)
     assert set(re.findall(r'onclick="(\w+)\(', html)) == handlers
     paging = {'showMoreRows', 'showAllRows'}  # only emitted under tables longer than one page
     long_table = {SECURITY: [{'Check': 'Public Buckets', 'Status': 'Action Required',
@@ -365,9 +366,9 @@ def test_toolbar_is_hidden_on_the_overview():
 
 
 def category_pages(html):
-    """section id -> the section's markup, for the category pages (not the Overview)."""
+    """section id -> the section's markup, for the category pages (not the Overview or the Scorecard)."""
     parts = re.split(r'<div id="([\w-]+)-section" class="content-section"', html.split('<script', 1)[0])
-    return {parts[i]: parts[i + 1] for i in range(1, len(parts) - 1, 2) if parts[i] != 'overview'}
+    return {parts[i]: parts[i + 1] for i in range(1, len(parts) - 1, 2) if parts[i] not in ('overview', 'scorecard')}
 
 
 def test_every_category_has_a_page():
@@ -378,7 +379,9 @@ def test_every_category_has_a_page():
         pages = category_pages(html)
         assert list(pages) == ['security-identity', 'cost-optimization', 'reliability-resilience', 'operational-excellence-observability'], name
         targets = set(re.findall(r"showSection\('([\w-]+)'", html)) | set(re.findall(r'href="#([\w-]+)"', html))
-        assert targets == {'overview', *pages}, name
+        assert {'overview', 'scorecard', *pages} <= targets, name
+        for target in targets - {'overview', 'scorecard', *pages}:  # the Scorecard's links to checks and cards
+            assert f'id="{target}"' in html, (name, target)
 
 
 def test_a_category_without_results_says_so():

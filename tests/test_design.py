@@ -55,7 +55,7 @@ STATUS_CLASSES = {'Action Required': 'action-required', 'Investigation Recommend
                   'Error': 'error', 'Informational': 'informational'}
 STATUS_HUES = {'action-required': 'rose', 'investigation': 'amber', 'compliant': 'emerald', 'error': 'zinc', 'informational': 'sky'}
 NEEDS_A_HUMAN = {'action-required', 'investigation', 'error'}  # open on load (accordion default B)
-PROPER_NOUNS = {'CloudGauge', 'Gemini', 'AI', 'CSV'}  # keep their capitals inside a sentence-case heading or label
+PROPER_NOUNS = {'CloudGauge', 'Gemini', 'AI', 'CSV', 'Markdown'}  # keep their capitals inside a sentence-case heading or label
 
 
 AT_RULE_BLOCK = re.compile(r'@(?:media|keyframes)[^{]*\{(?:[^{}]*\{[^{}]*\})*[^{}]*\}', re.S)
@@ -252,21 +252,27 @@ def test_headings_are_sentence_case_and_status_names_keep_theirs(pages):
             assert sentence_case(text), (name, text)
     assert 'Review your cloud environment' in ui_copy(pages['index'])
     assert {'Scan in progress', 'Scan complete', 'Scan failed', 'View interactive report', 'Download CSV'} <= set(ui_copy(pages['status']))
-    assert {'CloudGauge report', 'Overview', 'Review scores', 'AI analysis', 'Powered by Gemini', 'Executive summary',
-            'Generate executive summary', 'Draft fixes', 'Download CSV', 'Expand all', 'Collapse all', 'Copy'} <= set(ui_copy(pages['report']))
+    assert {'CloudGauge report', 'Overview', 'Review scores', 'Suggested fixes', 'Powered by Gemini', 'Draft fixes', 'Download CSV',
+            'Expand all', 'Collapse all', 'Copy', 'Scorecard', 'Top actions', 'Executive summary', 'Generate executive summary',
+            'Print', 'Download action plan (CSV)', 'Copy as Markdown'} <= set(ui_copy(pages['report']))
     assert set(CATEGORY_ORDER) <= set(ui_copy(pages['report']))
     assert re.findall(r'<span class="status-badge pill pill-[\w-]+">([^<]+)</span>', pages['report'])
     assert set(re.findall(r'<span class="status-badge pill pill-[\w-]+">([^<]+)</span>', pages['report'])) <= set(STATUS_CLASSES)
 
 
-def test_ai_analysis_names_what_it_does_and_credits_gemini_quietly(pages):
+def test_gemini_actions_name_what_they_do_and_credit_gemini_quietly(pages):
+    """Each Gemini action lives where its result lands: Draft fixes on the Overview (the fixes go to the category pages,
+    the status line says where), the executive summary on the Scorecard, in the card that shows it (v15.1)."""
     report = pages['report']
-    assert '<h2>AI analysis <span class="attribution">Powered by Gemini</span></h2>' in report
-    assert '<p>Generate an executive summary, or draft fixes for failing findings.</p>' in report
+    overview, scorecard = report.split('id="scorecard-section"')
+    assert '<h2>Suggested fixes <span class="attribution">Powered by Gemini</span></h2>' in overview
+    assert '<p>Draft a gcloud fix for every failing finding that does not already show one; each appears under its finding on the category pages.</p>' in overview
+    assert 'onclick="getGeminiSuggestions(this)">Draft fixes<' in overview and 'generateAiSummary' not in overview
+    assert '<h2>Executive summary <span class="attribution">Powered by Gemini</span></h2>' in scorecard
+    assert 'onclick="generateAiSummary()">Generate executive summary<' in scorecard and 'getGeminiSuggestions' not in scorecard.split('<script')[0]
     attribution = rule(REPORT_STYLES, '.attribution')
     assert (attribution['color'], attribution['font-weight']) == ('var(--muted)', '400')  # text, not a pill: pills mean status
-    assert 'onclick="generateAiSummary()">Generate executive summary<' in report and 'onclick="getGeminiSuggestions(this)">Draft fixes<' in report
-    assert 'Get AI summary' not in report and 'Get remediation suggestions' not in report
+    assert 'Get AI summary' not in report and 'Get remediation suggestions' not in report and 'AI analysis' not in report
 
 
 def test_every_fix_block_has_the_same_copy_control():

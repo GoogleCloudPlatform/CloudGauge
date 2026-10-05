@@ -8,11 +8,87 @@ the test suite running inside the image, a zero-traffic canary revision scanned
 against a real organization, promotion, and a production scan compared fact for
 fact with the previous version's report.
 
-Versions are the image tags (`v5` … `v15`); the commit is the one that shipped.
+Versions are the image tags (`v5` … `v15.1`); the commit is the one that shipped.
 
 ---
 
-## v15.1 — Scorecard page *(in progress)*
+## v15.1 — The Scorecard
+
+The QTR-brief page promised in v15's roadmap, and a fix to the CSV's table
+order. No new settings and nothing new in the results bucket: a v15 scan's
+summary is read as before, so the first v15.1 scan of a scope already shows its
+deltas.
+
+### New: the Scorecard, a report's one-pager
+
+- **Who it is for.** The Overview is the operator's working page; the
+  **Scorecard**, the next entry in the sidebar, is the page for the people who
+  will not open the category pages — a quarterly technical review, a leadership
+  update. It states only what the rest of the report can back: every number on
+  it is read from the same context that renders the category pages
+  (`app/reporting/scorecard.py`); nothing is recomputed.
+- **Four stoplights**, one per pillar of the review playbook, each over one
+  report category: Stability (Reliability & Resilience), Security (Security &
+  Identity), Operations (Operational Excellence & Observability), Efficiency
+  (Cost Optimization). Each is a three-lamp light that reads in monochrome, the
+  category's score with its delta since the previous scan, a state in the bands
+  the score bars already use — above 90 **Healthy**, above 70 **Needs
+  attention**, else **At risk** — and the evidence behind it: compliant checks
+  out of the scored ones, projects with findings and, for Stability, the Service
+  Health briefing's tally ("1 incident impacted you in 90 days, 0 active").
+  Velocity & Innovation has no checks yet, so it has no stoplight.
+- **The since line.** Under the stoplights, one sentence: new and resolved rows
+  since the previous scan (linked), the scope's size when it changed, the first
+  three status changes — regressions first — and "N more" linking to the
+  Overview's Changes card. A first scan says so: "First scan of this
+  organization — changes appear from the next scan".
+- **Top actions.** The ten failing checks (Action Required, then Investigation
+  Recommended), ranked by status, then projects affected, then rows, then name;
+  each links to its finding and shows category, status, projects, rows and,
+  after a previous scan, what changed ("+3 new · was Compliant"). A check that
+  ships its own command (Essential Contacts, Personalized Service Health API
+  Coverage, Advisory Notifications Settings, GKE Supported Versions) carries a
+  quiet *fix in report* tag; the others get theirs from **Draft fixes**.
+  Footers: the Organization Policies tally ("4 of 30 organization policies
+  differ from the recommendation", linked), the checks that could not run and
+  how many more failing checks the category pages hold. A scan with nothing
+  failing says "No failing checks — nothing to take away from this scan."
+- **The executive summary lives here.** Gemini's executive summary is generated
+  and read on the Scorecard, in an **Executive summary · Powered by Gemini**
+  card that says what it will do until it is generated ("Not generated yet.
+  Gemini reads this report's findings and writes a short summary of what stands
+  out and what to do first.") and then holds the summary with its
+  *AI-generated* pill and **Copy** button. **Generate executive summary** stays
+  the report's one primary button; it is no longer on the Overview.
+- **Three exports, one model.** **Print** prints the Scorecard alone, on one A4
+  page (the report header above it included; the buttons and an empty summary
+  card hidden). **Download action plan (CSV)** writes the ranked actions —
+  `Priority, Check, Category, Status, Projects affected, Resources, Fix in
+  report, Owner, Target date`, the last two blank for the owner to fill in — as
+  `cloudgauge-action-plan-<scope id>-<date>.csv`. **Copy as Markdown** puts the
+  stoplights, the since line and the actions on the clipboard as Markdown
+  tables, with the executive summary appended once it has been generated. The
+  exports are built in Python from the same model as the page and embedded in
+  the report, so a stored report exports exactly what it shows.
+
+### Changed: the Overview's Gemini card
+
+- The card is now **Suggested fixes · Powered by Gemini**, with one outline
+  button, **Draft fixes**, and copy that says where the drafts land ("Draft a
+  gcloud fix for every failing finding that does not already show one; each
+  appears under its finding on the category pages."). The executive summary and
+  its primary button moved to the Scorecard; the Overview keeps the counts, the
+  review scores, the Changes card and the drafts — the operator's tools — so
+  the two pages do not repeat each other.
+- Two decisions from the review of the preview, recorded here. The Top actions
+  table has **no Fix column**: its only two values would have been "built in"
+  and "AI-drafted", and the latter promised a draft that exists only after
+  **Draft fixes** is pressed in the browser; so the rare checks that ship a
+  command carry the *fix in report* tag and the action-plan CSV keeps a
+  yes/blank `Fix in report` column. And the executive summary is generated
+  **only on the Scorecard**, where it is read, rather than on both pages.
+- The cards of a section are now 16px apart on every page; the Overview's sat
+  flush against each other.
 
 ### Fixed: the CSV lists a category's tables as the page does
 
@@ -557,7 +633,7 @@ performance; modernization; enablement; roadmap and roadblocks).
 
 | Release | Theme | Contents |
 |---|---|---|
-| **v15.1** | The QTR brief | A **QTR brief page** (stoplight scorecard per pillar, top actions, action-plan export) on top of v15's scan summaries and *Changes since last scan*. |
+| **v15.1** | The QTR brief | *Shipped.* The **Scorecard** page (a stoplight per pillar with its evidence, the since line, top actions, action-plan CSV, Markdown copy, one-page print) on top of v15's scan summaries and *Changes since last scan*; the executive summary is generated there. |
 | **v16** | History and analytics | **BigQuery export** of every scan's findings; **scheduled scans**; a history page (scores over time); a guide for Gemini Enterprise / Looker over the export ("talk to your infrastructure"). |
 | **v17** | Footprint and support | A **Platform Footprint** page (what runs where: services, regions, versions); **modernization indicators** (legacy runtimes, unmanaged VMs, missing release channels); a **Support cases** briefing. |
 | Later | | VM Manager vulnerability summary, Security Command Center findings summary, SLO coverage, PDF export. |

@@ -32,6 +32,7 @@ from jinja2 import Environment, PackageLoader, StrictUndefined
 from app.reporting.changes import summarize
 from app.reporting.context import build_report_context
 from app.reporting.csv_report import generate_csv_data
+from app.reporting.scorecard import scorecard_vars
 
 REPORT_TEMPLATE = "report/report.html"
 
@@ -53,8 +54,12 @@ def report_environment():
 
 
 def render_report(context):
-    """Renders a :class:`~app.reporting.context.ReportContext` to the report HTML."""
-    return report_environment().get_template(REPORT_TEMPLATE).render(context.template_vars())
+    """Renders a :class:`~app.reporting.context.ReportContext` to the report HTML.
+
+    The Scorecard page (``app.reporting.scorecard``) is built here from the
+    finished context, so the context stays the single source it summarizes.
+    """
+    return report_environment().get_template(REPORT_TEMPLATE).render({**context.template_vars(), **scorecard_vars(context)})
 
 
 def generate_html_report(scope, scope_id, job_id, banner=None, coverage=None, total_projects=None, previous=None, **all_results):

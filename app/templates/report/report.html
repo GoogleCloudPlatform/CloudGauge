@@ -18,12 +18,14 @@
   is self-contained: _design.css, _styles.css and _script.js are inlined, not linked.
   Variables come from app.reporting.context.ReportContext; logic belongs there.
 
-  Layout: a fixed sidebar (the sections, each with its worst status and the
-  number of items that need a human) and one page at a time in the main column.
-  The Overview is the four counts, the coverage note when a scan is incomplete,
-  the review scores, what changed since the previous scan (when there is one)
-  and the AI analysis actions; each category page is a list of accordions
-  (_macros.html).
+  Layout: a fixed sidebar (Overview, Scorecard, then the sections, each with
+  its worst status and the number of items that need a human) and one page at
+  a time in the main column. The Overview is the operator's page: the four
+  counts, the coverage note when a scan is incomplete, the review scores, what
+  changed since the previous scan (when there is one) and Draft fixes. The
+  Scorecard (_scorecard.html) is the one-pager for everyone else: stoplights,
+  top actions, the executive summary, exports. Each category page is a list
+  of accordions (_macros.html).
 #}
 {% from "report/_macros.html" import category_section, change_entry %}
 {% set csv_href = "/report/" ~ (job_id|pathsegment) ~ "/" ~ (scope_id|pathsegment) ~ "/csv" %}
@@ -47,6 +49,7 @@
     <nav class="sidebar" aria-label="Report sections">
         <div class="sidebar-brand">CloudGauge</div>
         <a href="#overview" class="nav-link active" onclick="showSection('overview', this)"><span class="nav-label">Overview</span></a>
+        <a href="#scorecard" class="nav-link" onclick="showSection('scorecard', this)"><span class="nav-label">Scorecard</span></a>
         {% for section in sections %}
         <a href="#{{ section.section_id }}" class="nav-link" onclick="showSection('{{ section.section_id }}', this)" title="{{ section.title }}: {{ section.attention_count }} item{{ '' if section.attention_count == 1 else 's' }} need{{ 's' if section.attention_count == 1 else '' }} attention">
             <span class="nav-label">{{ section.nav_title }}</span>
@@ -155,20 +158,16 @@
 {% endif %}
             <section class="card gemini-card">
                 <div>
-                    <h2>AI analysis <span class="attribution">Powered by Gemini</span></h2>
-                    <p>Generate an executive summary, or draft fixes for failing findings.</p>
+                    <h2>Suggested fixes <span class="attribution">Powered by Gemini</span></h2>
+                    <p>Draft a gcloud fix for every failing finding that does not already show one; each appears under its finding on the category pages.</p>
                 </div>
                 <div class="gemini-actions">
-                    <button id="summaryBtn" class="btn btn-primary" onclick="generateAiSummary()">Generate executive summary</button>
                     <button id="suggestionsBtn" class="btn btn-outline" onclick="getGeminiSuggestions(this)">Draft fixes</button>
                 </div>
                 <div id="gemini-status" class="gemini-status" role="status" hidden></div>
             </section>
-            <section id="ai-summary-container" class="card" hidden>
-                <div class="card-title-row"><h2>Executive summary</h2><span class="pill pill-sky">AI-generated</span><button id="copy-summary-btn" class="btn btn-outline btn-sm" onclick="copySummary(this)" hidden>Copy</button></div>
-                <div id="ai-summary-content"></div>
-            </section>
         </div>
+{% include "report/_scorecard.html" %}
         {% for section in sections %}
         {{ category_section(section, scope_id, rows_per_page, csv_href) }}
         {% endfor %}

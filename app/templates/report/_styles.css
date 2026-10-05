@@ -47,7 +47,7 @@ body { display: flex; min-height: 100vh; }
 .toolbar-actions { display: inline-flex; gap: 14px; margin-left: auto; }
 
 /* Overview: four counts (with their change since the last scan), the coverage note when a scan is incomplete,
-   the scores, the Changes card, the AI analysis card. */
+   the scores, the Changes card, the Suggested fixes card. */
 .kpi-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
 .kpi { display: grid; grid-template-columns: auto 1fr; align-items: center; column-gap: 8px; padding: 16px 18px 14px; background: var(--surface); border: 1px solid var(--hairline); border-radius: var(--radius-card); }
 .kpi h3 { font-size: 13px; font-weight: 500; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -103,10 +103,11 @@ body { display: flex; min-height: 100vh; }
 .score { font-family: var(--font-mono); font-variant-numeric: tabular-nums; font-weight: 500; color: var(--ink); }
 .score-of { width: 1%; white-space: nowrap; font-size: 12px; color: var(--muted); }
 
-/* Gemini: the card with the two actions and a status line, the executive summary card, the pending lines. */
+/* Gemini: the Overview's Draft fixes card with its status line, and the pending lines; the executive summary is
+   generated and read on the Scorecard (its card is styled with the Scorecard, below). */
 .gemini-card { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 16px 24px; }
 .gemini-card h2 { margin-bottom: 4px; }
-.gemini-card p { color: var(--muted); max-width: 52ch; }
+.gemini-card p { color: var(--muted); max-width: 64ch; }
 .gemini-actions { display: flex; gap: 10px; flex: none; }
 .gemini-status { flex-basis: 100%; display: flex; align-items: flex-start; gap: 10px; padding-top: 14px; border-top: 1px solid var(--rule); font-size: 13px; line-height: 1.5; color: var(--body); }
 .gemini-status.is-pending { color: var(--muted); }
@@ -124,6 +125,51 @@ body { display: flex; min-height: 100vh; }
 .prose-block code { padding: 1px 5px; border-radius: var(--radius-chip); background: var(--zinc-100); font-size: 12.5px; }
 .footnote { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--rule); font-size: 12px; color: var(--muted); }
 .remediation-note { margin-top: 10px; font-size: 13px; color: var(--muted); }
+
+/* Scorecard (app/reporting/scorecard.py): the review page. Four stoplights - the lamp is the one element of its own
+   on the page (lit lamp = the state, readable without colour), the pill says it in words, the score keeps the
+   Overview's mono figure and the Changes card's delta glyph - then the since line, the Top actions table and the
+   executive summary card, which is empty until Gemini writes it. */
+.content-section > * + * { margin-top: 16px; }
+.content-section > .sr-only + * { margin-top: 0; }
+.scorecard-head { display: flex; align-items: center; gap: 16px; }
+.scorecard-head h2 { margin: 0; font-size: 18px; }
+.scorecard-actions { margin-left: auto; display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+.stoplight-list { list-style: none; margin: 0; padding: 0; }
+.stoplight { display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto; align-items: center; column-gap: 18px; padding: 14px 0; border-bottom: 1px solid var(--rule); }
+.stoplight:first-child { padding-top: 2px; }
+.stoplight:last-child { border-bottom: 0; }
+.lamp { display: inline-flex; flex-direction: column; gap: 3px; padding: 5px; border-radius: 999px; background: var(--zinc-100); border: 1px solid var(--hairline); }
+.lamp i { display: block; width: 9px; height: 9px; border-radius: 50%; background: var(--zinc-300); }
+.lamp-low i:nth-child(1) { background: var(--rose-500); }
+.lamp-medium i:nth-child(2) { background: var(--amber-500); }
+.lamp-high i:nth-child(3) { background: var(--emerald-500); }
+.stoplight-title { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.stoplight-title a { font-size: 15px; font-weight: 500; color: var(--ink); text-decoration: none; }
+.stoplight-title a:hover { text-decoration: underline; text-underline-offset: 3px; }
+.stoplight-category { font-size: 13px; color: var(--muted); }
+.stoplight-evidence { margin: 3px 0 0; font-size: 13px; color: var(--body); }
+.stoplight-score { display: flex; align-items: baseline; gap: 8px; white-space: nowrap; }
+.stoplight-score .score { font-size: 22px; font-weight: 400; }
+.stoplight-score .delta { font-family: var(--font-mono); font-size: 12px; font-variant-numeric: tabular-nums; color: var(--muted); }
+.stoplight-score .delta-flat { color: var(--faint); }
+.stoplight .pill { justify-self: end; min-width: 128px; justify-content: center; }
+.since-line { margin: 14px 0 0; padding-top: 12px; border-top: 1px solid var(--hairline); font-size: 13px; color: var(--body); line-height: 1.5; }
+.since-line a { color: var(--body); text-decoration: underline; text-underline-offset: 3px; text-decoration-color: var(--zinc-300); }
+.since-line a:hover { color: var(--ink); text-decoration-color: currentColor; }
+.actions-table td { vertical-align: middle; }
+.actions-table .action-name a { color: var(--ink); font-weight: 500; text-decoration: none; }
+.actions-table .action-name a:hover { text-decoration: underline; text-underline-offset: 3px; }
+.actions-table .fix-tag { margin-left: 8px; font-size: 12px; color: var(--muted); white-space: nowrap; }
+.actions-table .category-cell { white-space: nowrap; }
+.actions-table .since-cell { font-family: var(--font-mono); font-size: 12px; color: var(--muted); white-space: nowrap; }
+.actions-foot { margin: 10px 0 0; font-size: 13px; color: var(--body); }
+.actions-foot a { color: var(--ink); font-weight: 500; text-decoration: none; }
+.actions-foot a:hover { text-decoration: underline; text-underline-offset: 3px; }
+.actions-foot + .actions-foot { margin-top: 4px; }
+.scorecard-summary .summary-empty { max-width: 64ch; color: var(--muted); }
+.scorecard-summary:not(.is-empty) .summary-empty { display: none; }
+.scorecard-summary #summaryBtn { margin-top: 12px; }
 
 /* Category pages: title, score pill, status counts, the accordion list. */
 .section-header { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
@@ -225,6 +271,12 @@ tr.row-new > td:first-child::before, .line-new::before { content: "New"; display
     .toolbar-actions { margin-left: 0; }
     .check-content { padding-left: 4px; }
 }
+@media screen and (max-width: 900px) {  /* screen only: a printed sheet is narrower than 900px and keeps the full rows */
+    .scorecard-head { flex-wrap: wrap; }
+    .scorecard-actions { margin-left: 0; justify-content: flex-start; }
+    .stoplight { grid-template-columns: auto minmax(0, 1fr) auto; row-gap: 6px; }
+    .stoplight .pill { grid-column: 2 / -1; justify-self: start; min-width: 0; }
+}
 @media (max-width: 560px) {
     .kpi-grid { grid-template-columns: minmax(0, 1fr); }
     .score-bar-cell { display: none; }
@@ -238,4 +290,30 @@ tr.row-new > td:first-child::before, .line-new::before { content: "New"; display
     .details-table th::after { content: none !important; }
     .details-table .clamp { display: block; -webkit-line-clamp: unset; }
     details.check > summary .chevron { display: none; }
+    /* The Scorecard's Print button prints that page alone (printScorecard sets body.print-scorecard), on one sheet:
+       the report header above it carries the scope, report ID, coverage and previous scan; a summary not yet
+       written is left out; the actions table keeps its rows whole and repeats its header if it must break. */
+    body.print-scorecard .content-section:not(#scorecard-section) { display: none !important; }
+    body.print-scorecard #scorecard-section { page-break-inside: auto; break-inside: auto; }
+    .scorecard-actions, .scorecard-summary.is-empty { display: none !important; }
+    body.print-scorecard .report-header { margin-bottom: 12px; }
+    #scorecard-section { font-size: 12px; }
+    #scorecard-section .card { padding: 10px 14px; break-inside: auto; }
+    #scorecard-section > * + * { margin-top: 8px; }
+    #scorecard-section .stoplights { break-inside: avoid; }
+    .actions-table tr { break-inside: avoid; }
+    .actions-table thead { display: table-header-group; }
+    .actions-table .action-name { white-space: nowrap; }
+    .actions-table .pill { padding: 0 7px; font-size: 11px; line-height: 16px; }
+    .stoplight { padding: 7px 0; column-gap: 14px; break-inside: avoid; }
+    .stoplight-title a { font-size: 13px; }
+    .stoplight-category, .stoplight-evidence, .since-line, .actions-foot { font-size: 11px; }
+    .stoplight-evidence { margin-top: 1px; }
+    .stoplight-score .score { font-size: 17px; }
+    .stoplight .pill { min-width: 112px; }
+    .since-line { margin-top: 6px; padding-top: 6px; }
+    .actions-table th, .actions-table td { padding: 4px 8px; font-size: 11px; }
+    .actions-table .since-cell, .actions-table .fix-tag { font-size: 10px; }
+    .actions-foot { margin-top: 6px; }
+    @page { margin: 10mm 12mm; }
 }
