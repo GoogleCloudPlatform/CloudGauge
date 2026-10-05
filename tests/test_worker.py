@@ -40,7 +40,7 @@ from app.checks.categories import CATEGORY_ORDER
 from app.checks.registry import CheckSpec
 from app.extensions import EXTENSION_KEY
 from app.utils import ThrottledProgressReporter
-from helpers import assert_same_csv_tables, assert_same_response, csv_sections, report_facts
+from helpers import assert_same_csv_tables, assert_same_response, comparable, csv_sections, report_facts
 
 SCOPE, SCOPE_ID, JOB_ID = 'organization', '123456789', 'job-42'
 PAYLOAD = {'scope': SCOPE, 'scope_id': SCOPE_ID, 'job_id': JOB_ID}
@@ -149,11 +149,11 @@ def test_scan_job_matches_legacy(legacy_client, client, gcp, scripted_scan):
 
     assert sorted(run.objects) == sorted([*legacy_run.objects, *summaries]) == sorted([REPORT_HTML, REPORT_CSV, STATUS, *summaries])
     summary = json.loads(run.objects[summaries[0]][0])
-    assert (summary['version'], summary['job_id'], summary['scope'], summary['scope_id']) == (1, JOB_ID, SCOPE, SCOPE_ID)
+    assert (summary['version'], summary['job_id'], summary['scope'], summary['scope_id']) == (2, JOB_ID, SCOPE, SCOPE_ID)
     assert {finding['Check'] for finding in scripted_scan.findings} <= set(summary['checks'])
     (html, html_type), (legacy_html, legacy_html_type) = run.objects[REPORT_HTML], legacy_run.objects[REPORT_HTML]
     assert html_type == legacy_html_type == 'text/html'
-    assert report_facts(html) == report_facts(legacy_html)  # same findings; the layout differs (plan item 6b)
+    assert comparable(report_facts(html)) == comparable(report_facts(legacy_html))  # same findings; the layout and the scores differ (plan item 6b, v15.2)
     assert 'none — first scan of this organization' in html  # the bucket was empty: nothing to compare with
     (csv_text, csv_type), (legacy_csv, legacy_csv_type) = run.objects[REPORT_CSV], legacy_run.objects[REPORT_CSV]
     assert csv_type == legacy_csv_type == 'text/csv'
@@ -246,7 +246,7 @@ def test_scan_without_projects_matches_legacy(legacy_client, client, gcp, legacy
     assert run.statuses == legacy_run.statuses
     assert [status[0] for status in run.statuses] == [5, 98, 100]
     assert run.objects[REPORT_CSV] == legacy_run.objects[REPORT_CSV]  # no category sections, so same bytes
-    assert report_facts(run.objects[REPORT_HTML][0]) == report_facts(legacy_run.objects[REPORT_HTML][0])
+    assert comparable(report_facts(run.objects[REPORT_HTML][0])) == comparable(report_facts(legacy_run.objects[REPORT_HTML][0]))
 
 
 def test_scan_job_with_the_real_runner(client, prod_app, gcp, monkeypatch):

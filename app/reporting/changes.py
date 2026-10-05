@@ -45,14 +45,23 @@ The rules of ``compare``, per check:
   *not compared* (an Error scan did not look, so nothing was resolved);
 - only in this scan: *not compared (new check)*, never "all new";
 - only in the previous scan: listed once on the card as no longer checked.
+
+Scores and counts are not read from the previous summary but **recomputed
+from its check statuses under the current rule** (``app.reporting.scoring``):
+a summary keeps every check's status and the policy counts, which is all the
+rule needs, so a scan made under an older rule compares like with like and a
+change of rule never shows as a change of posture. The summary still records
+the scores it was rendered with, for anyone reading the JSON.
 """
 import re
 from collections import Counter
 from dataclasses import dataclass, field
 
 from app.reporting.layouts import FIX_COLUMN, NUMBER, PROSE, TIME, column_roles
+from app.reporting.scoring import NOT_ASSESSED_TEXT, overview_from_checks, scores_from_checks
 
-SUMMARY_VERSION = 1
+# 2 (v15.2): the Organization Policies entry carries ``policies: {compliant, total}``; scores may be null (not assessed).
+SUMMARY_VERSION = 2
 # Cells of one identity are joined with this; the N-th duplicate gets " #N".
 IDENTITY_SEPARATOR = " · "
 # Statuses whose rows are compared; the others carry no identities (see the module docstring).
@@ -194,13 +203,18 @@ class ChangeEntry:
 class CategoryChange:
     category_name: str
     section_id: str
-    score_display: str
-    previous_score_display: str | None  # None when the previous scan had no such category
-    delta_display: str  # "+6", "−11", or "—" for no change
+    score_display: str  # "55"; empty when this scan did not assess the category
+    previous_score_display: str | None  # "40", NOT_ASSESSED_TEXT, or None when the previous scan had no such category
+    delta_display: str  # "+6", "−11", or "—" for no change (also "—" when either side has no score)
     delta_class: str  # "up", "down", or "flat"
     resolved: int
     new: int
     entries: tuple = ()  # ChangeEntry: the status changes first, then the notes, in display order
+
+    @property
+    def score_text(self):
+        """``"55%"`` or ``"Not assessed"``: the card's score cell."""
+        return f"{self.score_display}%" if self.score_display else NOT_ASSESSED_TEXT
 
 
 @dataclass(frozen=True)
@@ -284,10 +298,18 @@ def compare(previous, current, slugs, section_ids):
     retired = tuple(sorted(name for name, entry in prev_checks.items()
                            if name not in cur_checks and entry["status"] != "Informational"))
 
+    # The previous scan under the current rule (module docstring): its scores and counts come from its checks.
+    previous_scores = scores_from_checks(prev_checks)
+    previous_categories = previous.get("scores", {})
     categories = []
     for category_name, score in current.get("scores", {}).items():
-        previous_score = previous.get("scores", {}).get(category_name)
-        delta = 0 if previous_score is None else round(score) - round(previous_score)
+        if category_name in previous_categories:
+            previous_score = previous_scores.get(category_name)  # None: not assessed then
+            previous_display = NOT_ASSESSED_TEXT if previous_score is None else f"{previous_score:.0f}"
+        else:
+            previous_score, previous_display = None, None  # the previous scan had no such category
+        compared = score is not None and previous_score is not None
+        delta = round(score) - round(previous_score) if compared else 0
         names = [name for name, entry in cur_checks.items() if entry.get("category") == category_name and name in checks]
         entries = []
         for name in names:  # status changes first...
@@ -301,13 +323,14 @@ def compare(previous, current, slugs, section_ids):
                 entries.append(ChangeEntry(name, slugs.get(name, ""), f"{change.note} ({change.note_reason})"))
         categories.append(CategoryChange(
             category_name=category_name, section_id=section_ids.get(category_name, ""),
-            score_display=f"{score:.0f}", previous_score_display=None if previous_score is None else f"{previous_score:.0f}",
-            delta_display=count_delta(delta) if previous_score is not None else "\u2014", delta_class=delta_class(delta),
+            score_display="" if score is None else f"{score:.0f}", previous_score_display=previous_display,
+            delta_display=count_delta(delta) if compared else "\u2014", delta_class=delta_class(delta),
             resolved=sum(checks[name].resolved for name in names), new=sum(checks[name].new for name in names),
             entries=tuple(entries),
         ))
 
-    overview_deltas = {key: current["overview"].get(key, 0) - previous.get("overview", {}).get(key, 0)
+    previous_overview = overview_from_checks(prev_checks)
+    overview_deltas = {key: current["overview"].get(key, 0) - previous_overview.get(key, 0)
                        for key in current.get("overview", {})}
     return Changes(
         previous_job_id=previous["job_id"], previous_generated_at=previous.get("generated_at", ""),
@@ -323,7 +346,8 @@ def summarize(context):
 
     Identities come from every row of a check (``Details.identities``), not only
     the rows the page shows. Organization Policies is summarised as a check whose
-    identities are the policies that differ from the recommended value.
+    identities are the policies that differ from the recommended value, with the
+    counts behind its share of the score (``policies``).
     """
     checks = {}
     for section in context.sections:
@@ -338,7 +362,8 @@ def summarize(context):
             differing = [f"{category.name}{IDENTITY_SEPARATOR}{row.display_name}" for category in policies.categories
                          for row in category.rows if row.status != "Compliant"]
             checks[ORG_POLICIES_CHECK] = {"category": section.title, "status": "Action Required" if differing else "Compliant",
-                                          "rows": policies.total, "identities": differing}
+                                          "rows": policies.total, "identities": differing,
+                                          "policies": {"compliant": policies.compliant, "total": policies.total}}
     overview = context.overview
     return {
         "version": SUMMARY_VERSION, "job_id": context.job_id, "scope": context.scope, "scope_id": context.scope_id,
@@ -346,6 +371,6 @@ def summarize(context):
         "total_projects": context.total_projects,
         "overview": {"action_count": overview.action_count, "investigation_count": overview.investigation_count,
                      "compliant_count": overview.compliant_count, "error_count": overview.error_count},
-        "scores": {row.category_name: row.score for row in context.score_summary},
+        "scores": {row.category_name: row.score for row in context.score_summary},  # None: not assessed
         "checks": checks,
     }

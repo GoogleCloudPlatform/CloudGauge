@@ -251,7 +251,7 @@ def test_denied_projects_and_quota_errors_do_not_break_the_scan(gcp):
     html = store.read_report('syn-job', scope_id, 'html')
     assert BANNER_MARK in html
     assert html.count('<strong>Projects not checked</strong>') == 4  # one item on each category page
-    assert 'No findings in this category' not in html
+    assert 'Not assessed — no' not in html  # the item above makes each page a listed page, not an empty one
     rows = [row for row in csv.reader(io.StringIO(store.read_report('syn-job', scope_id, 'csv'))) if row[:2] == ['Projects not checked', 'Error']]
     assert {row[2] for row in rows} == {p.project_id for p in provider.world.projects()}  # every project, by ID
     # Location discovery fails for every project too, so no zone or region is found and the cost

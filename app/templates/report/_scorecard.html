@@ -45,7 +45,7 @@
                     <div class="stoplight-title"><a href="#{{ light.section_id }}" onclick="showSection('{{ light.section_id }}')">{{ light.name }}</a><span class="stoplight-category">{{ light.category }}</span></div>
                     <p class="stoplight-evidence">{{ light.evidence }}</p>
                 </div>
-                <div class="stoplight-score"><span class="score">{{ light.score_display }}%</span>
+                <div class="stoplight-score"><span class="score{% if not light.score_display %} score-none{% endif %}">{{ light.score_text }}</span>
                 {%- if light.delta_display is not none %} <span class="delta delta-{{ light.delta_class }}">{% if light.delta_class == 'up' %}&#9650; {% elif light.delta_class == 'down' %}&#9660; {% endif %}{{ light.delta_display }}</span>{% endif %}</div>
                 <span class="pill pill-{{ light.score_class }}">{{ light.state }}</span>
             </li>

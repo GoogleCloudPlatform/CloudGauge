@@ -35,6 +35,7 @@ from app.reporting.changes import (INLINE_STATUS_CHANGES, MAX_LISTED_RESOLVED, M
 from app.reporting.csv_report import NEW_COLUMN
 from app.reporting.html_report import generate_reports
 from app.reporting.layouts import NUMBER, PROSE, RESOURCE, STATE, TIME
+from app.reporting.scoring import overview_from_checks, scores_from_checks, summary_policies
 from app.synthetic.memory_store import memory_results_store
 from helpers import csv_sections
 
@@ -201,6 +202,9 @@ def test_compare_needs_a_previous_scan():
 
 
 def test_compare_builds_the_card():
+    # The previous summary as the old rule stored it: Security 33 (its Error counted as failing), Operations 100 (nothing
+    # counted), 7 Action Required (a policy per count). compare() reads its checks under the current rule instead
+    # (app.reporting.scoring): Security 50, Operations not assessed, 2 Action Required.
     previous = summary('job-1', {
         'IAM': entry('Action Required', 'a', 'b'),
         'Buckets': entry('Compliant'),
@@ -208,7 +212,7 @@ def test_compare_builds_the_card():
         'Disks': entry('Investigation Recommended', 'x', category=COST),
         'Retired': entry('Action Required', 'r', category=COST),
         'Old briefing': entry('Informational', category=OPERATIONS),
-    }, {SECURITY: 40.0, COST: 50.0}, overview={'action_count': 2, 'investigation_count': 1, 'compliant_count': 1, 'error_count': 1})
+    }, {SECURITY: 33.3, COST: 0.0, OPERATIONS: 100.0}, overview={'action_count': 7, 'investigation_count': 1, 'compliant_count': 1, 'error_count': 1})
     current = summary('job-2', {
         'IAM': entry('Action Required', 'b', 'c'),
         'Buckets': entry('Action Required', 'p'),
@@ -216,42 +220,82 @@ def test_compare_builds_the_card():
         'Disks': entry('Compliant', category=COST),
         'Fresh': entry('Action Required', 'n', category=COST),
         'Briefing': entry('Informational', category=OPERATIONS),
-    }, {SECURITY: 33.3, COST: 50.0, OPERATIONS: 100.0}, overview={'action_count': 4, 'investigation_count': 0, 'compliant_count': 1, 'error_count': 0},
-        total_projects=5)
+        'Backups': entry('Compliant', category=RELIABILITY),
+    }, {SECURITY: 0.0, COST: 50.0, OPERATIONS: None, RELIABILITY: 100.0},
+        overview={'action_count': 4, 'investigation_count': 0, 'compliant_count': 2, 'error_count': 0}, total_projects=5)
 
     changes = compare(previous, current, SLUGS, SECTION_IDS)
     assert (changes.previous_job_id, changes.previous_generated_at) == ('job-1', '2026-01-01 10:00 UTC')
     assert changes.population == '4 projects then · 5 now'
-    assert changes.overview_deltas == {'action_count': 2, 'investigation_count': -1, 'compliant_count': 0, 'error_count': -1}
-    assert (changes.new_total, changes.resolved_total) == (2, 2)  # IAM: +1 −1; Buckets: +1; Disks: −1; Fresh and Firewall: not compared
+    # The previous counts come from its checks: 2 Action Required, 1 Investigation Recommended, 1 Compliant, 1 Error.
+    assert changes.overview_deltas == {'action_count': 2, 'investigation_count': -1, 'compliant_count': 1, 'error_count': -1}
+    assert (changes.new_total, changes.resolved_total) == (2, 2)  # IAM: +1 −1; Buckets: +1; Disks: −1; Fresh, Backups and Firewall: not compared
     assert changes.retired_checks == ('Retired',)  # the retired briefing is not listed
-    assert set(changes.checks) == {'IAM', 'Buckets', 'Firewall', 'Disks', 'Fresh'}  # no briefings
+    assert set(changes.checks) == {'IAM', 'Buckets', 'Firewall', 'Disks', 'Fresh', 'Backups'}  # no briefings
     assert changes.checks['Fresh'] == CheckChange(note=NOT_COMPARED, note_reason='new check')
 
-    security, cost, operations = changes.categories
-    assert (security.category_name, security.section_id, security.score_display, security.previous_score_display) == (SECURITY, 'security-identity', '33', '40')
-    assert (security.delta_display, security.delta_class, security.resolved, security.new) == (f'{MINUS}7', 'down', 1, 2)
+    security, cost, operations, reliability = changes.categories
+    assert (security.category_name, security.section_id, security.score_display, security.previous_score_display) == (SECURITY, 'security-identity', '0', '50')
+    assert (security.delta_display, security.delta_class, security.resolved, security.new) == (f'{MINUS}50', 'down', 1, 2)
     # Status changes first, then the checks whose rows were not compared, each with its anchor.
     assert [(e.check_name, e.slug, e.before, e.after) for e in security.entries] == [
         ('Buckets', 'buckets', 'Compliant', 'Action Required'),
         ('Firewall', 'firewall', 'Error', 'Action Required · not compared (could not be checked then)'),
     ]
-    assert (cost.delta_display, cost.delta_class, cost.resolved, cost.new) == (DASH, 'flat', 1, 0)
+    assert (cost.score_display, cost.previous_score_display, cost.delta_display, cost.delta_class, cost.resolved, cost.new) == ('50', '0', '+50', 'up', 1, 0)
     assert [(e.check_name, e.before, e.after) for e in cost.entries] == [
         ('Disks', 'Investigation Recommended', 'Compliant'), ('Fresh', None, 'not compared (new check)')]
-    # A category the previous scan did not score has no delta.
-    assert (operations.score_display, operations.previous_score_display, operations.delta_display, operations.delta_class) == ('100', None, DASH, 'flat')
-    assert operations.entries == ()
+    # A category without a verdict on either side has no delta; the card says so in words rather than with a number.
+    assert (operations.score_display, operations.score_text, operations.previous_score_display) == ('', 'Not assessed', 'Not assessed')
+    assert (operations.delta_display, operations.delta_class, operations.entries) == (DASH, 'flat', ())
+    # A category the previous scan did not have at all has no previous score either.
+    assert (reliability.score_display, reliability.previous_score_display, reliability.delta_display, reliability.delta_class) == ('100', None, DASH, 'flat')
+    assert [(e.check_name, e.after) for e in reliability.entries] == [('Backups', 'not compared (new check)')]
 
 
 def test_score_deltas_are_whole_points():
-    """The card shows rounded scores, so the delta is the difference of what the reader sees."""
-    previous = summary('job-1', {}, {SECURITY: 66.4}, overview={'action_count': 1})
-    current = summary('job-2', {}, {SECURITY: 66.6}, overview={'action_count': 1, 'compliant_count': 2})
+    """The card shows rounded scores, so the delta is the difference of what the reader sees: 66.4 → 66.6 is 66 → 67, +1."""
+    def policies(compliant):
+        return {ORG_POLICIES_CHECK: {'category': SECURITY, 'status': 'Action Required', 'rows': 1000, 'identities': [],
+                                     'policies': {'compliant': compliant, 'total': 1000}}}
+    previous = summary('job-1', policies(664), {SECURITY: 66.4}, overview={'action_count': 1})
+    current = summary('job-2', policies(666), {SECURITY: 66.6}, overview={'action_count': 1, 'compliant_count': 2})
     changes = compare(previous, current, {}, SECTION_IDS)
     (security,) = changes.categories
     assert (security.score_display, security.previous_score_display, security.delta_display) == ('67', '66', '+1')
-    assert changes.overview_deltas == {'action_count': 0, 'compliant_count': 2}  # a field the previous summary lacks counts from zero
+    assert changes.overview_deltas == {'action_count': 0, 'compliant_count': 2}  # the previous counts come from its one check
+
+
+def test_the_previous_scan_is_read_under_the_current_rule():
+    """The user's case: a scan with a *Projects not checked* Error under Operations (one API call failed for one project)
+    scored 25% under the old rule (2 of 8, the Error counted against) and the next scan 29% (2 of 7) with nothing
+    changed. Under the rule an Error is coverage, so both scans read 29% and the delta is none — and a stored version 1
+    summary is read the same way (its ``scores`` are not used)."""
+    def operations(*names):
+        return {name: entry(status, *identities, category=OPERATIONS) for name, status, identities in names}
+    checks = [('Logging', 'Compliant', ()), ('Monitoring', 'Compliant', ()), ('Quota', 'Action Required', ('a',)), ('Budgets', 'Action Required', ('b',)),
+              ('Contacts', 'Action Required', ('c',)), ('Labels', 'Action Required', ('d',)), ('Retention', 'Action Required', ('e',))]
+    previous = summary('job-1', operations(*checks, ('Projects not checked', 'Error', ())), {OPERATIONS: 25.0})
+    previous['version'] = 1
+    current = summary('job-2', operations(*checks), {OPERATIONS: 2 / 7 * 100})
+    (ops,) = compare(previous, current, {}, SECTION_IDS).categories
+    assert (ops.score_display, ops.previous_score_display, ops.delta_display, ops.delta_class) == ('29', '29', DASH, 'flat')
+    assert ops.entries == () and compare(previous, current, {}, SECTION_IDS).retired_checks == ('Projects not checked',)
+
+
+def test_a_summary_states_the_policies_behind_the_security_score_and_version_one_is_read_the_same_way():
+    """Version 2 stores ``policies`` on the Organization Policies entry; version 1 stored the total as ``rows`` and
+    every differing policy as an identity, which gives the same numbers (app.reporting.scoring.summary_policies)."""
+    _, _, first = scan(sample_results(), 'job-1')
+    policies_entry = first['checks'][ORG_POLICIES_CHECK]
+    assert (first['version'], policies_entry['policies'], summary_policies(policies_entry)) == (2, {'compliant': 1, 'total': 4}, (1, 4))
+    version_one = {key: value for key, value in policies_entry.items() if key != 'policies'}
+    assert summary_policies(version_one) == (1, 4) and summary_policies({'rows': 3, 'identities': []}) == (3, 3) and summary_policies({}) == (0, 0)
+    # The invariant the recompute rests on: a summary's own scores and counts are what its checks give under the rule.
+    assert scores_from_checks(first['checks']) == first['scores'] and overview_from_checks(first['checks']) == first['overview']
+    checks = {'Projects not checked': entry('Error', category=COST), 'Idle Disks': entry('Compliant', category=COST), 'Keys': entry('Action Required', 'k')}
+    assert scores_from_checks(checks) == {COST: 100.0, SECURITY: 0.0} and scores_from_checks({'Note': entry('Informational')}) == {SECURITY: None}
+    assert overview_from_checks(checks) == {'action_count': 1, 'investigation_count': 0, 'compliant_count': 1, 'error_count': 1}
 
 
 @pytest.mark.parametrize('value, display, cls', [(6, '+6', 'up'), (-11, f'{MINUS}11', 'down'), (0, DASH, 'flat'), (1234, '+1,234', 'up')])
@@ -390,16 +434,17 @@ def test_a_first_scan_states_that_it_is_one():
     assert not any(marker in html for marker in (CHANGE_CHIP, ROW_NEW, LINE_NEW, RESOLVED_LIST))
     assert NEW_COLUMN not in csv_text
     # The summary the next scan compares with: statuses for every check, identities for the ones that need work.
-    assert (first['version'], first['job_id'], first['scope'], first['scope_id'], first['total_projects']) == (1, 'job-1', SCOPE, SCOPE_ID, 4)
-    assert first['overview'] == {'action_count': 6, 'investigation_count': 1, 'compliant_count': 4, 'error_count': 1}
-    assert {name: round(score) for name, score in first['scores'].items()} == {SECURITY: 29, COST: 50, RELIABILITY: 50, OPERATIONS: 0}
+    assert (first['version'], first['job_id'], first['scope'], first['scope_id'], first['total_projects']) == (SUMMARY_VERSION, 'job-1', SCOPE, SCOPE_ID, 4)
+    assert first['overview'] == {'action_count': 4, 'investigation_count': 1, 'compliant_count': 3, 'error_count': 1}  # Organization Policies counts once
+    assert {name: round(score) for name, score in first['scores'].items()} == {SECURITY: 42, COST: 50, RELIABILITY: 50, OPERATIONS: 0}  # (1 + 1/4) / 3
     assert first['checks']['Project IAM Hygiene'] == {'category': SECURITY, 'status': 'Action Required', 'rows': 2, 'identities': [
         'web-prod · user:alice@example.com · roles/owner', 'data-lake · allUsers · roles/viewer']}
     assert first['checks']['Idle Persistent Disks']['identities'] == ['data-lake · orphan-disk', 'web-prod · old-boot-disk']  # the saving is not identity
     assert first['checks']['Essential Contacts']['identities'] == ['No security contact', 'No billing contact']  # text details, one line each
     assert first['checks']['Quota Utilization (>80%)']['identities'] == ['web-prod · CPUS']  # the usage is not identity
     assert first['checks'][ORG_POLICIES_CHECK] == {'category': SECURITY, 'status': 'Action Required', 'rows': 4, 'identities': [
-        'Networking · Skip default network creation', 'Networking · Restrict VM external IPs', 'Security · Domain restricted sharing']}
+        'Networking · Skip default network creation', 'Networking · Restrict VM external IPs', 'Security · Domain restricted sharing'],
+        'policies': {'compliant': 1, 'total': 4}}
     assert {name: entry['status'] for name, entry in first['checks'].items() if 'identities' not in entry} == {
         'Open Firewall Rules': 'Error', 'Public GCS Buckets': 'Compliant', 'VM Rightsizing': 'Compliant', 'GKE Hygiene': 'Compliant',
         'Unattended Projects': 'Informational'}
@@ -414,7 +459,7 @@ def test_an_identical_second_scan_reports_nothing_changed():
     meta, rows, feet = changes_card(html)
     assert meta.startswith('compared with 20') and meta.endswith('UTC · 4 projects')
     assert {name: (row['score'], row['delta'], row['delta_class'], row['resolved'], row['new']) for name, row in rows.items()} == {
-        SECURITY: ('29%', DASH, 'flat', DASH, DASH), COST: ('50%', DASH, 'flat', DASH, DASH),
+        SECURITY: ('42%', DASH, 'flat', DASH, DASH), COST: ('50%', DASH, 'flat', DASH, DASH),
         RELIABILITY: ('50%', DASH, 'flat', DASH, DASH), OPERATIONS: ('0%', DASH, 'flat', DASH, DASH)}
     # The one thing to say: the check that errored both times could not be compared.
     assert rows[SECURITY]['status_changes'] == ['Open Firewall Rules not compared (could not be checked in either scan)']
@@ -449,7 +494,8 @@ def test_a_second_scan_marks_new_rows_and_lists_resolved_ones():
 
     assert kpi_deltas(html) == ['+1 since last scan', UNCHANGED, f'{MINUS}1 since last scan', UNCHANGED]
     _, rows, _ = changes_card(html)
-    assert (rows[SECURITY]['score'], rows[SECURITY]['delta'], rows[SECURITY]['delta_class']) == ('14%', f'\u25bc {MINUS}15', 'down')
+    # Security: no Compliant check left of two, 1 of 4 policies, the Error outside: (0 + 1/4) / 3 = 8, down from 42.
+    assert (rows[SECURITY]['score'], rows[SECURITY]['delta'], rows[SECURITY]['delta_class']) == ('8%', f'\u25bc {MINUS}34', 'down')
     assert (rows[SECURITY]['resolved'], rows[SECURITY]['new']) == ('1', '2')
     assert rows[SECURITY]['status_changes'] == ['Public GCS Buckets Compliant → Action Required',
                                                 'Open Firewall Rules not compared (could not be checked in either scan)']

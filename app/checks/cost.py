@@ -46,6 +46,19 @@ COST_RECOMMENDERS = {
     "Idle Reservations": ("google.compute.IdleResourceRecommender", "zone"),
 }
 
+# What a recommender's Compliant row says when it answered and had nothing to recommend (v15.2).
+# The other checks word their all-clear rows the same way ("No public buckets found.").
+NOTHING_FOUND = {
+    "Idle Cloud SQL Instances": "No idle Cloud SQL instances found.",
+    "Low Utilization VMs": "No low-utilization VMs found.",
+    "VM Rightsizing": "No VM rightsizing recommendations found.",
+    "Unassociated IPs": "No unassociated IP addresses found.",
+    "Idle Load Balancers": "No idle load balancers found.",
+    "Idle Persistent Disks": "No idle persistent disks found.",
+    "Underutilized Reservations": "No underutilized reservations found.",
+    "Idle Reservations": "No idle reservations found.",
+}
+
 
 def parse_recommendation(reco, project_id):
     """Safely parses a recommendation proto to extract resource name and savings."""
@@ -109,6 +122,14 @@ def run_cost_recommendations(scope_id, all_projects, active_zones, active_region
     Fetches cost-saving recommendations from the Recommender API for all projects.
     Covers idle resources, rightsizing, and underutilized reservations.
 
+    Each recommender is one check of the report. It writes an Action Required
+    record with its recommendations, or a Compliant record (``NOTHING_FOUND``)
+    when it answered in at least one project and had none - the verdict the
+    score counts (app.reporting.scoring). A recommender nobody could ask (no
+    zones or regions to query, every call failed, or every location answered
+    that it is not offered there) writes nothing: it reached no verdict, and the
+    failures are on the *Projects not checked* rows.
+
     Args:
         scope_id (str): The organization, folder, or project ID being scanned.
         all_projects (list): A list of project dictionaries.
@@ -132,6 +153,7 @@ def run_cost_recommendations(scope_id, all_projects, active_zones, active_region
     # rows say which recommenders could not be queried for the project. A disabled
     # Recommender API is reported too: the project may well have idle resources.
     skipped = NotChecked("Cost-Saving Recommendations")
+    answered = set()  # recommenders that completed a query somewhere: the ones that reached a verdict
 
     def check_project(project):
         project_id = project['projectId']
@@ -157,14 +179,17 @@ def run_cost_recommendations(scope_id, all_projects, active_zones, active_region
                     queried = True
                     parent = f"projects/{project_id}/locations/{loc}/recommenders/{rec_id}"
                     try:
+                        errors = []
                         api_call = lambda: client.list_recommendations(parent=parent)
                         context = f"'{check}' in {project_id} at {loc}"
-                        on_error = lambda error, name=check: note_failure(name, error)
+                        on_error = lambda error, name=check: (errors.append(error), note_failure(name, error))
                         for reco in call_api_with_backoff(api_call, context_message=context, on_error=on_error):
                             finding = parse_recommendation(reco, project_id)
                             if check not in findings_map:
                                 findings_map[check] = []
                             findings_map[check].append(finding)
+                        if not errors:
+                            answered.add(check)
                     except (PermissionDenied, core_exceptions.FailedPrecondition) as e:
                         logging.warning(f"Skipping '{check}' for {project_id} in {loc} due to permissions or disabled API.")
                         note_failure(check, e)
@@ -196,9 +221,14 @@ def run_cost_recommendations(scope_id, all_projects, active_zones, active_region
                 final_findings_by_check[check_name] = []
             final_findings_by_check[check_name].extend(findings)
 
-    for check_name, all_findings in final_findings_by_check.items():
+    for check_name in COST_RECOMMENDERS:
+        all_findings = final_findings_by_check.get(check_name)
         if all_findings:
             result = {"Check": check_name, "Finding": all_findings, "Status": "Action Required"}
-            # Use the check_name as the unique identifier for the filename
-            sink.write_finding(job_id, check_name.replace(" ", "_"), result)
+        elif check_name in answered:
+            result = {"Check": check_name, "Finding": [{"Status": NOTHING_FOUND[check_name]}], "Status": "Compliant"}
+        else:
+            continue  # no verdict: nothing to write
+        # Use the check_name as the unique identifier for the filename
+        sink.write_finding(job_id, check_name.replace(" ", "_"), result)
     skipped.write(sink, job_id)

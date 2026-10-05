@@ -99,12 +99,13 @@ def test_the_evidence_line_counts_checks_projects_and_incidents():
         COST: [check('Disks', 'Compliant', 'none')],
     }
     stability, security, operations, efficiency = card(results).stoplights
-    assert stability.evidence == '1 of 4 checks compliant · 3 projects with findings · 2 incidents impacted you in 90 days, 1 active'
+    # The Error is coverage, stated after the verdicts and outside the "of" (app.reporting.scoring).
+    assert stability.evidence == '1 of 3 checks compliant · 1 could not be checked · 3 projects with findings · 2 incidents impacted you in 90 days, 1 active'
     assert operations.evidence == '0 of 1 check compliant'  # text findings have no project column
     assert efficiency.evidence == '1 of 1 check compliant'
-    assert security.evidence == '0 of 0 checks compliant'
+    assert security.evidence == 'no check reached a verdict'
     no_incidents = card({RELIABILITY: [check('Service Health Incidents', 'Informational', [])]}).stoplights[0]
-    assert no_incidents.evidence == '0 of 0 checks compliant'  # an empty briefing is text details, so no tally
+    assert no_incidents.evidence == 'no check reached a verdict'  # an empty briefing is text details, so no tally
 
 
 def test_the_evidence_line_counts_a_project_once_across_checks():
@@ -114,8 +115,8 @@ def test_the_evidence_line_counts_a_project_once_across_checks():
 
 def test_organization_policies_count_towards_security():
     light = card({'Organization Policies': (samples.BEST_PRACTICES, samples.CURRENT_POLICIES)}).stoplights[1]
-    assert light.evidence == '1 of 4 checks compliant'  # samples: one of the four policies matches
-    assert light.state == 'At risk'
+    assert light.evidence == '1 of 4 policies as recommended'  # samples: one of the four policies matches; one check worth 1/4
+    assert (light.score_display, light.state) == ('25', 'At risk')
 
 
 def test_deltas_come_from_the_comparison_and_are_absent_on_a_first_scan():
@@ -242,13 +243,17 @@ def test_the_page_has_a_sidebar_entry_under_overview_and_comes_before_the_catego
 def test_the_lamp_and_the_pill_say_the_same_thing_and_the_score_links_to_the_page():
     html = generate_html_report(SCOPE, SCOPE_ID, 'job-42', total_projects=4, **{COST: [check('Disks', 'Compliant', 'none')]})
     page = section(html)
-    efficiency = re.search(r'<li class="stoplight">\s*<span class="lamp lamp-(\w+)" aria-hidden="true"><i></i><i></i><i></i></span>.*?'
+    items = re.findall(r'<li class="stoplight">(.*?)</li>', page, re.S)
+    efficiency = re.search(r'^\s*<span class="lamp lamp-(\w+)" aria-hidden="true"><i></i><i></i><i></i></span>.*?'
                            r'<a href="#cost-optimization" onclick="showSection\(\'cost-optimization\'\)">Efficiency</a>'
                            r'<span class="stoplight-category">Cost Optimization</span>.*?<span class="score">(\d+)%</span></div>\s*'
-                           r'<span class="pill pill-(\w+)">([^<]+)</span>', page, re.S)
-    assert efficiency.groups() == ('high', '100', 'high', 'Healthy')
-    assert re.findall(r'<span class="pill pill-(\w+)">(Healthy|Needs attention|At risk)</span>', page) == [
-        ('high', 'Healthy'), ('high', 'Healthy'), ('high', 'Healthy'), ('high', 'Healthy')]  # empty categories score 100
+                           r'<span class="pill pill-(\w+)">([^<]+)</span>', items[3], re.S)
+    assert len(items) == 4 and efficiency.groups() == ('high', '100', 'high', 'Healthy')
+    # The three categories without a check are not assessed: no lamp lit, a dash where the score goes, and the pill says why.
+    assert re.findall(r'<span class="pill pill-(\w+)">(Healthy|Needs attention|At risk|Not assessed)</span>', page) == [
+        ('none', 'Not assessed'), ('none', 'Not assessed'), ('none', 'Not assessed'), ('high', 'Healthy')]
+    assert page.count('<span class="lamp lamp-none" aria-hidden="true">') == 3
+    assert page.count('<div class="stoplight-score"><span class="score score-none">\u2014</span></div>') == 3
     assert 'First scan of this organization — changes appear from the next scan.' in page
 
 
@@ -368,7 +373,9 @@ def test_the_markdown_copy_carries_the_page():
     assert lines[0] == '# CloudGauge scorecard — Organization 123456789'
     assert lines[2] == f'Generated {scorecard.generated_at} · compared with {scorecard.since.previous_at} · 4 of 4 projects'
     assert lines[4] == '| Stoplight | Category | Score | Since last scan | State | Evidence |'
-    assert '| Security | Security & Identity | 43% | +14 | At risk | 3 of 7 checks compliant |' in lines
+    # Second scan: IAM Hygiene and Buckets Compliant, Firewall in Error, 1 of 4 policies: (2 + 1/4) / 3 = 75; the first was (1 + 1/4) / 3 = 42.
+    assert ('| Security | Security & Identity | 75% | +33 | Needs attention | '
+            '2 of 2 checks compliant · 1 of 4 policies as recommended · 1 could not be checked |') in lines
     assert 'Since the previous scan' in text and '0 new findings · 2 resolved · status changes: Project IAM Hygiene Action Required → Compliant.' in text
     assert '| # | Check | Category | Status | Projects | Findings | Fix in report | Since last scan |' in lines
     assert '| 1 | Quota Utilization (>80%) | Operations | Action Required | 1 | 1 | — | — |' in lines

@@ -21,8 +21,11 @@ templates in ``app/templates/report/`` only lay this data out.
 
 Values that end up in the page are formatted here with the same f-string
 expressions the legacy code used (``f"{value}"``, ``f"{score:.0f}"``), so the
-report shows the same findings, statuses, and scores as the legacy one (the
-tests compare them with ``helpers.report_facts``).
+report shows the same findings and statuses as the legacy one (the tests
+compare them with ``helpers.report_facts``). The scores are the one deliberate
+divergence: ``app.reporting.scoring`` (v15.2) counts verdicts only, where the
+legacy rule counted an Error as a failure and every organization policy as a
+check.
 
 Layout for large organizations (plan item 6b). A scan of thousands of
 projects can give one check tens of thousands of rows, so the report never
@@ -34,9 +37,9 @@ groups by project (hundreds of groups would bury the findings) and instead:
   (the CSV always has every row) and says so under the table;
 - shows the first ``ROWS_PER_PAGE`` rows and lets the page's script reveal the
   rest, sort columns, and filter rows by project ID or any text;
-- gives every category a page: one whose checks found nothing says so ("No
-  findings in this category — all Cost Optimization checks were compliant")
-  instead of being left out, which made its sidebar link open a blank page;
+- gives every category a page: one none of whose checks reported a result says
+  so ("Not assessed — no Cost Optimization check reported a result in this
+  scan") instead of being left out, which made its sidebar link open a blank page;
 - shows, on each category page, the projects its checks could not cover as one
   "Projects not checked" item (``app.checks.not_checked``): an Error-status
   table of project, skipped check, and reason, so a check that skipped projects
@@ -51,6 +54,7 @@ from markupsafe import Markup
 from app.reporting.changes import (IDENTITY_SEPARATOR, ORG_POLICIES_CHECK, RowMatcher, compare, identities_for, summarize,
                                    text_identities)
 from app.reporting.layouts import lay_out
+from app.reporting.scoring import NOT_ASSESSED, NOT_ASSESSED_TEXT, Tally, tally_statuses
 
 # The report's sections, in display order. The sidebar in report.html links to them.
 REPORT_CATEGORY_ORDER = ("Security & Identity", "Cost Optimization", "Reliability & Resilience", "Operational Excellence & Observability")
@@ -68,6 +72,8 @@ STATUS_STYLES = {
 }
 # Checks with these statuses get a placeholder for a Gemini remediation suggestion.
 ACTIONABLE_STATUSES = ["Action Required", "Investigation Recommended"]
+# Checks that need a human: expanded on load and counted by the sidebar. Not the scoring set — an Error is
+# coverage, not a verdict (app.reporting.scoring).
 FAILING_STATUSES = ["Action Required", "Investigation Recommended", "Error"]
 
 # The most rows of one check's details included in the HTML report. At ~200 bytes a
@@ -180,9 +186,9 @@ class OrgPolicySummary:
 class Section:
     title: str
     section_id: str
-    score: float
-    score_display: str
-    score_class: str
+    score: float | None  # None: not assessed (app.reporting.scoring)
+    score_display: str  # "55"; empty when not assessed
+    score_class: str  # high / medium / low / none
     org_policies: OrgPolicySummary | None
     checks: tuple
     footer: str | None  # "cost", "security", or None (also None when the section has nothing to list)
@@ -190,23 +196,63 @@ class Section:
     # Shown instead of the checks list when the category has no checks and no org policies.
     empty_message: str | None = None
     nav_title: str = ""  # the sidebar's shorter name for the section
-    worst_status_class: str = "compliant"  # the most severe status among its items (the sidebar's dot)
+    worst_status_class: str = "compliant"  # the most severe status among its items (the sidebar's dot); "none" when it has no item
     attention_count: int = 0  # items that need a human: failing checks, plus Organization Policies when not all compliant
+
+    @property
+    def assessed(self):
+        return self.score is not None
+
+    @property
+    def score_text(self):
+        """The header pill: ``"55% compliant"`` or ``"Not assessed"``."""
+        return f"{self.score_display}% compliant" if self.assessed else NOT_ASSESSED_TEXT
 
 
 @dataclass(frozen=True)
 class ScoreRow:
+    """One line of the Overview's Review scores: the category, its score and the facts behind it (``tally``)."""
     category_name: str
     section_id: str
-    score: float
-    score_display: str
-    score_class: str
-    pass_count: int = 0  # compliant checks (and policies) behind the score...
-    fail_count: int = 0  # ...and failing ones; the Review scores list shows "18 of 21"
+    tally: Tally
 
     @property
-    def scored_count(self):
-        return self.pass_count + self.fail_count
+    def score(self):
+        return self.tally.score  # None when not assessed
+
+    @property
+    def score_display(self):
+        return self.tally.score_display
+
+    @property
+    def score_class(self):
+        return self.tally.score_class
+
+    @property
+    def assessed(self):
+        return self.tally.assessed
+
+    @property
+    def score_text(self):
+        """``"55%"`` or ``"Not assessed"``: what stands where the number would."""
+        return f"{self.score_display}%" if self.assessed else NOT_ASSESSED_TEXT
+
+    @property
+    def evidence(self):
+        """``"7 of 12 checks compliant · 18 of 128 policies as recommended · 1 could not be checked"`` (app.reporting.scoring.Tally.evidence)."""
+        return self.tally.evidence
+
+    @property
+    def pass_count(self):
+        return self.tally.compliant
+
+    @property
+    def fail_count(self):
+        return self.tally.failing
+
+    @property
+    def not_checked(self):
+        return self.tally.not_checked
 
 
 @dataclass(frozen=True)
@@ -331,17 +377,14 @@ def generated_now():
 
 
 def empty_category_message(category_name):
-    """What a category's page says when none of its checks reported anything.
+    """What a category's page says when none of its checks reported a result.
 
-    A check that fails writes an Error result (app.checks.runner, app.fanout), so a
-    category with no results at all is one whose checks all ran and found nothing;
-    its score is 100%, and the page says so rather than showing an empty list.
+    A check that finds nothing writes a Compliant row and one that fails writes an
+    Error result (app.checks.runner, app.fanout), so a category with no results at
+    all is one none of whose checks reported: it is not assessed
+    (app.reporting.scoring), and the page says so rather than showing an empty list.
     """
-    return f"No findings in this category — all {category_name} checks were compliant."
-
-
-def score_class_for(score):
-    return "high" if score > 90 else "medium" if score > 70 else "low"
+    return f"{NOT_ASSESSED_TEXT} — no {category_name} check reported a result in this scan."
 
 
 def display_rank(status):
@@ -529,31 +572,31 @@ def build_report_context(scope, scope_id, job_id, all_results, banner=None, cove
     if all_results.get(ORG_POLICIES_KEY):
         org_policy_summary = build_org_policy_summary(all_results[ORG_POLICIES_KEY])
 
-    category_scores = {}
-    category_counts = {}  # (pass, fail) behind each score
+    # Each category's tally (app.reporting.scoring): verdicts in, Errors next to the score, Organization
+    # Policies one check with partial credit.
+    tallies = {}
     all_other_findings = []
     for category_name in REPORT_CATEGORY_ORDER:
         findings = all_results.get(category_name, [])
         all_other_findings.extend(findings)
         grouped_data = group_findings(findings)
-        pass_count = sum(1 for g in grouped_data.values() if g.get('Status') == 'Compliant')
-        fail_count = sum(1 for g in grouped_data.values() if g.get('Status') in FAILING_STATUSES)
+        policies = None
         if category_name == "Security & Identity" and org_policy_summary:
-            pass_count += org_policy_summary.compliant
-            fail_count += (org_policy_summary.total - org_policy_summary.compliant)
-        total_for_score = pass_count + fail_count
-        score = (pass_count / total_for_score) * 100 if total_for_score > 0 else 100
-        category_scores[category_name] = score
-        category_counts[category_name] = (pass_count, fail_count)
+            policies = (org_policy_summary.compliant, org_policy_summary.total)
+        tallies[category_name] = tally_statuses([g.get('Status') for g in grouped_data.values()], policies)
 
+    # The Overview's four counts: one check, one count; Organization Policies once, by its own status
+    # (the sidebar and the scan summary count it the same way).
     grouped_all_findings = group_findings(all_other_findings)
     action_count = sum(1 for g in grouped_all_findings.values() if g.get('Status') == 'Action Required')
     investigation_count = sum(1 for g in grouped_all_findings.values() if g.get('Status') == 'Investigation Recommended')
     compliant_count = sum(1 for g in grouped_all_findings.values() if g.get('Status') == 'Compliant')
     error_count = sum(1 for g in grouped_all_findings.values() if g.get('Status') == 'Error')
     if org_policy_summary:
-        compliant_count += org_policy_summary.compliant
-        action_count += (org_policy_summary.total - org_policy_summary.compliant)
+        if org_policy_summary.compliant < org_policy_summary.total:
+            action_count += 1
+        else:
+            compliant_count += 1
 
     # --- BUILD EACH HIDDEN CATEGORY SECTION ---
     # Checks are listed by severity, then name. Remediation placeholders are numbered
@@ -591,33 +634,32 @@ def build_report_context(scope, scope_id, job_id, all_results, banner=None, cove
             footer = "cost"
         elif has_content and category_name == "Security & Identity" and scope == 'organization':
             footer = "security"
-        score = category_scores[category_name]
+        tally = tallies[category_name]
         # The sidebar's dot and count: the most severe status among the items, and how many need a human.
+        # A category with no item at all is not assessed (v15.2): its dot is the fourth state's zinc.
         item_statuses = [check.status for check in checks]
         if org_content_for_section is not None:
             item_statuses.append("Compliant" if org_content_for_section.status_class == "compliant" else "Action Required")
-        worst = min(item_statuses, key=display_rank, default="Compliant")
+        worst = min(item_statuses, key=display_rank, default=None)
+        worst_class = NOT_ASSESSED if worst is None else STATUS_STYLES.get(worst, STATUS_STYLES["Informational"])["class"]
         sections.append(Section(
             title=category_name,
             section_id=section_id_for(category_name),
-            score=score,
-            score_display=f"{score:.0f}",
-            score_class=score_class_for(score),
+            score=tally.score,
+            score_display=tally.score_display,
+            score_class=tally.score_class,
             org_policies=org_content_for_section,
             checks=tuple(checks),
             footer=footer,
             status_counts=count_statuses(checks),
             empty_message=None if has_content else empty_category_message(category_name),
             nav_title=NAV_TITLES.get(category_name, category_name),
-            worst_status_class=STATUS_STYLES.get(worst, STATUS_STYLES["Informational"])["class"],
+            worst_status_class=worst_class,
             attention_count=sum(1 for s in item_statuses if s in FAILING_STATUSES),
         ))
 
     # --- THE SCORE SUMMARY TABLE ---
-    score_summary = tuple(
-        ScoreRow(category_name, section_id_for(category_name), score, f"{score:.0f}", score_class_for(score), *category_counts[category_name])
-        for category_name, score in category_scores.items()
-    )
+    score_summary = tuple(ScoreRow(category_name, section_id_for(category_name), tally) for category_name, tally in tallies.items())
 
     generated_at, generated_ts = generated_now()
     context = ReportContext(

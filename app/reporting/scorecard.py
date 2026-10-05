@@ -26,9 +26,10 @@ Markdown copy. It prints on one page.
 Everything on it is sourced from the context, so the page states nothing the
 rest of the report cannot back: scores and states from the sections
 (``Section.score_class`` - above 90 *Healthy*, above 70 *Needs attention*,
-else *At risk*, the bands the score bars already use), deltas and status
-changes from ``app.reporting.changes``, projects and rows from the check
-details, fixes from the remediation blocks.
+else *At risk*, the bands the score bars already use, and *Not assessed* for
+a category none of whose checks reached a verdict: lamp unlit, no number),
+deltas and status changes from ``app.reporting.changes``, projects and rows
+from the check details, fixes from the remediation blocks.
 
 The stoplights follow the playbook's pillars; each one sits over one report
 category. Velocity & Innovation has no checks yet, so it has no stoplight.
@@ -40,13 +41,14 @@ from dataclasses import dataclass
 from app.checks.categories import INCIDENT_STATE
 from app.reporting.changes import ORG_POLICIES_CHECK
 from app.reporting.context import ACTIONABLE_STATUSES, display_rank
+from app.reporting.scoring import NOT_ASSESSED, NOT_ASSESSED_TEXT, plural
 
 # The stoplights, in the order the page shows them, each over one report category.
 PILLARS = (("Stability", "Reliability & Resilience"), ("Security", "Security & Identity"),
            ("Operations", "Operational Excellence & Observability"), ("Efficiency", "Cost Optimization"))
 STOPLIGHT_OF = {category: name for name, category in PILLARS}
-# A stoplight's state, by the score band of its category (app.reporting.context.score_class_for).
-STATE = {"high": "Healthy", "medium": "Needs attention", "low": "At risk"}
+# A stoplight's state, by the score band of its category (app.reporting.scoring.score_class_for).
+STATE = {"high": "Healthy", "medium": "Needs attention", "low": "At risk", NOT_ASSESSED: NOT_ASSESSED_TEXT}
 # Failing checks listed under Top actions; the rest are counted ("N more failing checks on the category pages").
 TOP_ACTIONS = 10
 # Status changes named on the since line before "and N more" (the Overview's Changes card has them all).
@@ -56,6 +58,7 @@ INCIDENTS_CHECK = "Service Health Incidents"
 # The action-plan CSV: the ranked actions, then two blank columns for the owner to fill in.
 ACTION_PLAN_COLUMNS = ("Priority", "Check", "Category", "Status", "Projects affected", "Findings", "Fix in report", "Owner", "Target date")
 FIX_IN_REPORT = "yes"
+DASH = "\u2014"
 
 
 @dataclass(frozen=True)
@@ -64,12 +67,17 @@ class Stoplight:
     name: str  # "Stability"
     category: str  # the report category it sits over
     section_id: str
-    score_display: str  # "80"
-    score_class: str  # high / medium / low: the pill's and the lamp's class
-    state: str  # Healthy / Needs attention / At risk
-    delta_display: str | None  # "+80", "−6", "—"; None on a first scan
+    score_display: str  # "80"; empty when the category is not assessed
+    score_class: str  # high / medium / low / none: the pill's and the lamp's class
+    state: str  # Healthy / Needs attention / At risk / Not assessed
+    delta_display: str | None  # "+80", "−6", "—"; None on a first scan or when there is no score to move
     delta_class: str | None  # up / down / flat
     evidence: str  # "8 of 10 checks compliant · 1 project with findings · 4 incidents impacted you in 90 days, 0 active"
+
+    @property
+    def score_text(self):
+        """``"80%"``, or a dash where a category without a verdict would show a number (the pill says why)."""
+        return f"{self.score_display}%" if self.score_display else DASH
 
 
 @dataclass(frozen=True)
@@ -149,10 +157,6 @@ def since_text(change):
     return " · ".join(bits)
 
 
-def plural(count, noun):
-    return f"{count:,} {noun}{'' if count == 1 else 's'}"
-
-
 def incidents_text(section):
     """The Stability line's incident tally, from the Service Health briefing (None when the scope has no briefing)."""
     item = next((check for check in section.checks if check.check_name == INCIDENTS_CHECK), None)
@@ -175,7 +179,7 @@ def build_stoplights(context):
     for name, category in PILLARS:
         section, row = sections[category], score_rows[category]
         failing = [item for item in section.checks if item.status in ACTIONABLE_STATUSES]
-        evidence = [f"{row.pass_count:,} of {plural(row.pass_count + row.fail_count, 'check')} compliant"]
+        evidence = [row.evidence]  # "7 of 12 checks compliant · 18 of 128 policies as recommended · 1 could not be checked"
         affected = projects_affected(failing)
         if affected:
             evidence.append(f"{plural(affected, 'project')} with findings")
@@ -183,10 +187,11 @@ def build_stoplights(context):
         if incidents:
             evidence.append(incidents)
         change = category_changes.get(category)
+        compared = change is not None and section.assessed
         stoplights.append(Stoplight(
             name=name, category=category, section_id=section.section_id,
             score_display=section.score_display, score_class=section.score_class, state=STATE[section.score_class],
-            delta_display=change.delta_display if change else None, delta_class=change.delta_class if change else None,
+            delta_display=change.delta_display if compared else None, delta_class=change.delta_class if compared else None,
             evidence=" · ".join(evidence),
         ))
     return tuple(stoplights)
@@ -292,7 +297,7 @@ def markdown(card):
     columns = ["Stoplight", "Category", "Score"] + (["Since last scan"] if since else []) + ["State", "Evidence"]
     lines += [meta, "", "| " + " | ".join(columns) + " |", "|---|---|---:|" + ("---:|" if since else "") + "---|---|"]
     for light in card.stoplights:
-        cells = [light.name, light.category, f"{light.score_display}%"] + ([light.delta_display or "—"] if since else []) + [light.state, light.evidence]
+        cells = [light.name, light.category, light.score_text] + ([light.delta_display or DASH] if since else []) + [light.state, light.evidence]
         lines.append("| " + " | ".join(cells) + " |")
     lines.append("")
     if since:

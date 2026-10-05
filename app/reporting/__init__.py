@@ -14,6 +14,7 @@
 """Report generation.
 
 - ``context``      view-model: groups findings, evaluates org policies, scores sections
+- ``scoring``      the score rule (v15.2): verdicts only, Organization Policies one check, *Not assessed*
 - ``html_report``  renders the self-contained HTML report (``templates/report/``)
 - ``csv_report``   the CSV report
 

@@ -34,7 +34,7 @@ import samples
 from app.reporting.context import MAX_ROWS_PER_CHECK, ROWS_PER_PAGE
 from app.reporting.csv_report import generate_csv_data
 from app.reporting.html_report import generate_html_report, report_environment
-from helpers import assert_same_csv_tables, csv_sections, csv_tables, report_facts
+from helpers import assert_same_csv_tables, comparable, csv_sections, csv_tables, report_facts
 
 SECURITY, COST, RELIABILITY, OPERATIONS = ('Security & Identity', 'Cost Optimization', 'Reliability & Resilience',
                                            'Operational Excellence & Observability')
@@ -75,12 +75,12 @@ SCENARIOS = {
          'Finding': [{'Size (GB)': 500, 'Monthly Savings': 12.5, 'Snapshot': None, 'Attached': False, 'Ratio': 1 / 3}]}]},
     'multiline text': {OPERATIONS: [
         {'Check': 'Quota Utilization (>80%)', 'Status': 'Action Required', 'Finding': ['CPUS: 92%\nin us-central1', 'GPUS: 81%']}]},
-    'score boundaries': {  # 90% is "medium", 90.9% is "high", 70% is "low", 71.4% is "medium"
+    'score boundaries': {  # 90% is "medium", 90.9% is "high", 70% is "low", 71.4% is "medium"; Errors sit outside the score (v15.2)
         SECURITY: checks('Compliant', 9, 'Security') + checks('Action Required', 1, 'Security'),
         COST: checks('Compliant', 10, 'Cost') + checks('Investigation Recommended', 1, 'Cost'),
-        RELIABILITY: checks('Compliant', 7, 'Reliability') + checks('Error', 3, 'Reliability'),
+        RELIABILITY: checks('Compliant', 7, 'Reliability') + checks('Action Required', 3, 'Reliability'),
         OPERATIONS: checks('Compliant', 5, 'Operations') + checks('Action Required', 2, 'Operations')
-        + checks('Informational', 4, 'Operations'),
+        + checks('Informational', 4, 'Operations') + checks('Error', 3, 'Operations'),
     },
     'unknown category': {'Uncategorized': [{'Check': 'Something else', 'Status': 'Action Required', 'Finding': 'ignored'}]},
 }
@@ -94,9 +94,10 @@ def legacy_reports(legacy):
 
 @pytest.mark.parametrize('name', SCENARIOS)
 def test_html_report_matches_legacy(name, legacy_reports):
+    """Same findings, statuses and details as the legacy report; the scores and counts diverged by design (helpers.SCORED_FACTS)."""
     results = SCENARIOS[name]
     html = generate_html_report('organization', '123456789', 'job-42', **results)
-    assert report_facts(html) == report_facts(legacy_reports.generate_html_report('organization', '123456789', 'job-42', **results))
+    assert comparable(report_facts(html)) == comparable(report_facts(legacy_reports.generate_html_report('organization', '123456789', 'job-42', **results)))
 
 
 @pytest.mark.parametrize('scope, scope_id', [('organization', '123456789'), ('folder', '42'), ('project', 'web-prod')])
@@ -104,7 +105,7 @@ def test_html_report_matches_legacy_for_each_scope(scope, scope_id, legacy_repor
     """The title and header use the scope; the Security section's console link is for organizations only."""
     results = SCENARIOS['sample scan']
     html = generate_html_report(scope, scope_id, 'job-42', **results)
-    assert report_facts(html) == report_facts(legacy_reports.generate_html_report(scope, scope_id, 'job-42', **results))
+    assert comparable(report_facts(html)) == comparable(report_facts(legacy_reports.generate_html_report(scope, scope_id, 'job-42', **results)))
     assert f'<title>CloudGauge Report: {scope.capitalize()} {scope_id}</title>' in html
     assert ('active-assist/list/security/recommendations?organizationId=' in html) is (scope == 'organization')
 
@@ -158,10 +159,11 @@ def test_csv_tables_come_in_the_page_order_whatever_the_arrival_order():
     sections = csv_sections(csv_data)
     assert csv_check_order(sections[OPERATIONS]) == (
         [f'Operations Action Required {i}' for i in range(2)]
+        + [f'Operations Error {i}' for i in range(3)]
         + [f'Operations Informational {i}' for i in range(4)]
         + [f'Operations Compliant {i}' for i in range(5)])
     assert csv_check_order(sections[RELIABILITY]) == (
-        [f'Reliability Error {i}' for i in range(3)] + [f'Reliability Compliant {i}' for i in range(7)])
+        [f'Reliability Action Required {i}' for i in range(3)] + [f'Reliability Compliant {i}' for i in range(7)])
     # The same order as the page, for every category.
     html = generate_html_report('organization', '123456789', 'job-42', **results)
     page_order = [unescape(name) for name in re.findall(r'<span class="check-title"><strong>(.*?)</strong>', html)]
@@ -197,8 +199,12 @@ def test_report_scores_and_overview():
     assert scores == [('medium', '90'), ('high', '91'), ('low', '70'), ('medium', '71')]
     # The bar next to each score is as wide as the score, in its colour.
     assert re.findall(r'<span class="bar-fill score-(\w+)" style="width: (\d+)%">', html) == scores
+    # The facts behind each score, in words; Operations' three Errors are coverage, outside the 71%.
+    assert re.findall(r'<td class="score-of">(.*?)</td>', html) == [
+        '9 of 10 checks compliant', '10 of 11 checks compliant', '7 of 10 checks compliant',
+        '5 of 7 checks compliant · 3 could not be checked']
     counts = dict(re.findall(r'<h3>([\w ]+)</h3><p class="count">(\d+)</p>', html))
-    assert counts == {'Action Required': '3', 'Investigation Recommended': '1', 'Compliant': '31', 'Errors': '3'}
+    assert counts == {'Action Required': '6', 'Investigation Recommended': '1', 'Compliant': '31', 'Errors': '3'}
 
 
 def test_org_policies_count_toward_security():
@@ -206,7 +212,9 @@ def test_org_policies_count_toward_security():
     assert ('<span class="check-title"><strong>Organization Policies</strong>'
             '<span class="check-summary">3 policies differ from the recommended value</span></span>') in html
     assert '<span class="status-badge pill pill-action-required">1/4 Compliant</span>' in html
-    assert '<span class="score-pill pill pill-low">25% compliant</span>' in html  # 1 compliant out of 4 policies
+    # One check worth 1/4 of a pass (v15.2): 25%, and the Review scores row counts the policies, not checks.
+    assert '<span class="score-pill pill pill-low">25% compliant</span>' in html
+    assert '<td class="score-of">1 of 4 policies as recommended</td>' in html
 
 
 def test_remediation_placeholders_are_numbered_in_display_order():
@@ -385,7 +393,7 @@ def test_every_category_has_a_page():
 
 
 def test_a_category_without_results_says_so():
-    """Instead of an empty list (or no page), the page says no check found anything; the badge agrees (100%)."""
+    """Instead of an empty list (or no page), the page says the category is not assessed; the badge agrees (v15.2)."""
     html = generate_html_report('organization', '123456789', 'job-42', **SCENARIOS['mixed detail types'])  # one cost check only
     pages = category_pages(html)
     cost = pages['cost-optimization']
@@ -393,8 +401,8 @@ def test_a_category_without_results_says_so():
     for section_id, title in (('security-identity', 'Security &amp; Identity'), ('reliability-resilience', 'Reliability &amp; Resilience'),
                               ('operational-excellence-observability', 'Operational Excellence &amp; Observability')):
         page = pages[section_id]
-        assert f'<div class="empty-state" role="note"><span class="dot dot-compliant"></span>No findings in this category — all {title} checks were compliant.</div>' in page
-        assert '<span class="score-pill pill pill-high">100% compliant</span>' in page
+        assert f'<div class="empty-state" role="note"><span class="dot dot-none"></span>Not assessed — no {title} check reported a result in this scan.</div>' in page
+        assert '<span class="score-pill pill pill-none">Not assessed</span>' in page
         assert 'checks-list' not in page and 'section-counts' not in page and 'filter-empty' not in page
         assert 'section-footer' not in page  # no "Get detailed insights" / console link without findings
     assert 'active-assist/list/security/recommendations' not in html
@@ -406,13 +414,14 @@ def test_a_category_without_results_says_so():
     # Org policies alone give Security a list; the other three are empty.
     pages = category_pages(generate_html_report('organization', '123456789', 'job-42', **SCENARIOS['org policies only']))
     assert '<strong>Organization Policies</strong>' in pages['security-identity'] and 'empty-state" role="note"' not in pages['security-identity']
-    assert sum('No findings in this category' in page for page in pages.values()) == 3
+    assert sum('Not assessed — no' in page for page in pages.values()) == 3
 
 
 def test_projects_a_check_could_not_cover_are_one_error_item_per_category():
     """The "Projects not checked" records (app.checks.not_checked) of a category merge into one Error item: after
-    what needs work, before the compliant checks, with a project | skipped check | reason table that counts
-    against the score. A page with nothing but skips is not "all compliant"."""
+    what needs work, before the compliant checks, with a project | skipped check | reason table. The item is
+    coverage, stated next to the score rather than counted in it (v15.2); a page with nothing but skips is not
+    assessed, not "all compliant"."""
     def not_checked(category, rows):
         return {'Check': 'Projects not checked', 'Category': category, 'Status': 'Error', 'Finding': rows}
 
@@ -437,10 +446,12 @@ def test_projects_a_check_could_not_cover_are_one_error_item_per_category():
             and ('<tr><td class="nowrap code"><code class="chip">p3</code></td><td class="prose">VM External IPs</td>'
                  '<td class="prose">503 Policy checks are unavailable</td></tr>') in security)
     assert 'remediation-placeholder' not in cost  # an Error item gets no Gemini remediation box
-    # The score counts the item as one failing check: Security 1 of 3, Cost 0 of 1.
-    assert '<span class="score-pill pill pill-low">33% compliant</span>' in security and '<span class="score-pill pill pill-low">0% compliant</span>' in cost
-    assert 'No findings in this category' not in cost and 'class="checks-list"' in cost
-    assert html.count('No findings in this category') == 2  # Reliability and Operations, which have no records at all
+    # The item is outside the score and named next to it: Security 1 of 2 checks, Cost nothing to score.
+    assert '<span class="score-pill pill pill-low">50% compliant</span>' in security and '<span class="score-pill pill pill-none">Not assessed</span>' in cost
+    assert re.findall(r'<td class="score-of">(.*?)</td>', html)[:2] == [
+        '1 of 2 checks compliant · 1 could not be checked', 'no check reached a verdict · 1 could not be checked']
+    assert 'Not assessed — no' not in cost and 'class="checks-list"' in cost
+    assert html.count('Not assessed — no') == 2  # Reliability and Operations, which have no records at all
     csv = generate_csv_data(results)
     assert 'Check,Status,Project,Skipped check,Reason\r\n' in csv
     assert csv.count('Projects not checked,Error,') == 4 and 'Projects not checked,Error,p3,VM External IPs,503 Policy checks are unavailable' in csv
@@ -458,16 +469,19 @@ def test_a_page_whose_checks_the_filter_hides_says_so():
     assert '.empty-state.filter-empty { color: var(--muted); font-size: 13px; }' in html
     # A category without results has no list to filter, so no note either.
     html = generate_html_report('organization', '123456789', 'job-42', **SCENARIOS['no results'])
-    assert 'class="empty-state filter-empty"' not in html and html.count('No findings in this category') == 4
+    assert 'class="empty-state filter-empty"' not in html and html.count('Not assessed — no') == 4
 
 
 def test_parity_helper_ignores_the_pages_the_legacy_report_left_out(legacy_reports):
-    """report_facts compares the pages that list checks; the new report's empty pages are not a difference."""
+    """report_facts compares the pages that list checks; the new report's empty pages are not a difference,
+    and neither are the scores (SCORED_FACTS): the legacy report gave an empty category 100%, the new one no score."""
     results = SCENARIOS['mixed detail types']
     facts = report_facts(generate_html_report('organization', '123456789', 'job-42', **results))
     assert facts['sections'] == ['cost-optimization'] and facts['section_scores'] == [('cost-optimization', 'low', '0')]
-    assert facts['scores'] == [('high', '100'), ('low', '0'), ('high', '100'), ('high', '100')]  # the Review Scores table
-    assert facts == report_facts(legacy_reports.generate_html_report('organization', '123456789', 'job-42', **results))
+    assert facts['scores'] == [('low', '0')]  # the Review scores table: only Cost has a number, the other three are not assessed
+    legacy_facts = report_facts(legacy_reports.generate_html_report('organization', '123456789', 'job-42', **results))
+    assert legacy_facts['scores'] == [('high', '100'), ('low', '0'), ('high', '100'), ('high', '100')]
+    assert facts != legacy_facts and comparable(facts) == comparable(legacy_facts)
 
 
 def test_finding_text_is_escaped():

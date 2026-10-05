@@ -201,7 +201,7 @@
     <section class="card">
         <div class="section-header">
             <h2>{{ section.title }}</h2>
-            <span class="score-pill pill pill-{{ section.score_class }}">{{ section.score_display }}% compliant</span>
+            <span class="score-pill pill pill-{{ section.score_class }}">{{ section.score_text }}</span>
         </div>
         {% if section.status_counts %}
         <div class="section-counts">
@@ -211,7 +211,7 @@
         </div>
         {% endif %}
         {% if section.empty_message %}
-        <div class="empty-state" role="note"><span class="dot dot-compliant"></span>{{ section.empty_message }}</div>
+        <div class="empty-state" role="note"><span class="dot dot-none"></span>{{ section.empty_message }}</div>
         {% else %}
         <ul class="checks-list">
             {% if section.org_policies is not none %}

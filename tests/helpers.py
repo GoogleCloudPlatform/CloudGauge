@@ -181,14 +181,28 @@ def report_facts(html):
         'title': re.search(r'<title>(.*?)</title>', html).group(1),
         'header': tuple(html_unescape(value) for value in header.groups()),
         'overview': re.findall(r'<h3>([\w ]+)</h3><p class="count">(\d+)</p>', html),
-        # The Review Scores table: legacy's score badge, or the new report's score next to its bar.
+        # The Review Scores table: legacy's score badge, or the new report's score next to its bar (a category the
+        # new report leaves not assessed has no number and is not listed).
         'scores': re.findall(r'class="(?:score-badge|score) score-(\w+)">(\d+)%</span></td>', html),
         'sections': [sid for sid, _ in listed],
-        'section_scores': [(sid, *re.search(r'(?:score-badge score|score-pill pill pill)-(\w+)">(\d+)% [Cc]ompliant', body).groups())
+        # (section id, band, score): the score is None for a page whose pill says "Not assessed".
+        'section_scores': [(sid, *re.search(r'(?:score-badge score|score-pill pill pill)-(\w+)">(?:(\d+)% [Cc]ompliant|Not assessed)', body).groups())
                            for sid, body in listed],
         'items': sorted(items),
         'console_link': 'active-assist/list/security/recommendations?organizationId=' in html,
     }
+
+
+# The facts the new report states differently from the legacy one by design (v15.2, app.reporting.scoring): an
+# Error is coverage rather than a failure, Organization Policies is one check rather than one per policy, and a
+# category without a verdict is not assessed rather than 100%. The scores, the section pills and the Overview
+# counts follow; the parity tests compare everything else (``comparable``). The rule has its own tests.
+SCORED_FACTS = ('scores', 'section_scores', 'overview')
+
+
+def comparable(facts):
+    """``report_facts`` minus the ``SCORED_FACTS``: what a new report and a legacy one must still agree on."""
+    return {key: value for key, value in facts.items() if key not in SCORED_FACTS}
 
 
 def page_facts(html):

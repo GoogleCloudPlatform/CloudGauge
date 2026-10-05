@@ -83,14 +83,14 @@ code, kbd, pre, .mono { font-family: var(--font-mono); font-variant-numeric: tab
 .dot-action-required, .dot-low { background: var(--rose-500); }
 .dot-investigation, .dot-medium { background: var(--amber-500); }
 .dot-compliant, .dot-high { background: var(--emerald-500); }
-.dot-error { background: var(--zinc-400); }
+.dot-error, .dot-none { background: var(--zinc-400); }
 .dot-informational { background: var(--sky-500); }
 .pill { display: inline-flex; align-items: center; gap: 6px; padding: 1px 8px; border: 1px solid var(--zinc-200); border-radius: 999px; background: var(--zinc-100); color: var(--zinc-700);
         font-size: 12px; font-weight: 500; line-height: 18px; white-space: nowrap; vertical-align: middle; }
 .pill-action-required, .pill-low, .pill-non-compliant, .pill-not-configured { background: var(--rose-50); border-color: var(--rose-200); color: var(--rose-700); }
 .pill-investigation, .pill-medium { background: var(--amber-50); border-color: var(--amber-200); color: var(--amber-700); }
 .pill-compliant, .pill-high { background: var(--emerald-50); border-color: var(--emerald-200); color: var(--emerald-700); }
-.pill-error, .pill-unsupported { background: var(--zinc-100); border-color: var(--zinc-200); color: var(--zinc-700); }
+.pill-error, .pill-unsupported, .pill-none { background: var(--zinc-100); border-color: var(--zinc-200); color: var(--zinc-700); }
 .pill-informational, .pill-sky { background: var(--sky-50); border-color: var(--sky-200); color: var(--sky-700); }
 
 /* A cloud resource (project, principal, instance...) reads as code. */

@@ -110,9 +110,9 @@
                     {% for row in score_summary %}
                         <tr>
                             <td class="score-name"><a href="#{{ row.section_id }}" onclick="showSection('{{ row.section_id }}')">{{ row.category_name }}</a></td>
-                            <td class="score-bar-cell"><span class="bar"><span class="bar-fill score-{{ row.score_class }}" style="width: {{ row.score_display }}%"></span></span></td>
-                            <td class="num score-cell"><span class="score score-{{ row.score_class }}">{{ row.score_display }}%</span></td>
-                            <td class="score-of">{{ row.pass_count }} of {{ row.scored_count }}</td>
+                            <td class="score-bar-cell"><span class="bar"><span class="bar-fill score-{{ row.score_class }}" style="width: {{ row.score_display or 0 }}%"></span></span></td>
+                            <td class="num score-cell">{% if row.assessed %}<span class="score score-{{ row.score_class }}">{{ row.score_display }}%</span>{% else %}<span class="score-none">{{ row.score_text }}</span>{% endif %}</td>
+                            <td class="score-of">{{ row.evidence }}</td>
                         </tr>
                     {% endfor %}
                     </tbody>
@@ -130,7 +130,7 @@
                     {% for row in changes.categories %}
                         <tr>
                             <td class="score-name"><a href="#{{ row.section_id }}" onclick="showSection('{{ row.section_id }}')">{{ row.category_name }}</a></td>
-                            <td class="num"><span class="score">{{ row.score_display }}%</span> <span class="delta delta-{{ row.delta_class }}">{% if row.delta_class == 'up' %}&#9650; {% elif row.delta_class == 'down' %}&#9660; {% endif %}{{ row.delta_display }}</span></td>
+                            <td class="num">{% if row.score_display %}<span class="score">{{ row.score_text }}</span>{% else %}<span class="score-none">{{ row.score_text }}</span>{% endif %} <span class="delta delta-{{ row.delta_class }}">{% if row.delta_class == 'up' %}&#9650; {% elif row.delta_class == 'down' %}&#9660; {% endif %}{{ row.delta_display }}</span></td>
                             <td class="num">{{ "{:,}".format(row.resolved) if row.resolved else "—" }}</td>
                             <td class="num">{{ "{:,}".format(row.new) if row.new else "—" }}</td>
                             <td class="prose status-changes">

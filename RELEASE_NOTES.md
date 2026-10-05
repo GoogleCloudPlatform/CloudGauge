@@ -8,9 +8,95 @@ the test suite running inside the image, a zero-traffic canary revision scanned
 against a real organization, promotion, and a production scan compared fact for
 fact with the previous version's report.
 
-Versions are the image tags (`v5` … `v15.1`); the commit is the one that shipped.
+Versions are the image tags (`v5` … `v15.2`); the commit is the one that shipped.
 
 ---
+
+## v15.2 — Scores count verdicts
+
+A change to how a category's score is computed, prompted by a question the
+v15.1 Scorecard made visible: one production scan showed Operations at 25%
+(▼ −4) and the next 29% with "no status changes". The first scan had a
+*Projects not checked* item (one API call had failed for one project), and
+an Error counted against the score — 2 of 8 instead of 2 of 7. Scores should
+move when the estate moves, not when an API hiccups. No new settings; the
+scan summary gains one field.
+
+### Changed: the rule (`app/reporting/scoring.py`)
+
+- **A score is the share of a category's checks that reached a verdict and
+  were compliant**: `compliant / (compliant + Action Required + Investigation
+  Recommended)`. The bands are unchanged (above 90 high, above 70 medium,
+  otherwise low).
+- **An Error is coverage, not a verdict.** A check in Error — the *Projects
+  not checked* item included — is stated next to the score and never inside
+  it. The Review scores table and the Scorecard's evidence line say "7 of 12
+  checks compliant · 1 could not be checked"; the Scorecard's *Could not
+  check* footer and the category pages list which. A transient failure no
+  longer moves a score.
+- **Organization Policies is one check with partial credit**, worth
+  `compliant policies / total policies` of a pass. Before, every policy
+  counted as a check, so 128 policies outweighed the 12 real checks in
+  Security: the stark organization's Security score was 18% with 7 of 12
+  checks compliant. It now reads **55%** — "7 of 12 checks compliant · 18 of
+  128 policies as recommended". The Overview's count cards count it once as
+  well (Action Required 127 → 18 on that organization), as the sidebar and
+  the Scorecard already did.
+- **A category without a verdict is *Not assessed***, not 100%: no number,
+  no band, a fourth state on every surface — the Review scores row says *Not
+  assessed* in words over an empty bar, the section pill says it, the
+  Scorecard stoplight lights no lamp and shows a dash, the Markdown copy a
+  dash and the state. A category page with nothing to list says "Not
+  assessed — no Cost Optimization check reported a result in this scan."
+- **The cost recommenders reach a verdict.** Each of the eight recommenders
+  is a check: it now writes a Compliant row when it answered in at least one
+  project and had nothing to recommend ("No idle persistent disks found."),
+  as every other check does; Action Required anywhere still wins, and a
+  recommender nobody could ask (no zones or regions to query, every call
+  failed, or not offered in the queried locations) writes nothing. Cost
+  Optimization therefore scores 100% "8 of 8 checks compliant" on a tidy
+  estate instead of reading *Not assessed*.
+- **Changes since last scan recomputes the previous scan under the current
+  rule.** The previous scan's scores and counts are derived from the check
+  statuses in its summary rather than read from the summary's stored
+  numbers, so the first v15.2 scan does not show the rule change as a move
+  of −109 Action Required or +37 points: the deltas are the estate's. A
+  category not assessed on either side shows "—". The summary is now
+  `version 2`: the Organization Policies entry carries `policies:
+  {compliant, total}`; a version 1 summary is read the same way (its `rows`
+  is the total and its identities are the differing policies).
+- **Rounding is unchanged**: whole-point deltas are the difference of the
+  rounded scores the reader sees.
+
+### Tests
+
+- The rule has its own module, `tests/test_scoring.py`: the tally
+  (7 Compliant + 3 Error → 100% "3 could not be checked"; all Error → Not
+  assessed; the briefings outside; (7 + 18⁄128) ⁄ 13 → 55), the bands, the
+  evidence wording for every shape, and every surface that shows a score —
+  ending with the 25%/29% case run end to end: a version 1 summary with a
+  *Projects not checked* Error compared with a scan without it reads 29% →
+  29%, "—", "no status changes", and lists the item as no longer checked.
+- `tests/test_changes.py` fixes the invariant the recompute rests on
+  (`scores_from_checks(summary["checks"]) == summary["scores"]`, the same
+  for the Overview counts) and the version 1 fallback;
+  `tests/test_not_checked.py` the cost verdicts against the fake recommender.
+- The legacy parity tests compare everything but the scores, the section
+  pills and the count cards (`helpers.SCORED_FACTS`): those diverged by
+  design, and the legacy generator keeps the old rule untouched.
+
+### Upgrade notes
+
+- Expect scores to move once, on the first v15.2 scan, without a delta: on
+  the stark organization Security 18% → 55%, Cost 100% → 100% "8 of 8"
+  (it was 100% with no check), Reliability and Operations unchanged; the
+  count cards Action Required 127 → 18, Compliant 29 → 19. The Changes card
+  shows "—" against the previous scan where the previous scan's recomputed
+  score equals the new one, and the estate's real deltas otherwise.
+- A category that was 100% because nothing was found in it now reads *Not
+  assessed* until a check reaches a verdict there; with the cost
+  recommenders' all-clear rows this should only happen when a whole
+  category could not be checked.
 
 ## v15.1 — The Scorecard
 
@@ -638,6 +724,7 @@ performance; modernization; enablement; roadmap and roadblocks).
 | Release | Theme | Contents |
 |---|---|---|
 | **v15.1** | The QTR brief | *Shipped.* The **Scorecard** page (a stoplight per pillar with its evidence, the since line, top actions, action-plan CSV, Markdown copy, one-page print) on top of v15's scan summaries and *Changes since last scan*; the executive summary is generated there. |
+| **v15.2** | Scores count verdicts | *Shipped.* A category's score is the share of its checks that reached a verdict and were compliant: Errors are stated next to the score, not inside it; Organization Policies is one check with partial credit; a category without a verdict is *Not assessed*; the cost recommenders write all-clear rows; the previous scan is recomputed under the current rule. |
 | **v16** | History and analytics | **BigQuery export** of every scan's findings; **scheduled scans**; a history page (scores over time); a guide for Gemini Enterprise / Looker over the export ("talk to your infrastructure"). |
 | **v17** | Footprint and support | A **Platform Footprint** page (what runs where: services, regions, versions); **modernization indicators** (legacy runtimes, unmanaged VMs, missing release channels); a **Support cases** briefing. |
 | Later | | VM Manager vulnerability summary, Security Command Center findings summary, SLO coverage, PDF export. |
