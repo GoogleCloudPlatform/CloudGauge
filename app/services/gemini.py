@@ -269,6 +269,17 @@ SUMMARY_SUBJECTS = {
     "project": "the project's cloud environment",
 }
 
+# A folder or project scan's prompt also says so outright. The subject alone was not
+# enough: the report's "Organization Policies" rows (the policies in effect on the
+# folder or the project) read to the model as a review of the whole organization, and
+# the first real folder scan's summary opened on "the organization's cloud environment".
+SCOPE_NOTES = {
+    "folder": ('This report covers one Google Cloud folder, not the whole organization; say "the folder" '
+               'for what was scanned. Its "Organization Policies" rows are the policies in effect on the folder.'),
+    "project": ('This report covers one Google Cloud project, not the whole organization; say "the project" '
+                'for what was scanned. Its "Organization Policies" rows are the policies in effect on the project.'),
+}
+
 
 def generate_executive_summary(csv_data, *, scope=None, settings=None):
     """
@@ -279,8 +290,10 @@ def generate_executive_summary(csv_data, *, scope=None, settings=None):
         csv_data (str): The full CSV report. Large reports are condensed for the
             prompt (``condense_csv_for_prompt``).
         scope (str, optional): ``'organization'``, ``'folder'`` or ``'project'``: what the
-            report covers, so the summary speaks of the folder or the project that was
-            scanned (``SUMMARY_SUBJECTS``). Anything else reads as an organization.
+            report covers. A folder or project scan's prompt names it as the subject
+            (``SUMMARY_SUBJECTS``) and says so in a scope paragraph (``SCOPE_NOTES``), so
+            the summary speaks of the folder or the project that was scanned. Anything
+            else gets the legacy prompt, which reads as an organization.
         settings (Settings, optional): Overrides the model, project, and location read from the environment.
 
     Returns:
@@ -288,6 +301,8 @@ def generate_executive_summary(csv_data, *, scope=None, settings=None):
     """
     settings = settings or get_settings()
     subject = SUMMARY_SUBJECTS.get(scope, SUMMARY_SUBJECTS["organization"])
+    # Empty for an organization scan (and no scope), which leaves the legacy prompt byte for byte.
+    scope_block = f"\n        **Scope:** {SCOPE_NOTES[scope]}\n" if scope in SCOPE_NOTES else ""
 
     condensed = condense_csv_for_prompt(csv_data)
     if len(condensed) != len(csv_data):
@@ -301,7 +316,7 @@ def generate_executive_summary(csv_data, *, scope=None, settings=None):
         ```csv
         {condensed}
         ```
-
+{scope_block}
         **Instructions:**
         1.  Start with a single, concise introductory sentence that summarizes the overall state of {subject}.
         2.  Identify the top 3-5 primary opportunities for enhancement and optimization. Use a bulleted list.

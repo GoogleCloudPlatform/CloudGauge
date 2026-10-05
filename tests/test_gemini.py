@@ -236,11 +236,23 @@ def test_summary_prompt_gets_the_condensed_csv(gcp):
     ('galaxy', "the organization's cloud environment"),
 ])
 def test_summary_prompt_names_the_scope(scope, subject, gcp):
-    """A folder or project scan's executive summary opens on the folder or project, not "the organization"."""
+    """A folder or project scan's executive summary opens on the folder or project, not "the organization".
+
+    The prompt names the subject and, for a folder or a project, says so in a scope paragraph between
+    the data and the instructions (the data's "Organization Policies" rows otherwise read as the whole
+    organization). An organization scan, and a request without a scope, get the legacy prompt."""
     gemini_service.generate_executive_summary('Organization Policies\r\n', scope=scope, settings=AUTO)
     (_, prompt), = gcp.gemini.prompts
     assert f'summarizes the overall state of {subject}.' in prompt
     assert prompt.count('cloud environment') == 1
+    if scope in ('folder', 'project'):
+        assert prompt.count('**Scope:**') == 1
+        assert (f'```\n\n        **Scope:** This report covers one Google Cloud {scope}, not the whole organization; '
+                f'say "the {scope}" for what was scanned. Its "Organization Policies" rows are the policies '
+                f'in effect on the {scope}.\n\n        **Instructions:**') in prompt
+    else:
+        assert '**Scope:**' not in prompt
+        assert '```\n\n        **Instructions:**' in prompt
 
 
 def test_remediation_finding_text_is_capped(gcp):

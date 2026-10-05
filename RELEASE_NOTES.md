@@ -42,10 +42,17 @@ changes an organization scan's report. No new settings.
   run, and the listing error is in the logs as before.
 - **The executive summary speaks of what was scanned.** Its prompt always
   asked for "the overall state of the organization's cloud environment"; it
-  now says the folder's or the project's for those scans. The Scorecard sends
-  the scope with the `/api/get-summary` request; a request without one (a
-  report page rendered before v15.3) keeps the organization wording, so the
-  legacy request shape produces the legacy prompt byte for byte.
+  now says the folder's or the project's for those scans, and adds a
+  **Scope** paragraph saying the report covers one folder or one project and
+  that its Organization Policies rows are the policies in effect there. The
+  paragraph is needed: with the subject alone, the first real folder scan's
+  summary (an empty folder, whose report is only Organization Policies rows)
+  still opened on "The organization's cloud environment"; with it, four runs
+  out of four against the real model opened on "The folder" and "The project".
+  The Scorecard sends the scope with the `/api/get-summary` request; a request
+  without one (a report page rendered before v15.3) keeps the organization
+  wording, so the legacy request shape produces the legacy prompt byte for
+  byte.
 
 ### Tests
 
@@ -68,9 +75,9 @@ changes an organization scan's report. No new settings.
   no-projects scan test now states the difference from legacy (which uploaded
   an empty report) instead of parity.
 - `tests/test_gemini.py` and `tests/test_api_parity.py`: the prompt's subject
-  for each scope, for no scope and for an unknown one; the route forwarding
-  the page's scope; `test_summary` still proves the legacy request's prompt
-  unchanged.
+  and Scope paragraph for each scope, and neither for no scope or an unknown
+  one; the route forwarding the page's scope; `test_summary` still proves the
+  legacy request's prompt unchanged.
 
 ### Upgrade notes
 
