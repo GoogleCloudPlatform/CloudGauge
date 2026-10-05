@@ -39,6 +39,7 @@ from app import scan_job
 from app.checks import registry, runner
 from app.checks.categories import CATEGORY_ORDER
 from app.checks.registry import CheckSpec
+from app.config import VERSION
 from app.extensions import EXTENSION_KEY
 from app.utils import ThrottledProgressReporter
 from helpers import assert_same_csv_tables, assert_same_response, comparable, csv_sections, report_facts
@@ -150,7 +151,7 @@ def test_scan_job_matches_legacy(legacy_client, client, gcp, scripted_scan):
 
     assert sorted(run.objects) == sorted([*legacy_run.objects, *summaries]) == sorted([REPORT_HTML, REPORT_CSV, STATUS, *summaries])
     summary = json.loads(run.objects[summaries[0]][0])
-    assert (summary['version'], summary['job_id'], summary['scope'], summary['scope_id']) == (2, JOB_ID, SCOPE, SCOPE_ID)
+    assert (summary['version'], summary['release'], summary['job_id'], summary['scope'], summary['scope_id']) == (3, VERSION, JOB_ID, SCOPE, SCOPE_ID)
     assert {finding['Check'] for finding in scripted_scan.findings} <= set(summary['checks'])
     (html, html_type), (legacy_html, legacy_html_type) = run.objects[REPORT_HTML], legacy_run.objects[REPORT_HTML]
     assert html_type == legacy_html_type == 'text/html'

@@ -26,6 +26,7 @@ import contextlib
 import json
 import os
 import pathlib
+import re
 import socket
 import subprocess
 import sys
@@ -290,6 +291,9 @@ def test_build_contexts():
                    '.dockerignore', 'Dockerfile.test.dockerignore'):
         assert needed not in test_context
     assert 'COPY tools ./tools' in (ROOT / 'Dockerfile.test').read_text()  # test_synthetic.py imports the harness
+    # The release notes reach the test image alone: test_the_release_is_the_newest_entry_of_the_release_notes reads them.
+    assert '!RELEASE_NOTES.md' in test_context and '*.md' in app_context and '!RELEASE_NOTES.md' not in app_context
+    assert ' RELEASE_NOTES.md ./' in (ROOT / 'Dockerfile.test').read_text() and 'RELEASE_NOTES' not in (ROOT / 'Dockerfile').read_text()
 
 
 def test_app_needs_neither_vertexai_nor_aiplatform():
@@ -302,3 +306,14 @@ import cloudgauge
 print("ok")
 '''
     assert run_python(code, CLOUDGAUGE_ENV='testing') == 'ok'
+
+
+def test_the_release_is_the_newest_entry_of_the_release_notes():
+    """``app.config.VERSION`` is what the report's footer shows and what every scan summary records, so that the next
+    scan can tell a check new to the release from one that had nothing to check (app.reporting.changes): it must be
+    bumped with each release, and the release notes are where a release is declared (``## v15.5 — …``, newest first)."""
+    from app.config import VERSION
+    headings = re.findall(r'^## v(\S+) — ', (ROOT / 'RELEASE_NOTES.md').read_text(), re.M)
+    assert headings[0] == VERSION, f'app.config.VERSION is {VERSION!r}; the newest release note is v{headings[0]}'
+    assert re.fullmatch(r'\d+(\.\d+)*', VERSION)  # as the image tag names it, without the "v"
+    assert f'`v5` … `v{VERSION}`' in (ROOT / 'RELEASE_NOTES.md').read_text()  # the intro's tag range

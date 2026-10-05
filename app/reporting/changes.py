@@ -43,8 +43,14 @@ The rules of ``compare``, per check:
   row as new; the reverse lists every previous row as resolved);
 - in both scans, one of them an Error: the status change only — the rows are
   *not compared* (an Error scan did not look, so nothing was resolved);
-- only in this scan: *not compared (new check)*, never "all new";
-- only in the previous scan: listed once on the card as no longer checked.
+- only in this scan, both scans by the same release (v15.5): the previous scan
+  had nothing to check — an empty folder that has its first project now — so
+  every row is new (the card says ``no result → Action Required``);
+- only in this scan, the previous scan by another release or one that predates
+  ``release``: *not compared (new check)*, never "all new";
+- only in the previous scan: listed once on the card — "No result in this
+  scan" within a release, "No longer checked" across releases — and nothing is
+  resolved by it.
 
 Scores and counts are not read from the previous summary but **recomputed
 from its check statuses under the current rule** (``app.reporting.scoring``):
@@ -57,16 +63,24 @@ import re
 from collections import Counter
 from dataclasses import dataclass, field
 
+from app.config import VERSION
 from app.reporting.layouts import FIX_COLUMN, NUMBER, PROSE, TIME, column_roles
 from app.reporting.scoring import NOT_ASSESSED_TEXT, overview_from_checks, scores_from_checks
 
 # 2 (v15.2): the Organization Policies entry carries ``policies: {compliant, total}``; scores may be null (not assessed).
-SUMMARY_VERSION = 2
+# 3 (v15.5): ``release`` names the version that wrote the summary; without it (older summaries) a check only in the
+#            current scan is a new check.
+SUMMARY_VERSION = 3
 # Cells of one identity are joined with this; the N-th duplicate gets " #N".
 IDENTITY_SEPARATOR = " · "
 # Statuses whose rows are compared; the others carry no identities (see the module docstring).
 COMPARED_STATUSES = ("Action Required", "Investigation Recommended")
 NOT_COMPARED = "not compared"
+# The "before" of a check the previous scan of the same release had no result for.
+NO_RESULT = "no result"
+# The card's footer naming the checks only the previous scan had: within a release, across releases.
+NO_RESULT_NOW = "No result in this scan"
+NO_LONGER_CHECKED = "No longer checked"
 # How many resolved rows a check lists under its table; the summary keeps them all.
 MAX_LISTED_RESOLVED = 100
 # How many status changes the Changes card shows per category before "N more".
@@ -161,6 +175,7 @@ class CheckChange:
     new_identities: frozenset = frozenset()
     resolved_items: tuple = ()  # the resolved identities, in the previous scan's order, capped at MAX_LISTED_RESOLVED
     resolved_omitted: int = 0  # how many more than ``resolved_items`` lists
+    first_result: bool = False  # the previous scan, by the same release, had no result for the check: nothing to check then
 
     @property
     def chip(self):
@@ -180,6 +195,8 @@ class CheckChange:
         bits = []
         if self.previous_status:
             bits.append(f"Was {self.previous_status} in the previous scan")
+        if self.first_result:
+            bits.append("No result in the previous scan (nothing to check then), so every finding is new")
         if self.note_reason:
             bits.append(f"Rows {self.note}: {self.note_reason}")
         return "; ".join(bits) or "Compared with the previous scan of this scope"
@@ -229,6 +246,7 @@ class Changes:
     new_total: int
     resolved_total: int
     retired_checks: tuple = ()  # checks the previous scan had and this one does not
+    retired_label: str = NO_LONGER_CHECKED  # NO_RESULT_NOW when both scans are by the same release (nothing to check now)
     checks: dict = field(default_factory=dict)  # check name → CheckChange (for the chips and row markers)
 
     @property
@@ -276,6 +294,23 @@ def check_change(current, previous):
     )
 
 
+def first_result_change(current):
+    """``CheckChange`` for a check the previous scan had no result for, both scans by the same release.
+
+    The release could have run the check then and did not, so there was nothing to check (an empty folder
+    with its first project now): every row that needs work is new. An Error now is still not compared.
+    """
+    if current["status"] == "Error":
+        return CheckChange(note=NOT_COMPARED, note_reason="could not be checked now")
+    new = frozenset(current.get("identities", []))
+    return CheckChange(new=len(new), new_identities=new, first_result=True)
+
+
+def same_release(previous, current):
+    """Whether both summaries name the same release (older summaries name none, and compare across releases)."""
+    return bool(previous.get("release")) and previous.get("release") == current.get("release")
+
+
 def compare(previous, current, slugs, section_ids):
     """The ``Changes`` between two summaries (``previous`` may be ``None``: no previous scan, returns ``None``).
 
@@ -285,12 +320,15 @@ def compare(previous, current, slugs, section_ids):
     if not previous:
         return None
     prev_checks, cur_checks = previous.get("checks", {}), current.get("checks", {})
+    within_release = same_release(previous, current)
     checks = {}
     for name, entry in cur_checks.items():
         if entry["status"] == "Informational":
             continue
         if name in prev_checks:
             change = check_change(entry, prev_checks[name])
+        elif within_release:
+            change = first_result_change(entry)
         else:
             change = CheckChange(note=NOT_COMPARED, note_reason="new check")
         if change is not None:
@@ -317,6 +355,10 @@ def compare(previous, current, slugs, section_ids):
             if change.previous_status:
                 note = f" · {change.note} ({change.note_reason})" if change.note else ""
                 entries.append(ChangeEntry(name, slugs.get(name, ""), cur_checks[name]["status"] + note, change.previous_status))
+        for name in names:  # ...then the checks that need work and had no result in the previous scan...
+            change = checks[name]
+            if change.first_result and cur_checks[name]["status"] in COMPARED_STATUSES:
+                entries.append(ChangeEntry(name, slugs.get(name, ""), cur_checks[name]["status"], NO_RESULT))
         for name in names:  # ...then the checks whose rows could not be compared
             change = checks[name]
             if change.note and not change.previous_status:
@@ -337,7 +379,7 @@ def compare(previous, current, slugs, section_ids):
         previous_total_projects=previous.get("total_projects"), total_projects=current.get("total_projects"),
         categories=tuple(categories), overview_deltas=overview_deltas,
         new_total=sum(c.new for c in checks.values()), resolved_total=sum(c.resolved for c in checks.values()),
-        retired_checks=retired, checks=checks,
+        retired_checks=retired, retired_label=NO_RESULT_NOW if within_release else NO_LONGER_CHECKED, checks=checks,
     )
 
 
@@ -366,7 +408,7 @@ def summarize(context):
                                           "policies": {"compliant": policies.compliant, "total": policies.total}}
     overview = context.overview
     return {
-        "version": SUMMARY_VERSION, "job_id": context.job_id, "scope": context.scope, "scope_id": context.scope_id,
+        "version": SUMMARY_VERSION, "release": VERSION, "job_id": context.job_id, "scope": context.scope, "scope_id": context.scope_id,
         "generated_at": context.generated_at, "generated_ts": context.generated_ts,
         "total_projects": context.total_projects,
         "overview": {"action_count": overview.action_count, "investigation_count": overview.investigation_count,

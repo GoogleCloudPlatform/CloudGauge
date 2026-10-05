@@ -181,9 +181,32 @@ def test_each_action_says_what_moved_since_the_previous_scan():
                          check('Buckets', 'Action Required', rows(1)), check('Roles', 'Action Required', rows(2)),
                          check('Firewall', 'Action Required', rows(3)), check('Brand new', 'Action Required', rows(1))]}
     since = {a.check_name: a.since for a in two_scans(first, second).actions}
+    # Not compared: an error then. First result: both scans by this release, so there was nothing to check then (v15.5).
     assert since == {'Keys': f'+1 new · {MINUS}1 resolved', 'Buckets': '+1 new · was Compliant', 'Roles': '',
-                     'Firewall': 'not compared', 'Brand new': 'not compared'}  # not compared: an error then, or a new check
+                     'Firewall': 'not compared', 'Brand new': '+1 new · first result'}
     assert all(a.since == '' for a in card(second).actions)  # a first scan has nothing to say
+
+
+def test_the_since_line_after_an_empty_scope_gets_its_first_project():
+    """The case behind v15.5: a folder scanned empty, then scanned with a project moved into it. The second scan's
+    checks all have their first result, so every row that needs work is new, and the line says 0 → 1 projects."""
+    empty = summarize(context({}, 'job-1', total_projects=0))
+    assert empty['checks'] == {} and empty['total_projects'] == 0
+    scorecard = card(sample_results(), previous=empty, total_projects=1)
+    since = scorecard.since
+    # samples: IAM Hygiene 2 rows, Idle Disks 2, Essential Contacts 2, Quota 1, and 3 of 4 policies differ.
+    assert (since.new, since.resolved, since.projects_then, since.projects_now) == (10, 0, 0, 1)
+    assert since.status_changes[0] == 'Project IAM Hygiene no result → Action Required'  # regressions first, worst first
+    assert set(since.status_changes) == {f'{name} no result → {status}' for name, status in (
+        ('Project IAM Hygiene', 'Action Required'), ('Organization Policies', 'Action Required'), ('Idle Persistent Disks', 'Investigation Recommended'),
+        ('Essential Contacts', 'Action Required'), ('Quota Utilization (>80%)', 'Action Required'))}
+    assert {a.check_name: a.since for a in scorecard.actions}['Project IAM Hygiene'] == '+2 new · first result'
+    assert 'Since the previous scan (' in markdown(scorecard)
+    assert '): 10 new findings · 0 resolved · 0 → 1 projects · status changes: Project IAM Hygiene no result → Action Required;' in markdown(scorecard)
+    # The reverse move: the project left, and the folder scans empty again. Nothing is resolved by it.
+    gone = card({}, previous=summarize(context(sample_results(), 'job-2', total_projects=1)), total_projects=0)
+    assert (gone.since.new, gone.since.resolved, gone.since.status_changes) == (0, 0, ())
+    assert '): 0 new findings · 0 resolved · 1 → 0 projects · no status changes.' in markdown(gone)
 
 
 # --- The since line and the footers ---

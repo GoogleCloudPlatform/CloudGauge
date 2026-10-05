@@ -183,7 +183,7 @@ def test_status_is_a_dot_and_a_soft_pill_in_its_semantic_colour(pages):
 def test_ids_metrics_and_technical_values_are_monospace(pages):
     for css, selector in ((DESIGN, 'code'), (DESIGN, '.mono'), (DESIGN, '.chip'), (DESIGN, '.data-table td.num'), (DESIGN, '.data-table td.time'),
                           (REPORT_STYLES, '.report-meta'), (REPORT_STYLES, '.score'), (REPORT_STYLES, '.section-counts .n'),
-                          (REPORT_STYLES, '.details-table .cell-code'), (REPORT_STYLES, '.sidebar-foot time'),
+                          (REPORT_STYLES, '.details-table .cell-code'), (REPORT_STYLES, '.sidebar-foot time'), (REPORT_STYLES, '.sidebar-foot .version'),
                           (STATUS_PAGE, '.scope-line'), (STATUS_PAGE, '.progress-text'), (STATUS_PAGE, '.job-line'), (STATUS_PAGE, '.error-box')):
         assert rule(css, selector)['font-family'] == 'var(--font-mono)', selector
     assert rule(DESIGN, '.data-table td.num')['font-variant-numeric'] == 'tabular-nums'

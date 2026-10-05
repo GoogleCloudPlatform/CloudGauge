@@ -230,7 +230,7 @@ def test_the_changes_card_with_not_assessed_on_either_side():
     assert rows[COST] == ('100%', 'flat', DASH)  # not assessed then: nothing to compare with
     assert rows[SECURITY] == ('Not assessed', 'flat', DASH)  # not assessed now
     assert rows[RELIABILITY] == ('Not assessed', 'flat', DASH)
-    assert summary['version'] == SUMMARY_VERSION == 2 and summary['scores'] == {SECURITY: None, COST: 100.0, RELIABILITY: None, OPERATIONS: None}
+    assert summary['version'] == SUMMARY_VERSION == 3 and summary['scores'] == {SECURITY: None, COST: 100.0, RELIABILITY: None, OPERATIONS: None}
     html, _ = two_scans(second, {COST: checks('Compliant', 1, 'C') + checks('Action Required', 1, 'C')})
     assert card_rows(html)[COST] == ('50%', 'down', f'▼ {MINUS}50')
 
@@ -243,7 +243,10 @@ def test_a_transient_error_in_the_previous_scan_does_not_move_the_score():
     not_checked = [{'Check': 'Projects not checked', 'Status': 'Error', 'Finding': [{'Project': 'p3', 'Skipped check': 'Logs', 'Reason': '503'}]}]
     previous = generate_reports(SCOPE, SCOPE_ID, 'job-1', {OPERATIONS: operations + not_checked}, total_projects=4)[2]
     assert previous['scores'][OPERATIONS] == pytest.approx(2 / 7 * 100)
+    # By this release, the Error that is gone had a result then and none now (v15.5).
+    assert 'No result in this scan: Projects not checked.' in generate_reports(SCOPE, SCOPE_ID, 'job-2', {OPERATIONS: operations}, total_projects=4, previous=previous)[0]
     previous['version'], previous['scores'][OPERATIONS] = 1, 25.0  # as the old rule filed it
+    del previous['release']  # version 1 named none
     html, _, summary = generate_reports(SCOPE, SCOPE_ID, 'job-2', {OPERATIONS: operations}, total_projects=4, previous=previous)
     assert card_rows(html)[OPERATIONS] == ('29%', 'flat', DASH)
     assert 'No longer checked: Projects not checked.' in html

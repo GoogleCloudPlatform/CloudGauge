@@ -31,6 +31,7 @@ import pytest
 from jinja2 import UndefinedError
 
 import samples
+from app.config import VERSION
 from app.reporting.context import MAX_ROWS_PER_CHECK, ROWS_PER_PAGE
 from app.reporting.csv_report import generate_csv_data
 from app.reporting.html_report import generate_html_report, report_environment
@@ -259,6 +260,16 @@ def test_report_is_self_contained():
     assert sorted(set(re.findall(r"fetch\('([^']+)'", html))) == ['/api/get-insights', '/api/get-suggestions', '/api/get-summary']
     assert 'JSON.stringify({ scope: "organization", scope_id: "123456789", job_id: "job-42" })' in html  # get-summary (v15.3: with the scope)
     assert 'JSON.stringify({ scope: "organization", scope_id: "123456789" })' in html
+
+
+def test_the_footer_names_the_release_that_rendered_the_report():
+    """A stored report is read long after the scan (v15.5): the sidebar's footer says when it was rendered and by which
+    release, so the reader can match it to the release notes — and the version is the one every scan summary records."""
+    html = generate_html_report('organization', '123456789', 'job-42', **SCENARIOS['sample scan'])
+    footer = re.search(r'<div class="sidebar-foot">(.*?)</div>', html).group(1)
+    assert re.fullmatch(r'<span class="sidebar-foot-label">Generated</span><time>\d{4}-\d\d-\d\d \d\d:\d\d UTC</time>'
+                        rf'<span class="version">CloudGauge v{re.escape(VERSION)}</span>', footer), footer
+    assert html.count(f'CloudGauge v{VERSION}') == 1 and re.fullmatch(r'\d+(\.\d+)*', VERSION)
 
 
 # --- Layout for large organizations (plan item 6b) ---

@@ -8,8 +8,9 @@ ARG APP_IMAGE=cloudgauge
 FROM ${APP_IMAGE}
 
 USER root
-# The Dockerfiles and the ignore files are copied only so test_packaging.py can inspect them.
-COPY requirements-dev.txt pytest.ini Dockerfile Dockerfile.test .dockerignore Dockerfile.test.dockerignore run.py ./
+# The Dockerfiles and the ignore files are copied only so test_packaging.py can inspect them, and RELEASE_NOTES.md
+# so it can pin app.config.VERSION to the newest release note (v15.5).
+COPY requirements-dev.txt pytest.ini Dockerfile Dockerfile.test .dockerignore Dockerfile.test.dockerignore run.py RELEASE_NOTES.md ./
 RUN pip install --no-cache-dir -r requirements-dev.txt
 COPY tests ./tests
 COPY tools ./tools

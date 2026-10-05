@@ -148,12 +148,14 @@ def projects_affected(items):
 
 
 def since_text(change):
-    """An action's *Since last scan* cell: the check's change chip, then the status it had."""
+    """An action's *Since last scan* cell: the check's change chip, then the status it had (or that it had no result)."""
     if change is None:
         return ""
     bits = [change.chip] if change.chip else []
     if change.previous_status and not change.note:
         bits.append(f"was {change.previous_status}")
+    elif change.first_result:
+        bits.append("first result")
     return " · ".join(bits)
 
 
@@ -304,7 +306,7 @@ def markdown(card):
     lines.append("")
     if since:
         line = f"Since the previous scan ({since.previous_at}): {since.new:,} new findings · {since.resolved:,} resolved"
-        if since.projects_then and since.projects_then != since.projects_now:
+        if since.projects_then is not None and since.projects_now is not None and since.projects_then != since.projects_now:
             line += f" · {since.projects_then:,} → {since.projects_now:,} projects"
         line += (" · status changes: " + "; ".join(since.status_changes)) if since.status_changes else " · no status changes"
         lines.append(line + ".")

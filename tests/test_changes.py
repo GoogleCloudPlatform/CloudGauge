@@ -29,9 +29,11 @@ from html import unescape
 import pytest
 
 import samples
-from app.reporting.changes import (INLINE_STATUS_CHANGES, MAX_LISTED_RESOLVED, MINUS, NOT_COMPARED, ORG_POLICIES_CHECK,
-                                   SUMMARY_VERSION, CheckChange, RowIdentities, RowMatcher, check_change, compare, count_delta,
-                                   delta_class, identities_for, normalize_prose, text_identities)
+from app.config import VERSION
+from app.reporting.changes import (INLINE_STATUS_CHANGES, MAX_LISTED_RESOLVED, MINUS, NO_LONGER_CHECKED, NO_RESULT, NO_RESULT_NOW,
+                                   NOT_COMPARED, ORG_POLICIES_CHECK, SUMMARY_VERSION, CheckChange, RowIdentities, RowMatcher,
+                                   check_change, compare, count_delta, delta_class, first_result_change, identities_for,
+                                   normalize_prose, same_release, text_identities)
 from app.reporting.csv_report import NEW_COLUMN
 from app.reporting.html_report import generate_reports
 from app.reporting.layouts import NUMBER, PROSE, RESOURCE, STATE, TIME
@@ -186,11 +188,30 @@ def test_briefings_are_never_compared(now, then):
     assert check_change(entry(now, 'a'), entry(then, 'b')) is None
 
 
+def test_a_check_with_no_result_in_the_previous_scan_of_the_same_release_is_all_new():
+    """v15.5: the release could have run the check then and did not, so there was nothing to check (an empty folder
+    with its first project now): every row that needs work is new. An Error now is still not compared."""
+    change = first_result_change(entry('Action Required', 'a', 'b'))
+    assert (change.new, change.resolved, change.previous_status, change.note, change.first_result) == (2, 0, None, None, True)
+    assert change.new_identities == {'a', 'b'}
+    assert (change.chip, change.chip_title) == ('+2 new', 'No result in the previous scan (nothing to check then), so every finding is new')
+    assert first_result_change(entry('Compliant')) == CheckChange(first_result=True) and first_result_change(entry('Compliant')).chip is None
+    assert first_result_change(entry('Error')) == CheckChange(note=NOT_COMPARED, note_reason='could not be checked now')
+
+
+@pytest.mark.parametrize('then, now, same', [('15.5', '15.5', True), ('15.4', '15.5', False), (None, '15.5', False), ('', '15.5', False)])
+def test_summaries_of_the_same_release_are_told_by_the_release_they_name(then, now, same):
+    """A summary written before releases were named (v15.4 and earlier) is never the same release as this one."""
+    assert same_release(summary('job-1', {}, {}, release=then), summary('job-2', {}, {}, release=now)) is same
+
+
 # --- compare(): the card ---
 
-def summary(job_id, checks, scores, overview=None, total_projects=4, generated_at='2026-01-01 10:00 UTC'):
+def summary(job_id, checks, scores, overview=None, total_projects=4, generated_at='2026-01-01 10:00 UTC', release=None):
+    """A scan summary as the store files it; without ``release`` (the default), as releases before v15.5 filed it."""
     return {'version': SUMMARY_VERSION, 'job_id': job_id, 'scope': SCOPE, 'scope_id': SCOPE_ID, 'generated_at': generated_at,
-            'total_projects': total_projects, 'overview': overview or {}, 'scores': scores, 'checks': checks}
+            'total_projects': total_projects, 'overview': overview or {}, 'scores': scores, 'checks': checks,
+            **({'release': release} if release is not None else {})}
 
 
 SLUGS = {'IAM': 'iam', 'Buckets': 'buckets', 'Firewall': 'firewall', 'Disks': 'disks', 'Fresh': 'fresh'}
@@ -201,7 +222,9 @@ def test_compare_needs_a_previous_scan():
     assert compare({}, summary('job-2', {}, {}), {}, {}) is None
 
 
-def test_compare_builds_the_card():
+def card_summaries(previous_release=None, current_release=VERSION):
+    """The two summaries behind the card tests: the previous one, by default, as a release before v15.5 filed it (no
+    ``release``); the current one as this release files it."""
     # The previous summary as the old rule stored it: Security 33 (its Error counted as failing), Operations 100 (nothing
     # counted), 7 Action Required (a policy per count). compare() reads its checks under the current rule instead
     # (app.reporting.scoring): Security 50, Operations not assessed, 2 Action Required.
@@ -212,7 +235,8 @@ def test_compare_builds_the_card():
         'Disks': entry('Investigation Recommended', 'x', category=COST),
         'Retired': entry('Action Required', 'r', category=COST),
         'Old briefing': entry('Informational', category=OPERATIONS),
-    }, {SECURITY: 33.3, COST: 0.0, OPERATIONS: 100.0}, overview={'action_count': 7, 'investigation_count': 1, 'compliant_count': 1, 'error_count': 1})
+    }, {SECURITY: 33.3, COST: 0.0, OPERATIONS: 100.0}, overview={'action_count': 7, 'investigation_count': 1, 'compliant_count': 1, 'error_count': 1},
+        release=previous_release)
     current = summary('job-2', {
         'IAM': entry('Action Required', 'b', 'c'),
         'Buckets': entry('Action Required', 'p'),
@@ -222,15 +246,21 @@ def test_compare_builds_the_card():
         'Briefing': entry('Informational', category=OPERATIONS),
         'Backups': entry('Compliant', category=RELIABILITY),
     }, {SECURITY: 0.0, COST: 50.0, OPERATIONS: None, RELIABILITY: 100.0},
-        overview={'action_count': 4, 'investigation_count': 0, 'compliant_count': 2, 'error_count': 0}, total_projects=5)
+        overview={'action_count': 4, 'investigation_count': 0, 'compliant_count': 2, 'error_count': 0}, total_projects=5, release=current_release)
+    return previous, current
 
+
+def test_compare_builds_the_card():
+    """The previous summary by a release before v15.5 (it names none): a check only in this scan may be new to the
+    release, so its rows are not compared, and a check only in the previous scan is no longer checked."""
+    previous, current = card_summaries()
     changes = compare(previous, current, SLUGS, SECTION_IDS)
     assert (changes.previous_job_id, changes.previous_generated_at) == ('job-1', '2026-01-01 10:00 UTC')
     assert changes.population == '4 projects then · 5 now'
     # The previous counts come from its checks: 2 Action Required, 1 Investigation Recommended, 1 Compliant, 1 Error.
     assert changes.overview_deltas == {'action_count': 2, 'investigation_count': -1, 'compliant_count': 1, 'error_count': -1}
     assert (changes.new_total, changes.resolved_total) == (2, 2)  # IAM: +1 −1; Buckets: +1; Disks: −1; Fresh, Backups and Firewall: not compared
-    assert changes.retired_checks == ('Retired',)  # the retired briefing is not listed
+    assert (changes.retired_checks, changes.retired_label) == (('Retired',), NO_LONGER_CHECKED)  # the retired briefing is not listed
     assert set(changes.checks) == {'IAM', 'Buckets', 'Firewall', 'Disks', 'Fresh', 'Backups'}  # no briefings
     assert changes.checks['Fresh'] == CheckChange(note=NOT_COMPARED, note_reason='new check')
 
@@ -251,6 +281,33 @@ def test_compare_builds_the_card():
     # A category the previous scan did not have at all has no previous score either.
     assert (reliability.score_display, reliability.previous_score_display, reliability.delta_display, reliability.delta_class) == ('100', None, DASH, 'flat')
     assert [(e.check_name, e.after) for e in reliability.entries] == [('Backups', 'not compared (new check)')]
+    # A previous summary by another release reads the same way: the check may be new to this one.
+    assert compare(*card_summaries('15.4'), SLUGS, SECTION_IDS).checks['Fresh'] == CheckChange(note=NOT_COMPARED, note_reason='new check')
+
+
+def test_compare_within_a_release_counts_a_first_result_as_new():
+    """v15.5: both summaries by this release, so the previous scan could have run Fresh and had nothing to check: its
+    row is new (``no result → Action Required`` on the card). Backups' first result is Compliant: nothing to count and
+    nothing to say. Retired had a result then and none now: listed as such, nothing resolved by it."""
+    changes = compare(*card_summaries(VERSION), SLUGS, SECTION_IDS)
+    assert changes.checks['Fresh'] == CheckChange(new=1, new_identities=frozenset({'n'}), first_result=True)
+    assert changes.checks['Backups'] == CheckChange(first_result=True) and changes.checks['Backups'].chip is None
+    assert changes.checks['Firewall'] == compare(*card_summaries(), SLUGS, SECTION_IDS).checks['Firewall']  # in both: as before
+    assert (changes.new_total, changes.resolved_total) == (3, 2)  # IAM: +1 −1; Buckets: +1; Disks: −1; Fresh: +1
+    assert (changes.retired_checks, changes.retired_label) == (('Retired',), NO_RESULT_NOW)
+    security, cost, _, reliability = changes.categories
+    assert security.entries == compare(*card_summaries(), SLUGS, SECTION_IDS).categories[0].entries
+    assert (cost.resolved, cost.new) == (1, 1)
+    assert [(e.check_name, e.slug, e.before, e.after) for e in cost.entries] == [
+        ('Disks', 'disks', 'Investigation Recommended', 'Compliant'), ('Fresh', 'fresh', NO_RESULT, 'Action Required')]
+    assert reliability.entries == ()  # a first Compliant result is not a change
+    # An Error in its first result is not compared: the scan did not look.
+    previous, current = card_summaries(VERSION)
+    current['checks']['Fresh'] = entry('Error', category=COST)
+    changes = compare(previous, current, SLUGS, SECTION_IDS)
+    assert changes.checks['Fresh'] == CheckChange(note=NOT_COMPARED, note_reason='could not be checked now')
+    assert [(e.check_name, e.before, e.after) for e in changes.categories[1].entries] == [
+        ('Disks', 'Investigation Recommended', 'Compliant'), ('Fresh', None, 'not compared (could not be checked now)')]
 
 
 def test_score_deltas_are_whole_points():
@@ -284,11 +341,12 @@ def test_the_previous_scan_is_read_under_the_current_rule():
 
 
 def test_a_summary_states_the_policies_behind_the_security_score_and_version_one_is_read_the_same_way():
-    """Version 2 stores ``policies`` on the Organization Policies entry; version 1 stored the total as ``rows`` and
-    every differing policy as an identity, which gives the same numbers (app.reporting.scoring.summary_policies)."""
+    """Since version 2 a summary stores ``policies`` on the Organization Policies entry (version 3, v15.5, adds the
+    ``release``); version 1 stored the total as ``rows`` and every differing policy as an identity, which gives the
+    same numbers (app.reporting.scoring.summary_policies)."""
     _, _, first = scan(sample_results(), 'job-1')
     policies_entry = first['checks'][ORG_POLICIES_CHECK]
-    assert (first['version'], policies_entry['policies'], summary_policies(policies_entry)) == (2, {'compliant': 1, 'total': 4}, (1, 4))
+    assert (first['version'], first['release'], policies_entry['policies'], summary_policies(policies_entry)) == (3, VERSION, {'compliant': 1, 'total': 4}, (1, 4))
     version_one = {key: value for key, value in policies_entry.items() if key != 'policies'}
     assert summary_policies(version_one) == (1, 4) and summary_policies({'rows': 3, 'identities': []}) == (3, 3) and summary_policies({}) == (0, 0)
     # The invariant the recompute rests on: a summary's own scores and counts are what its checks give under the rule.
@@ -434,7 +492,8 @@ def test_a_first_scan_states_that_it_is_one():
     assert not any(marker in html for marker in (CHANGE_CHIP, ROW_NEW, LINE_NEW, RESOLVED_LIST))
     assert NEW_COLUMN not in csv_text
     # The summary the next scan compares with: statuses for every check, identities for the ones that need work.
-    assert (first['version'], first['job_id'], first['scope'], first['scope_id'], first['total_projects']) == (SUMMARY_VERSION, 'job-1', SCOPE, SCOPE_ID, 4)
+    assert (first['version'], first['release'], first['job_id'], first['scope'], first['scope_id'], first['total_projects']) == (
+        SUMMARY_VERSION, VERSION, 'job-1', SCOPE, SCOPE_ID, 4)
     assert first['overview'] == {'action_count': 4, 'investigation_count': 1, 'compliant_count': 3, 'error_count': 1}  # Organization Policies counts once
     assert {name: round(score) for name, score in first['scores'].items()} == {SECURITY: 42, COST: 50, RELIABILITY: 50, OPERATIONS: 0}  # (1 + 1/4) / 3
     assert first['checks']['Project IAM Hygiene'] == {'category': SECURITY, 'status': 'Action Required', 'rows': 2, 'identities': [
@@ -620,12 +679,39 @@ def test_a_check_that_starts_erroring_keeps_its_rows_unresolved():
     assert rows[RELIABILITY]['resolved'] == DASH
 
 
-def test_new_and_retired_checks_are_told_apart():
-    def edit(results):
-        results[RELIABILITY].append({'Check': 'Cloud SQL PITR', 'Status': 'Action Required', 'Finding': [{'Project': 'web-prod', 'Instance': 'orders-db'}]})
-        results[COST] = [f for f in results[COST] if f['Check'] != 'VM Rightsizing']
+def pitr_edit(results):
+    """A check only in the second scan (Cloud SQL PITR) and one only in the first (VM Rightsizing)."""
+    results[RELIABILITY].append({'Check': 'Cloud SQL PITR', 'Status': 'Action Required', 'Finding': [{'Project': 'web-prod', 'Instance': 'orders-db'}]})
+    results[COST] = [f for f in results[COST] if f['Check'] != 'VM Rightsizing']
 
-    html, csv_text, _ = two_scans(edit)
+
+def test_within_a_release_a_first_result_is_new_and_a_missing_one_had_nothing_to_check():
+    """v15.5: both scans by this release, so the previous one could have run Cloud SQL PITR and had nothing to check
+    (a project moved into the folder since): its row is new. VM Rightsizing had a result then and none now."""
+    html, csv_text, _ = two_scans(pitr_edit)
+    pitr = item(html, RELIABILITY, 'Cloud SQL PITR')
+    assert chip(pitr) == ('+1 new', 'No result in the previous scan (nothing to check then), so every finding is new')
+    assert new_rows(pitr) == ['web-prod orders-db'] and resolved(pitr) is None
+    _, rows, feet = changes_card(html)
+    assert rows[RELIABILITY]['status_changes'] == ['Cloud SQL PITR no result → Action Required']
+    assert (rows[RELIABILITY]['new'], rows[RELIABILITY]['resolved']) == ('1', DASH)
+    assert (rows[COST]['new'], rows[COST]['resolved']) == (DASH, DASH)  # nothing resolved by VM Rightsizing's absence
+    assert feet[0] == 'No result in this scan: VM Rightsizing.'
+    assert csv_new_flags(csv_text, RELIABILITY, 'Cloud SQL PITR') == {'web-prod · orders-db': 'yes'}
+
+
+@pytest.mark.parametrize('previous_release', ['15.4', None])
+def test_across_releases_a_new_check_is_not_compared_and_a_missing_one_is_no_longer_checked(previous_release):
+    """The previous scan by another release — or by one before v15.5, which named none — may not have had the check
+    at all, so nothing is called new; a check it had and this release does not is no longer checked."""
+    first = scan(sample_results(), 'job-1')[2]
+    if previous_release:
+        first['release'] = previous_release
+    else:
+        del first['release']
+    results = sample_results()
+    pitr_edit(results)
+    html, csv_text, _ = scan(results, 'job-2', previous=first)
     pitr = item(html, RELIABILITY, 'Cloud SQL PITR')
     assert chip(pitr) == (NOT_COMPARED, 'Rows not compared: new check')
     assert new_rows(pitr) == []
@@ -671,6 +757,7 @@ def test_a_summary_without_optional_fields_still_compares():
     first = {'version': 1, 'job_id': 'job-1', 'checks': {'Project IAM Hygiene': {'category': SECURITY, 'status': 'Compliant'}}}
     html, _, _ = scan(sample_results(), 'job-2', previous=first)
     assert chip(item(html, SECURITY, 'Project IAM Hygiene')) == ('+2 new', 'Was Compliant in the previous scan')
+    assert chip(item(html, COST, 'Idle Persistent Disks')) == (NOT_COMPARED, 'Rows not compared: new check')  # it names no release
     assert previous_scan_line(html) == 'view'  # no time to show, but the link is there
     _, rows, _ = changes_card(html)
     assert all((row['delta'], row['delta_class']) == (DASH, 'flat') for row in rows.values())  # no previous scores

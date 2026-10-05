@@ -51,6 +51,7 @@ from datetime import datetime, timezone
 
 from markupsafe import Markup
 
+from app.config import VERSION
 from app.reporting.changes import (IDENTITY_SEPARATOR, ORG_POLICIES_CHECK, RowMatcher, compare, identities_for, summarize,
                                    text_identities)
 from app.reporting.layouts import lay_out
@@ -407,6 +408,7 @@ class ReportContext:
     max_rows_per_check: int = MAX_ROWS_PER_CHECK
     generated_at: str = ""  # when the report was rendered, "2026-10-03 20:11 UTC" (the sidebar's footer)
     generated_ts: str = ""  # the same instant as "20261003T201100Z": the scan summary is filed under it
+    version: str = VERSION  # the release that rendered the report, "15.5" (the sidebar's footer, under the time)
     # Since the previous scan of this scope (app.reporting.changes.Changes). None: first scan, nothing is compared.
     changes: object = None
     # Check name → app.reporting.changes.RowMatcher, for the CSV's "New since last scan" column.

@@ -8,7 +8,81 @@ the test suite running inside the image, a zero-traffic canary revision scanned
 against a real organization, promotion, and a production scan compared fact for
 fact with the previous version's report.
 
-Versions are the image tags (`v5` … `v15.4`); the commit is the one that shipped.
+Versions are the image tags (`v5` … `v15.5`); the commit is the one that shipped.
+
+---
+
+## v15.5 — Release-aware comparison
+
+The first folder scans with a project in the folder (v15.3, v15.4) compared
+themselves with the scans of the folder while it was empty. Security went 13%
+→ 81% and three failing checks appeared, but the since line said "0 new
+findings · 0 resolved · no status changes", seventeen chips read *not compared
+(new check)* and no row was marked **New**: a check absent from the previous
+summary was treated as new to the release — the safe reading when the previous
+scan may have been run by an older version — when in fact the previous scan
+had nothing to check. The two cases are now told apart by the release that
+wrote each summary. Nothing changes for a check present in both scans; no new
+settings or permissions.
+
+### Added
+
+- **Every scan summary and the report name their release.** `app.config.VERSION`
+  (`"15.5"`, the image tag without the `v`) is recorded in each summary as
+  `release` (summary format 3) and shown in the report's sidebar footer under
+  the generation time ("CloudGauge v15.5"), so a stored report can be matched
+  to its release notes. A test pins the constant to the newest entry of this
+  file, so a release cannot ship without bumping it.
+
+### Changed: a check only in this scan (`app/reporting/changes.py`)
+
+- **Both scans by the same release:** the release could have run the check
+  then and did not, so there was nothing to check — an empty folder that has
+  its first project now, a project with its first bucket. The check is
+  compared with an empty previous result: every Action Required or
+  Investigation Recommended row is **new**, counted in the since line and the
+  card ("+3 new", chip tooltip "No result in the previous scan (nothing to
+  check then), so every finding is new"), marked **New** in the table and
+  flagged `yes` in the CSV; the Changes card lists it as "no result → Action
+  Required" and the Scorecard's *Since last scan* cell says "+3 new · first
+  result". A first result that is Compliant counts nothing and says nothing;
+  an Error now is still *not compared (could not be checked now)*.
+- **The previous scan by another release, or by one before v15.5 (its
+  summary names no release):** *not compared (new check)*, as before. The
+  rule is conservative across releases and self-corrects at the next scan.
+- **The reverse — a check with a result then and none now:** within a
+  release the card's footer says "No result in this scan: VM Rightsizing."
+  instead of "No longer checked: …"; nothing is counted as resolved by it,
+  as before.
+- The Scorecard's since line now states a change from **0 projects** ("0 → 1
+  projects"); a previous count of zero was dropped as if unknown.
+
+### Tests
+
+- `tests/test_changes.py`: the first-result rule on its own (rows, chip and
+  tooltip; Compliant nothing; Error not compared) and what makes two
+  summaries the same release; the card built within a release (Fresh's row
+  new, Backups' first Compliant result silent, Retired "No result in this
+  scan") next to the card built across releases and from a summary that
+  names none; two rendered scans by this release (chip, New row, card entry,
+  CSV flag, footer) and the same pair with the previous summary by v15.4 or
+  unnamed (unchanged reading). `tests/test_scorecard.py`: the per-action
+  since text; an empty scope's scan followed by its first project (10 new
+  findings, 0 → 1 projects, "no result → Action Required" ranked first) and
+  the reverse move (nothing resolved, 1 → 0 projects). `tests/test_reporting.py`:
+  the footer. `tests/test_packaging.py`: `VERSION` is the newest entry here
+  (`Dockerfile.test` now copies this file into the test image, which keeps
+  every other Markdown file out, so the gate runs inside the build).
+  `tests/test_scoring.py`, `tests/test_worker.py`: summary format 3 with the
+  release; a version-1 summary (no release) still reads the old way.
+
+### Upgrade notes
+
+- The first scan of each scope after this upgrade compares itself with a
+  summary that names no release, so it reads as before (*not compared (new
+  check)* for a check the previous summary lacked); from the second scan on,
+  the new rule applies. Nothing to migrate.
+- Summaries written by v15.5 carry `release`; older releases ignore the field.
 
 ---
 
@@ -880,6 +954,7 @@ performance; modernization; enablement; roadmap and roadblocks).
 | **v15.2** | Scores count verdicts | *Shipped.* A category's score is the share of its checks that reached a verdict and were compliant: Errors are stated next to the score, not inside it; Organization Policies is one check with partial credit; a category without a verdict is *Not assessed*; the cost recommenders write all-clear rows; the previous scan is recomputed under the current rule. |
 | **v15.3** | Folder and project scans | *Shipped.* From the first real folder and project scans: a project scan applies its folders' policies before the organization's; an empty folder still gets its scope-level checks; the executive summary speaks of the folder or project that was scanned. |
 | **v15.4** | Folder membership | *Shipped.* A folder scan compares Cloud Asset Inventory's project list with Resource Manager's direct children (one call): a project Asset Inventory has not caught up with is scanned too, one it still places in the folder is kept and noted, and the report says so only when the two disagree. |
+| **v15.5** | Release-aware comparison | *Shipped.* Every scan summary and the report's footer name the release; between two scans of one release a check with no earlier result is compared with nothing — its rows are new, counted and marked — instead of *not compared (new check)*, which stays for a previous scan by another release. |
 | **v16** | History and analytics | **BigQuery export** of every scan's findings; **scheduled scans**; a history page (scores over time); a guide for Gemini Enterprise / Looker over the export ("talk to your infrastructure"). |
 | **v17** | Footprint and support | A **Platform Footprint** page (what runs where: services, regions, versions); **modernization indicators** (legacy runtimes, unmanaged VMs, missing release channels); a **Support cases** briefing. |
 | Later | | VM Manager vulnerability summary, Security Command Center findings summary, SLO coverage, PDF export. |

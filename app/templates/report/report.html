@@ -56,7 +56,7 @@
             <span class="nav-meta"><span class="dot dot-{{ section.worst_status_class }}"></span><span class="mono">{{ section.attention_count }}</span></span>
         </a>
         {% endfor %}
-        <div class="sidebar-foot"><span class="sidebar-foot-label">Generated</span><time>{{ generated_at }}</time></div>
+        <div class="sidebar-foot"><span class="sidebar-foot-label">Generated</span><time>{{ generated_at }}</time><span class="version">CloudGauge v{{ version }}</span></div>
     </nav>
     <div class="main-content">
         <header class="report-header">
@@ -160,7 +160,7 @@
                     </tbody>
                 </table>
                 {% if changes.retired_checks %}
-                <p class="changes-foot">No longer checked: {{ changes.retired_checks|join(", ") }}.</p>
+                <p class="changes-foot">{{ changes.retired_label }}: {{ changes.retired_checks|join(", ") }}.</p>
                 {% endif %}
                 <p class="changes-foot">New and resolved rows are counted per check on the category pages; rows the previous scan did not have are marked <span class="pill pill-new">New</span>. Briefings are not compared.</p>
             </section>

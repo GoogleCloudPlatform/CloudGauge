@@ -8,6 +8,7 @@ venv/
 .pytest_cache/
 .ruff_cache/
 *.md
+!RELEASE_NOTES.md
 LICENSE
 assets/
 .DS_Store
