@@ -32,6 +32,7 @@ import traceback
 from app.checks.categories import categorize_findings
 from app.checks.runner import list_projects, run_all_checks
 from app.reporting.html_report import generate_reports
+from app.services.resource_manager import folder_membership
 from app.utils import ThrottledProgressReporter
 
 
@@ -117,7 +118,8 @@ def execute_scan_job(data, *, store, banner=None, fanout=None):
         # Synthetic scans (the ones with a banner) neither compare with real scans nor enter the history.
         previous = None if banner else store.read_previous_summary(scope, scope_id, job_id)
         html_report, csv_report, summary = generate_reports(scope, scope_id, job_id, all_results, banner=banner,
-                                                            total_projects=total_projects, previous=previous)
+                                                            total_projects=total_projects, previous=previous,
+                                                            membership=folder_membership(projects or []))
 
         store.upload_reports(job_id, scope_id, html_report, csv_report)
         if not banner:

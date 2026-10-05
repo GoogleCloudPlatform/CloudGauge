@@ -256,6 +256,8 @@ def build_scorecard(context):
         coverage_text = f"{coverage.projects_scanned:,} of {coverage.total_projects:,} projects"
     else:
         coverage_text = f"{context.total_projects:,} projects" if context.total_projects else ""
+    if context.membership:  # a folder scan that reconciled Asset Inventory with Resource Manager says so here too
+        coverage_text = " · ".join(part for part in (coverage_text, context.membership.header_text) if part)
     return Scorecard(
         scope_title=context.scope_title, scope_id=context.scope_id, job_id=context.job_id,
         generated_at=context.generated_at, generated_ts=context.generated_ts, coverage_text=coverage_text,

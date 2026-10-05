@@ -279,7 +279,7 @@ class FakeDiscovery:
             services = SimpleNamespace(get=self._get_run_service)
             return SimpleNamespace(projects=lambda: SimpleNamespace(locations=lambda: SimpleNamespace(services=lambda: services)))
         if serviceName == 'cloudresourcemanager':
-            return SimpleNamespace(projects=lambda: SimpleNamespace(getAncestry=self._get_ancestry))
+            return SimpleNamespace(projects=lambda: SimpleNamespace(getAncestry=self._get_ancestry, list=self._list_projects))
         raise AssertionError(f'unexpected discovery.build({serviceName!r}, {version!r})')
 
     def _get_run_service(self, name):
@@ -289,25 +289,39 @@ class FakeDiscovery:
     def _get_ancestry(self, projectId, body):
         return _execute(self.ancestry_error or self.ancestry)
 
+    def _list_projects(self, parent, pageSize=None, pageToken=None):
+        """v3 ``projects.list``: no direct children. A folder scan on the bare fakes reconciles nothing, because
+        ``FakeAssets.add`` reports no parent unless asked to; install a FakeResourceManager to test the comparison."""
+        return _execute({})
+
 
 class FakeResourceManager:
     """The Resource Manager calls behind ``get_effective_org_policies`` (``app.services.org_policies``):
     ``projects.getAncestry`` and ``listOrgPolicies`` on organizations, folders and projects (v1), and
-    ``folders.get`` (v3). Install it for both versions with
+    ``folders.get`` (v3); and behind a folder scan's membership check (``app.services.resource_manager``):
+    ``projects.list`` (v3). Install it for both versions with
     ``gcp.discovery.apis['cloudresourcemanager'] = FakeResourceManager(...)``.
 
     ``policies`` maps a resource (``'organizations/1'``, ``'folders/2'``, ``'projects/p'``) to the boolean
     constraints set *on* it, ``{constraint_id: enforced}``; ``parents`` maps a folder resource to its parent
     resource; ``ancestry`` maps a project ID to its ancestors bottom-up, as the API lists them:
-    ``[('project', 'p'), ('folder', '2'), ('organization', '1')]``. ``listed`` records the resources whose
-    policies were listed, in order.
+    ``[('project', 'p'), ('folder', '2'), ('organization', '1')]``; ``children`` maps a folder resource to
+    its direct child projects as v3 returns them (``{'projectId': 'p', 'displayName': 'P', 'name':
+    'projects/123'}``; ``state`` defaults to ACTIVE). ``listed`` records the resources whose policies were
+    listed, in order; ``children_listed`` the ``(parent, pageSize, pageToken)`` of every ``projects.list``.
+    ``children_error`` makes ``projects.list`` raise; ``page_size`` makes it page (``nextPageToken`` until
+    the last page) instead of answering in one.
     """
 
-    def __init__(self, policies, parents=None, ancestry=None):
+    def __init__(self, policies, parents=None, ancestry=None, children=None):
         self.policies = policies
         self.parents = parents or {}
         self.ancestry = ancestry or {}
+        self.children = children or {}
+        self.children_error = None
+        self.page_size = None
         self.listed = []
+        self.children_listed = []
 
     def _list_org_policies(self, resource, body):
         self.listed.append(resource)
@@ -320,6 +334,19 @@ class FakeResourceManager:
     def _get_ancestry(self, projectId, body):
         return _execute({'ancestor': [{'resourceId': {'type': kind, 'id': resource_id}} for kind, resource_id in self.ancestry[projectId]]})
 
+    def _list_projects(self, parent, pageSize=None, pageToken=None):
+        self.children_listed.append((parent, pageSize, pageToken))
+        if self.children_error:
+            return _execute(self.children_error)
+        children = [dict({'state': 'ACTIVE', 'parent': parent}, **child) for child in self.children.get(parent, [])]
+        if not self.page_size:
+            return _execute({'projects': children})
+        start = int(pageToken or 0)
+        page = {'projects': children[start:start + self.page_size]}
+        if start + self.page_size < len(children):
+            page['nextPageToken'] = str(start + self.page_size)
+        return _execute(page)
+
     def organizations(self):
         return SimpleNamespace(listOrgPolicies=self._list_org_policies)
 
@@ -327,7 +354,7 @@ class FakeResourceManager:
         return SimpleNamespace(listOrgPolicies=self._list_org_policies, get=self._get_folder)
 
     def projects(self):
-        return SimpleNamespace(listOrgPolicies=self._list_org_policies, getAncestry=self._get_ancestry)
+        return SimpleNamespace(listOrgPolicies=self._list_org_policies, getAncestry=self._get_ancestry, list=self._list_projects)
 
 
 class FakeGemini:
@@ -408,11 +435,13 @@ class FakeAssets:
         self.error = None
         self.requests = []
 
-    def add(self, kind, resource_id, display_name):
-        """Adds a folder or a project (``kind`` is ``'folders'`` or ``'projects'``)."""
+    def add(self, kind, resource_id, display_name, parent=None):
+        """Adds a folder or a project (``kind`` is ``'folders'`` or ``'projects'``); ``parent`` is what Asset Search
+        reports as the parent, e.g. ``'folders/42'`` (``None``: the fake reports none)."""
         self.resources.append(SimpleNamespace(
             name=f'//cloudresourcemanager.googleapis.com/{kind}/{resource_id}',
-            display_name=display_name, asset_type=ASSET_TYPES[kind]))
+            display_name=display_name, asset_type=ASSET_TYPES[kind],
+            parent_full_resource_name=f'//cloudresourcemanager.googleapis.com/{parent}' if parent else ''))
 
     @property
     def client_class(self):

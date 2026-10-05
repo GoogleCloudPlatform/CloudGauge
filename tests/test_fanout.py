@@ -599,6 +599,24 @@ def test_single_task_scans_state_their_coverage_too():
     assert coverage_line(unknown) is None and '<dt>Coverage</dt>' not in unknown
 
 
+def test_a_sharded_folder_scan_states_what_the_listing_reconciled(store, queue, monkeypatch):
+    """v15.4: the manifest keeps the project dicts as the listing produced them, membership marks included, so the
+    aggregated report has the same Folder membership row a single-task scan would."""
+    fake_plans(monkeypatch, [])
+    fan = make_fanout(store, queue)
+    listed = projects(3) + [{'projectId': 'moved-in', 'displayName': 'Moved In', 'membership': 'resource-manager-only'}]
+    body = {'scope': 'folder', 'scope_id': '42', 'job_id': JOB}
+    manifest = fan.dispatch('folder', '42', JOB, listed)
+    assert store.read_manifest(JOB)['shards']['shard-002'][1]['membership'] == 'resource-manager-only'
+    for shard_id in manifest['shards']:
+        assert fan.run_shard({**body, 'shard_id': shard_id}) is True
+    assert fan.aggregate(body) is True
+    html = store.read_report(JOB, '42', 'html')
+    assert coverage_line(html) == '4 of 4 projects · folder-level checks completed'
+    assert '<dt>Folder membership</dt>' in html and '1 project added from Resource Manager' in html
+    assert 'Resource Manager places moved-in in this folder' in html
+
+
 def test_error_rows_name_projects_not_shards():
     manifest = build_manifest('organization', SCOPE_ID, JOB, projects(30), 30)
     assert fanout.describe_projects(projects(1)) == '1 project (p-000)'

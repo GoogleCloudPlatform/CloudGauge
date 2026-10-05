@@ -68,6 +68,9 @@
 {% if coverage %}
                     <dt>Coverage</dt><dd class="coverage{% if not coverage.complete %} coverage-incomplete{% endif %}"><span class="dot dot-{{ 'compliant' if coverage.complete else 'investigation' }}"></span>{{ coverage.header_text }}</dd>
 {% endif %}
+{% if membership %}
+                    <dt>Folder membership</dt><dd class="coverage coverage-incomplete"><span class="dot dot-investigation"></span>{{ membership.header_text }}</dd>
+{% endif %}
                     <dt>Previous scan</dt><dd class="previous-scan">
                     {%- if changes %}{{ changes.previous_generated_at }} <a href="/report/{{ changes.previous_job_id|pathsegment }}/{{ scope_id|pathsegment }}">view</a>
                     {%- else %}none — first scan of this {{ scope }}{% endif %}</dd>
@@ -101,6 +104,12 @@
                 {%- if coverage.projects_partial %}, {{ "{:,}".format(coverage.projects_partial) }} partially scanned (some checks did not finish in time){% endif %}
                 {%- if coverage.projects_not_scanned %}, {{ "{:,}".format(coverage.projects_not_scanned) }} not scanned{% endif %}; {{ coverage.checks_label }} {{ coverage.scope_checks_text }}.
                 Checks that could not run are listed as errors in their sections.</span>
+            </p>
+{% endif %}
+{% if membership %}
+            <p role="note" class="coverage-note membership-note">
+                <span class="dot dot-investigation"></span>
+                <span><strong>Folder membership:</strong> {{ membership.note_text }}</span>
             </p>
 {% endif %}
             <section class="card">

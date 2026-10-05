@@ -8,7 +8,78 @@ the test suite running inside the image, a zero-traffic canary revision scanned
 against a real organization, promotion, and a production scan compared fact for
 fact with the previous version's report.
 
-Versions are the image tags (`v5` … `v15.3`); the commit is the one that shipped.
+Versions are the image tags (`v5` … `v15.4`); the commit is the one that shipped.
+
+---
+
+## v15.4 — Folder membership from Resource Manager
+
+A folder scan finds its projects with Cloud Asset Inventory search, which is
+recursive but eventually consistent. After the v15.3 rollout a project moved
+into the scanned folder was missing from the folder-scoped search for 58
+minutes (Resource Manager listed it in the folder at once), so a folder scan
+started in that hour would have reported the folder without it — and the
+header would have said "0 of 0 projects", true to the search and wrong about
+the folder. One Resource Manager call per folder scan now closes the gap.
+Organization and project scans are unchanged; no new settings or permissions.
+
+### Added
+
+- **A folder scan compares Asset Inventory with Resource Manager.** After the
+  Asset Inventory search, the scan lists the folder's direct child projects
+  with Resource Manager (v3 `projects.list(parent=folders/…)`, one paged call)
+  and reconciles the two lists. A project Resource Manager lists in the folder
+  that Asset Inventory did not return is **scanned too**. A project Asset
+  Inventory still places directly in the folder that Resource Manager no
+  longer lists there — moved out, deleted, or not readable by the scanner,
+  which is why it is not dropped — is **kept and noted**. The report's header
+  gains a **Folder membership** row ("1 project added from Resource Manager ·
+  1 project no longer in this folder per Resource Manager", amber), the
+  Overview a note under the count cards naming the projects, saying why and
+  that they were scanned, and the Scorecard's Markdown copy carries the line
+  in its meta; the worker log has a warning with the same project IDs. When
+  the two sources agree — the normal case — nothing is shown and nothing is
+  logged.
+- If Resource Manager cannot be asked (a permission, an outage), the Asset
+  Inventory list stands, the scan goes on, and the log says the membership
+  was not checked. Projects under a subfolder are Asset Inventory's word
+  alone: Resource Manager lists one level, and a walk of the folder tree was
+  deliberately not added. The check costs one API call in a folder scan and
+  nothing in the others. `app/services/resource_manager.py`
+  (`reconcile_folder_projects`, `folder_membership`),
+  `app/reporting/context.py` (`FolderMembership`).
+
+### Tests
+
+- New `tests/test_folder_membership.py`: the two sources agreeing (one
+  Resource Manager call, nothing marked, nothing logged); a project only
+  Resource Manager lists appended and marked, a project only Asset Inventory
+  places in the folder kept and marked, each with its log line; a project
+  under a subfolder left alone; inactive children not added; every page of
+  Resource Manager's answer read; Resource Manager failing (the list stands,
+  the warning logged); an organization scan never asking; the header row,
+  the Overview note and the Scorecard meta for one project, for several
+  ("a, b and 2 more") and for none; and a folder scan through `/run-scan`
+  with the real listing over the fakes, where the added project reaches the
+  checks, the coverage and the report.
+- `tests/test_fanout.py`: a sharded folder scan carries the listing's marks
+  through the manifest and the aggregated report states them.
+  `tests/test_synthetic.py`: the per-scope synthetic scan asserts the one
+  `projects.list` call in a folder scan, none otherwise, and no membership
+  row when the two agree. `tests/fakes.py`: `FakeResourceManager` serves v3
+  `projects.list` (children per folder, paging, errors), `FakeAssets.add`
+  takes a `parent`; the synthetic provider answers `projects.list` from its
+  world.
+
+### Upgrade notes
+
+- No new permission: `resourcemanager.projects.list` is in `roles/browser`,
+  which the service account already holds on the organization.
+- A folder scan run within an hour or so of moving a project into the folder
+  now includes it, with the Folder membership row and note; the next scan,
+  once Asset Inventory has caught up, shows neither. A scan run in the hour
+  after a project is moved *out* of the folder still includes it (Asset
+  Inventory still places it there) and says so.
 
 ---
 
@@ -808,6 +879,7 @@ performance; modernization; enablement; roadmap and roadblocks).
 | **v15.1** | The QTR brief | *Shipped.* The **Scorecard** page (a stoplight per pillar with its evidence, the since line, top actions, action-plan CSV, Markdown copy, one-page print) on top of v15's scan summaries and *Changes since last scan*; the executive summary is generated there. |
 | **v15.2** | Scores count verdicts | *Shipped.* A category's score is the share of its checks that reached a verdict and were compliant: Errors are stated next to the score, not inside it; Organization Policies is one check with partial credit; a category without a verdict is *Not assessed*; the cost recommenders write all-clear rows; the previous scan is recomputed under the current rule. |
 | **v15.3** | Folder and project scans | *Shipped.* From the first real folder and project scans: a project scan applies its folders' policies before the organization's; an empty folder still gets its scope-level checks; the executive summary speaks of the folder or project that was scanned. |
+| **v15.4** | Folder membership | *Shipped.* A folder scan compares Cloud Asset Inventory's project list with Resource Manager's direct children (one call): a project Asset Inventory has not caught up with is scanned too, one it still places in the folder is kept and noted, and the report says so only when the two disagree. |
 | **v16** | History and analytics | **BigQuery export** of every scan's findings; **scheduled scans**; a history page (scores over time); a guide for Gemini Enterprise / Looker over the export ("talk to your infrastructure"). |
 | **v17** | Footprint and support | A **Platform Footprint** page (what runs where: services, regions, versions); **modernization indicators** (legacy runtimes, unmanaged VMs, missing release channels); a **Support cases** briefing. |
 | Later | | VM Manager vulnerability summary, Security Command Center findings summary, SLO coverage, PDF export. |

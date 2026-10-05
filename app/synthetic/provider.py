@@ -352,6 +352,17 @@ class SyntheticGcp:
         self.call("cloudresourcemanager", "folders.get", style="http")
         return {"name": kw["name"], "parent": f"organizations/{self.world.org_id}", "displayName": "Synthetic folder"}
 
+    def _h_cloudresourcemanager_projects_list(self, kw, project_id):
+        """v3 ``projects.list``: a folder's direct children (the world has one level of folders). The folder
+        scan's membership check compares them with Asset Search, and finds them the same."""
+        self.call("cloudresourcemanager", "projects.list", style="http")
+        parent = str(kw.get("parent", ""))
+        if not parent.startswith("folders/"):
+            return {}
+        return {"projects": [{"name": f"projects/{p.project_number}", "parent": parent, "projectId": p.project_id,
+                              "displayName": p.display_name, "state": "ACTIVE"}
+                             for p in self.world.projects(parent.split("/", 1)[1])]}
+
     def _h_compute_instances_aggregatedList(self, kw, project_id):
         self.call("compute", "instances.aggregatedList", project_id=project_id, style="http")
         profile, items = self.world.project(project_id), {}
@@ -523,7 +534,8 @@ class SyntheticGcp:
                         for i, fid in enumerate(self.world.folder_ids)]
         if "cloudresourcemanager.googleapis.com/Project" in asset_types:
             results += [SimpleNamespace(name=f"//cloudresourcemanager.googleapis.com/projects/{p.project_id}", display_name=p.display_name,
-                                        asset_type="cloudresourcemanager.googleapis.com/Project", project=f"projects/{p.project_number}")
+                                        asset_type="cloudresourcemanager.googleapis.com/Project", project=f"projects/{p.project_number}",
+                                        parent_full_resource_name=f"//cloudresourcemanager.googleapis.com/folders/{p.folder_id}")
                         for p in self.world.projects(folder_id)]
         self.call("asset", "searchAllResources", pages=max(1, math.ceil(len(results) / PAGE_SIZE)))
         return results

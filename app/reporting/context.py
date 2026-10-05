@@ -328,6 +328,63 @@ class Coverage:
         return " · ".join(parts)
 
 
+def _project_list(project_ids):
+    """``"web-prod"``, ``"web-prod and data-lake"``, ``"web-prod, data-lake and 3 more"``: at most two names."""
+    shown = list(project_ids[:2])
+    rest = len(project_ids) - len(shown)
+    if rest:
+        return f"{', '.join(shown)} and {rest:,} more"
+    return " and ".join(shown)
+
+
+@dataclass(frozen=True)
+class FolderMembership:
+    """What a folder scan reconciled between Cloud Asset Inventory and Resource Manager (v15.4).
+
+    Rendered as the header's ``Folder membership`` row and an Overview note, and only when
+    the two sources disagreed (``app.services.resource_manager.folder_membership``):
+    ``added`` are projects Resource Manager lists in the folder that Asset Inventory did not
+    return yet (they were scanned); ``unlisted`` are projects Asset Inventory still places in
+    the folder that Resource Manager no longer does (scanned anyway, and said so).
+    """
+    added: tuple  # project IDs, sorted
+    unlisted: tuple  # project IDs, sorted
+
+    @classmethod
+    def from_dict(cls, membership):
+        """Builds the view-model from ``folder_membership``'s dict; None for None or nothing reconciled."""
+        if not membership:
+            return None
+        added, unlisted = tuple(membership.get("added") or ()), tuple(membership.get("unlisted") or ())
+        return cls(added=added, unlisted=unlisted) if added or unlisted else None
+
+    @property
+    def header_text(self):
+        """``"1 project added from Resource Manager · 2 projects no longer in this folder per Resource Manager"``."""
+        parts = []
+        if self.added:
+            parts.append(f"{len(self.added):,} project{'' if len(self.added) == 1 else 's'} added from Resource Manager")
+        if self.unlisted:
+            parts.append(f"{len(self.unlisted):,} project{'' if len(self.unlisted) == 1 else 's'} no longer in this folder per Resource Manager")
+        return " · ".join(parts)
+
+    @property
+    def note_text(self):
+        """The Overview note: which projects, why, and that they were scanned."""
+        sentences = []
+        if self.added:
+            one = len(self.added) == 1
+            sentences.append(f"Resource Manager places {_project_list(self.added)} in this folder; Cloud Asset Inventory, which "
+                             f"finds a folder's projects for the scan, does not list {'it' if one else 'them'} yet "
+                             f"(it can lag a move or a new project by an hour or more). {'It was' if one else 'They were'} scanned.")
+        if self.unlisted:
+            one = len(self.unlisted) == 1
+            sentences.append(f"Cloud Asset Inventory still places {_project_list(self.unlisted)} in this folder; Resource Manager "
+                             f"no longer does (moved out, deleted, or not readable by the scanner). {'It was' if one else 'They were'} "
+                             f"scanned anyway.")
+        return " ".join(sentences)
+
+
 @dataclass(frozen=True)
 class ReportContext:
     scope: str
@@ -343,6 +400,9 @@ class ReportContext:
     coverage: Coverage | None = None
     # Projects in the scanned scope, when known (summary lines then say "312 of 1,000 projects").
     total_projects: int | None = None
+    # What a folder scan reconciled between Asset Inventory and Resource Manager (the header's Folder
+    # membership row and an Overview note). None, the normal case: the two agreed, and nothing is rendered.
+    membership: FolderMembership | None = None
     rows_per_page: int = ROWS_PER_PAGE
     max_rows_per_check: int = MAX_ROWS_PER_CHECK
     generated_at: str = ""  # when the report was rendered, "2026-10-03 20:11 UTC" (the sidebar's footer)
@@ -534,7 +594,8 @@ def build_org_policy_summary(org_policy_data):
     return OrgPolicySummary(tuple(categories), compliant_policy_count, total_policies, status_class, icon)
 
 
-def build_report_context(scope, scope_id, job_id, all_results, banner=None, coverage=None, total_projects=None, previous=None):
+def build_report_context(scope, scope_id, job_id, all_results, banner=None, coverage=None, total_projects=None, previous=None,
+                         membership=None):
     """
     Builds the data for the HTML report.
 
@@ -554,6 +615,9 @@ def build_report_context(scope, scope_id, job_id, all_results, banner=None, cove
         previous (dict, optional): The summary of the scope's previous scan
             (``app.reporting.changes.summarize``); the report then shows what
             changed since. ``None``: a first scan, nothing is compared.
+        membership (dict, optional): What a folder scan reconciled between Asset
+            Inventory and Resource Manager (``app.services.resource_manager.folder_membership``).
+            ``None``: the two agreed; the report says nothing about it.
 
     Returns:
         ReportContext: Everything the report templates display.
@@ -566,6 +630,7 @@ def build_report_context(scope, scope_id, job_id, all_results, banner=None, cove
         coverage_model = Coverage.complete_for(total_projects, scope)
     else:
         coverage_model = None
+    membership_model = FolderMembership.from_dict(membership)
 
     # --- CALCULATE SCORES AND DATA FOR ALL SECTIONS ---
     org_policy_summary = None
@@ -672,6 +737,7 @@ def build_report_context(scope, scope_id, job_id, all_results, banner=None, cove
         sections=tuple(sections),
         banner=banner,
         coverage=coverage_model,
+        membership=membership_model,
         total_projects=total_projects,
         generated_at=generated_at,
         generated_ts=generated_ts,

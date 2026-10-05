@@ -60,7 +60,7 @@ from app.checks.registry import project_check_plan, scope_check_plan, shard_chec
 from app.checks.runner import error_finding, record_error, run_check_plan
 from app.config import JOB_TIME_LIMIT_FACTOR, MIN_JOB_TIME_LIMIT_SECONDS
 from app.reporting.html_report import generate_reports
-from app.services.resource_manager import get_active_compute_locations
+from app.services.resource_manager import folder_membership, get_active_compute_locations
 from app.services.results_store import ShardSink
 
 SCOPE_SHARD = "scope"
@@ -435,8 +435,10 @@ class FanOut:
             self.store.update_status(job_id, scope_id, 98, "Generating final HTML and CSV reports...", **fields)
             coverage = build_coverage(manifest, markers)
             previous = None if self.banner else self.store.read_previous_summary(scope, scope_id, job_id)
+            # The manifest's project dicts carry what the folder listing reconciled (app.services.resource_manager).
+            membership = folder_membership([project for shard in manifest["shards"].values() for project in shard])
             html_report, csv_report, summary = generate_reports(scope, scope_id, job_id, all_results, banner=self.banner,
-                                                                coverage=coverage, previous=previous)
+                                                                coverage=coverage, previous=previous, membership=membership)
             self.store.upload_reports(job_id, scope_id, html_report, csv_report)
             if not self.banner:
                 self.store.write_scan_summary(summary)

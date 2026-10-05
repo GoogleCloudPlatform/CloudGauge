@@ -90,16 +90,20 @@ def generate_html_report(scope, scope_id, job_id, banner=None, coverage=None, to
                                               total_projects=total_projects, previous=previous))
 
 
-def generate_reports(scope, scope_id, job_id, all_results, *, banner=None, coverage=None, total_projects=None, previous=None):
+def generate_reports(scope, scope_id, job_id, all_results, *, banner=None, coverage=None, total_projects=None, previous=None,
+                     membership=None):
     """Everything a finished scan uploads: ``(html, csv, summary)``.
 
     The HTML and the CSV come from one context, so a row the page marks *New*
     is the row the CSV marks. ``summary`` is what the next scan of this scope
     compares with (``app.reporting.changes.summarize``); the caller files it
     with ``GcsResultsStore.write_scan_summary`` once the reports are uploaded.
+    ``membership`` is what a folder scan reconciled between Asset Inventory and
+    Resource Manager (``app.services.resource_manager.folder_membership``), None
+    when they agreed.
     """
     print(f"[{job_id}] 📊 Generating final report for {scope}: {scope_id}...")
     context = build_report_context(scope, scope_id, job_id, all_results, banner=banner, coverage=coverage,
-                                   total_projects=total_projects, previous=previous)
+                                   total_projects=total_projects, previous=previous, membership=membership)
     csv_report = generate_csv_data(all_results, row_matchers=context.row_matchers if context.changes else None)
     return render_report(context), csv_report, summarize(context)

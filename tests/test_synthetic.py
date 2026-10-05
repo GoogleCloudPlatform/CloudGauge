@@ -234,6 +234,10 @@ def test_scan_completes_against_the_synthetic_organization(gcp, scope):
     assert 'Advisory Notifications' in html  # read from the organization, or per project
     metrics = provider.metrics.snapshot()
     assert metrics['total_calls'] > 50 and metrics['errors'] == {}
+    # v15.4: a folder scan compares Asset Inventory's projects with Resource Manager's direct children (one call);
+    # the synthetic world answers both from the same list, so the report has nothing to say about membership.
+    assert metrics['by_method'].get('cloudresourcemanager.projects.list', 0) == (1 if scope == 'folder' else 0)
+    assert 'Folder membership' not in html
     assert store.client.bucket(store.bucket_name).object_names('intermediate/') == []  # cleaned up
     assert store.client.stats()['writes'] > 20
 

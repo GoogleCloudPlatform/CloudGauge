@@ -89,15 +89,113 @@ def list_projects_for_scope(scope, scope_id):
                 'projectId': project_id,
                 'displayName': resource.display_name,
                 'projectNumber': project_number_of(getattr(resource, 'project', '')),
+                'parent': parent_of(getattr(resource, 'parent_full_resource_name', '')),
             })
         
         print(f"✅ Found {len(all_projects)} ACTIVE projects recursively.")
+        if scope == 'folder':
+            all_projects = reconcile_folder_projects(scope_id, all_projects)
         return all_projects
 
     except Exception as e:
         logging.error(f"❌ Critical error listing projects with Cloud Asset API: {e}")
         traceback.print_exc()
         return []
+
+
+# --- Folder membership (v15.4) ---
+#
+# A folder scan finds its projects with Cloud Asset Inventory search, which is recursive
+# (nested folders included) but eventually consistent: a project moved into the folder,
+# or created in it, was missing from the search for an hour in practice, and one moved
+# out lingers as long. Resource Manager is authoritative and immediate but lists one
+# level at a time. So a folder scan also asks Resource Manager for the folder's direct
+# child projects - one call - and reconciles the two lists:
+#
+# - a project Resource Manager lists in the folder that Asset Inventory did not return is
+#   scanned too (``RESOURCE_MANAGER_ONLY``);
+# - a project Asset Inventory places directly in the folder that Resource Manager no
+#   longer lists there (moved out or deleted) is kept and marked (``ASSET_INVENTORY_ONLY``):
+#   Resource Manager only lists what the scanner may read, so dropping it could hide a
+#   project for a permission gap rather than a move.
+#
+# Projects in nested folders are Asset Inventory's word alone; a mismatch there would
+# take a folder walk to see. The report says what was reconciled (``folder_membership``);
+# when the two agree, which is the normal case, it says nothing.
+MEMBERSHIP = 'membership'  # the key on a reconciled project dict; absent when both sources list the project
+RESOURCE_MANAGER_ONLY = 'resource-manager-only'
+ASSET_INVENTORY_ONLY = 'asset-inventory-only'
+RESOURCE_MANAGER_PAGE_SIZE = 300
+
+
+def parent_of(parent_full_resource_name):
+    """Asset Search's parent (``"//cloudresourcemanager.googleapis.com/folders/123"``) as ``"folders/123"``; ``""`` when absent."""
+    value = str(parent_full_resource_name or '').strip()
+    return value.rsplit('.googleapis.com/', 1)[-1] if value else ''
+
+
+def list_folder_children(folder_id):
+    """The folder's direct child projects per Resource Manager (v3 ``projects.list``), ``{project_id: project dict}``.
+
+    Returns None when they could not be listed; the caller then leaves Asset Inventory's list alone.
+    """
+    try:
+        credentials, _ = gcp.auth_default(scopes=SCOPES)
+        service = gcp.api_build('cloudresourcemanager', 'v3', credentials=credentials)
+        children, page_token = {}, None
+        while True:
+            response = service.projects().list(parent=f'folders/{folder_id}', pageSize=RESOURCE_MANAGER_PAGE_SIZE,
+                                               pageToken=page_token).execute()
+            for project in response.get('projects', []):
+                if project.get('state', 'ACTIVE') == 'ACTIVE' and project.get('projectId'):
+                    children[project['projectId']] = {
+                        'projectId': project['projectId'],
+                        'displayName': project.get('displayName') or project['projectId'],
+                        'projectNumber': project_number_of(project.get('name', '')),
+                        'parent': f'folders/{folder_id}',
+                    }
+            page_token = response.get('nextPageToken')
+            if not page_token:
+                return children
+    except Exception as e:
+        logging.warning(f"⚠️ Could not list the folder's projects with Resource Manager; folder membership not checked: {e}")
+        return None
+
+
+def reconcile_folder_projects(folder_id, projects):
+    """Reconciles a folder scan's Asset Inventory project list with Resource Manager's direct children.
+
+    Returns the projects to scan: ``projects``, with the ones Asset Inventory places directly in the folder
+    but Resource Manager does not list there marked ``ASSET_INVENTORY_ONLY``, followed by the direct children
+    Asset Inventory did not return, marked ``RESOURCE_MANAGER_ONLY``. ``projects`` as given when Resource
+    Manager could not be asked.
+    """
+    children = list_folder_children(folder_id)
+    if children is None:
+        return projects
+    parent = f'folders/{folder_id}'
+    listed = {project['projectId'] for project in projects}
+    reconciled = [dict(project, **{MEMBERSHIP: ASSET_INVENTORY_ONLY})
+                  if project.get('parent') == parent and project['projectId'] not in children else project
+                  for project in projects]
+    added = [dict(child, **{MEMBERSHIP: RESOURCE_MANAGER_ONLY}) for project_id, child in children.items() if project_id not in listed]
+    membership = folder_membership(reconciled + added)
+    if membership:
+        print(f"⚠️ Folder membership: Cloud Asset Inventory and Resource Manager disagree on folder {folder_id}. "
+              f"Added from Resource Manager (not yet in Asset Inventory): {', '.join(membership['added']) or 'none'}. "
+              f"Listed by Asset Inventory only (no longer in the folder per Resource Manager): {', '.join(membership['unlisted']) or 'none'}.")
+    return reconciled + added
+
+
+def folder_membership(projects):
+    """What a folder scan reconciled, for the report: ``{"added": [ids], "unlisted": [ids]}`` (sorted), or None when nothing was.
+
+    ``added``: projects Resource Manager lists in the folder that Asset Inventory did not return (scanned);
+    ``unlisted``: projects Asset Inventory places directly in the folder that Resource Manager no longer does (scanned, noted).
+    """
+    added = sorted(p['projectId'] for p in projects if isinstance(p, dict) and p.get(MEMBERSHIP) == RESOURCE_MANAGER_ONLY)
+    unlisted = sorted(p['projectId'] for p in projects if isinstance(p, dict) and p.get(MEMBERSHIP) == ASSET_INVENTORY_ONLY)
+    return {'added': added, 'unlisted': unlisted} if added or unlisted else None
 
 
 def get_active_compute_locations(all_projects, on_error=None):
