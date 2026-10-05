@@ -307,7 +307,7 @@ async function generateAiSummary() {
         const response = await fetch('/api/get-summary', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ scope_id: {{ scope_id|tojson }}, job_id: {{ job_id|tojson }} })
+            body: JSON.stringify({ scope: {{ scope|tojson }}, scope_id: {{ scope_id|tojson }}, job_id: {{ job_id|tojson }} })
         });
         if (!response.ok) {
             const err = await response.json().catch(() => ({}));

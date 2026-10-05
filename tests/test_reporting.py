@@ -257,7 +257,7 @@ def test_report_is_self_contained():
     for handler in handlers | paging | {'scheduleRowFilter', 'applyRowFilter', 'sortTable', 'toggleClamp'}:  # defined in the inlined script
         assert re.search(rf'function {handler}\(', html), handler
     assert sorted(set(re.findall(r"fetch\('([^']+)'", html))) == ['/api/get-insights', '/api/get-suggestions', '/api/get-summary']
-    assert 'JSON.stringify({ scope_id: "123456789", job_id: "job-42" })' in html
+    assert 'JSON.stringify({ scope: "organization", scope_id: "123456789", job_id: "job-42" })' in html  # get-summary (v15.3: with the scope)
     assert 'JSON.stringify({ scope: "organization", scope_id: "123456789" })' in html
 
 
@@ -507,13 +507,11 @@ def test_text_details_keep_their_line_breaks():
 def test_script_values_are_json_strings(scope_id):
     """IDs in the inline script can't end the string (quote, trailing backslash) or the <script> element."""
     html = generate_html_report('project', scope_id, 'job-42', **SCENARIOS['sample scan'])
-    match = re.search(r'JSON\.stringify\(\{ scope_id: (.*), job_id: "job-42" \}\)', html)
-    embedded = match.group(1)
-    assert json.loads(embedded) == scope_id
-    assert '<' not in embedded and "'" not in embedded  # tojson writes \u003c and \u0027
+    # The get-summary body (scope, scope_id, job_id) and the get-insights body (scope, scope_id).
+    embedded = re.findall(r'JSON\.stringify\(\{ scope: "project", scope_id: (.*?)(?:, job_id: "job-42")? \}\)', html)
+    assert len(embedded) == 2 and [json.loads(value) for value in embedded] == [scope_id, scope_id]
+    assert all('<' not in value and "'" not in value for value in embedded)  # tojson writes \u003c and \u0027
     assert html.count('</script>') == 1  # only the report's own script element ends
-    match = re.search(r'JSON\.stringify\(\{ scope: "project", scope_id: (.*) \}\)', html)
-    assert json.loads(match.group(1)) == scope_id
 
 
 def test_report_environment_rejects_undefined_variables():

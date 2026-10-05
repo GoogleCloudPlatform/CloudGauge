@@ -100,6 +100,7 @@ def get_summary():
         data = request.get_json()
         scope_id = data.get('scope_id')  # CORRECTED
         job_id = data.get('job_id')
+        scope = data.get('scope')  # v15.3: the report page sends it; absent from pages rendered earlier
         print(f"🤖 Received on-demand request for AI summary for job {job_id}...")
 
         if not scope_id or not job_id:
@@ -113,7 +114,7 @@ def get_summary():
             return jsonify({"error": "CSV report not found. Cannot generate summary."}), 404
 
         # 2-4. Prompt Gemini on Vertex AI for the summary
-        summary = gemini.generate_executive_summary(csv_data, settings=services.settings)
+        summary = gemini.generate_executive_summary(csv_data, scope=scope, settings=services.settings)
 
         print(f"✅ AI summary generated successfully for job {job_id}.")
         return jsonify({"summary": summary})

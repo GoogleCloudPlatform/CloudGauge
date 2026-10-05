@@ -37,7 +37,7 @@ CloudGauge scans your organization across several key domains, modeled after the
 
 ### **Security & Identity**
 
-* **Organization Policies**: Checks boolean policies against a list of best practices.
+* **Organization Policies**: Checks boolean policies against a list of best practices. The policies are the scope's *effective* ones: for a folder or project scan the check walks the hierarchy from the organization down to the scanned resource, the nearest policy winning (a folder's over the organization's, a project's over both). It runs even for a folder that holds no project.
 * **Organization IAM**: Scans for public principals (`allUsers`, `allAuthenticatedUsers`) and primitive roles (`owner`, `orgAdmin`) at the org level.
 * **Project IAM**: Scans all projects for the use of primitive `roles/owner` and `roles/editor`.
 * **Security Command Center**: Verifies that SCC Premium is enabled.

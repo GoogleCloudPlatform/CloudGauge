@@ -290,6 +290,46 @@ class FakeDiscovery:
         return _execute(self.ancestry_error or self.ancestry)
 
 
+class FakeResourceManager:
+    """The Resource Manager calls behind ``get_effective_org_policies`` (``app.services.org_policies``):
+    ``projects.getAncestry`` and ``listOrgPolicies`` on organizations, folders and projects (v1), and
+    ``folders.get`` (v3). Install it for both versions with
+    ``gcp.discovery.apis['cloudresourcemanager'] = FakeResourceManager(...)``.
+
+    ``policies`` maps a resource (``'organizations/1'``, ``'folders/2'``, ``'projects/p'``) to the boolean
+    constraints set *on* it, ``{constraint_id: enforced}``; ``parents`` maps a folder resource to its parent
+    resource; ``ancestry`` maps a project ID to its ancestors bottom-up, as the API lists them:
+    ``[('project', 'p'), ('folder', '2'), ('organization', '1')]``. ``listed`` records the resources whose
+    policies were listed, in order.
+    """
+
+    def __init__(self, policies, parents=None, ancestry=None):
+        self.policies = policies
+        self.parents = parents or {}
+        self.ancestry = ancestry or {}
+        self.listed = []
+
+    def _list_org_policies(self, resource, body):
+        self.listed.append(resource)
+        return _execute({'policies': [{'constraint': f'constraints/{constraint}', 'booleanPolicy': {'enforced': enforced}}
+                                      for constraint, enforced in self.policies.get(resource, {}).items()]})
+
+    def _get_folder(self, name):
+        return _execute({'name': name, 'parent': self.parents[name]})
+
+    def _get_ancestry(self, projectId, body):
+        return _execute({'ancestor': [{'resourceId': {'type': kind, 'id': resource_id}} for kind, resource_id in self.ancestry[projectId]]})
+
+    def organizations(self):
+        return SimpleNamespace(listOrgPolicies=self._list_org_policies)
+
+    def folders(self):
+        return SimpleNamespace(listOrgPolicies=self._list_org_policies, get=self._get_folder)
+
+    def projects(self):
+        return SimpleNamespace(listOrgPolicies=self._list_org_policies, getAncestry=self._get_ancestry)
+
+
 class FakeGemini:
     """Stands in for Gemini in both implementations; records every prompt as ``(model, prompt)``.
 

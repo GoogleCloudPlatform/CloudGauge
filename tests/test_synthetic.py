@@ -206,6 +206,13 @@ def test_recommender_answers_are_real_protos(gcp):
 
 # --- A whole scan ---
 
+# What differs by scope in the report of the 12-project organization (6 folders, projects spread round-robin).
+COVERAGE = {'organization': '12 of 12 projects · organization-level checks completed',
+            'folder': '2 of 2 projects · folder-level checks completed',
+            'project': '1 project'}
+ORG_ONLY_CHECKS = ('Critical Org-Level Roles', 'Security Command Center Status', 'Organization Log Sink', 'Essential Contacts')
+
+
 @pytest.mark.parametrize('scope', ['organization', 'folder', 'project'])
 def test_scan_completes_against_the_synthetic_organization(gcp, scope):
     provider = SyntheticGcp(12, latency_ms=0, denied_fraction=0)
@@ -218,10 +225,37 @@ def test_scan_completes_against_the_synthetic_organization(gcp, scope):
     assert BANNER_MARK in html and 'generated organization of 12 projects' in html
     assert 'status-badge">Error<' not in html  # no check crashed on the synthetic answers
     assert 'Category,Policy,Expected Value,Current Value,Status' in csv and csv.count('\n') > 20
+    # The scope shows: in the title and the coverage line, in the checks that look at the organization
+    # alone, and in Organization Policies walking the folder's or the project's ancestry (v15.3).
+    assert f'<title>CloudGauge Report: {scope.capitalize()} {scope_id}</title>' in html
+    assert COVERAGE[scope] in html
+    assert all((check in html) is (scope == 'organization') for check in ORG_ONLY_CHECKS)
+    assert 'Organization Policies' in html and 'policies as recommended' in html
+    assert 'Advisory Notifications' in html  # read from the organization, or per project
     metrics = provider.metrics.snapshot()
     assert metrics['total_calls'] > 50 and metrics['errors'] == {}
     assert store.client.bucket(store.bucket_name).object_names('intermediate/') == []  # cleaned up
     assert store.client.stats()['writes'] > 20
+
+
+def test_an_empty_folder_is_still_checked_as_a_folder(gcp):
+    """v15.3: a folder with no project gets its scope-level checks - its organization policies - so the
+    header's "folder-level checks completed" is true and Security has a verdict; the categories that need a
+    project stay Not assessed. (The scan used to stop before any check and report every category not assessed.)"""
+    provider = SyntheticGcp(3, latency_ms=0, denied_fraction=0)  # three projects over six folders: the last three are empty
+    gcp_clients.install_provider(provider)
+    folder = provider.world.folder_ids[-1]
+    assert provider.world.projects(folder) == []
+    store = memory_results_store()
+    ok = scan_job.execute_scan_job({'scope': 'folder', 'scope_id': folder, 'job_id': 'syn-job'}, store=store, banner=banner_for(provider))
+    assert ok is True and store.read_status('syn-job', folder)['status'] == 'completed'
+    html = store.read_report('syn-job', folder, 'html')
+    assert '0 of 0 projects · folder-level checks completed' in html
+    assert 'Organization Policies' in html and 'policies as recommended' in html
+    assert 'status-badge">Error<' not in html
+    assert html.count('Not assessed — no ') == 3 and 'Not assessed — no Security' not in html
+    assert 'Organization Policies' in store.read_report('syn-job', folder, 'csv')
+    assert provider.metrics.snapshot()['errors'] == {}
 
 
 def test_organization_scan_covers_every_section_and_org_check(gcp):

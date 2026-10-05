@@ -33,6 +33,7 @@ from types import SimpleNamespace
 
 import pytest
 
+import fakes
 import samples
 from app import scan_job
 from app.checks import registry, runner
@@ -236,17 +237,24 @@ def test_malformed_tasks_match_legacy(kwargs, legacy_client, client, gcp, script
     assert scripted_scan.calls == []
 
 
-def test_scan_without_projects_matches_legacy(legacy_client, client, gcp, legacy, monkeypatch):
-    """The real runners find no projects: both still upload empty reports and report success."""
+def test_scan_without_projects_runs_the_scope_level_checks(legacy_client, client, gcp, legacy, monkeypatch):
+    """The real runners find no projects. Legacy stopped there and uploaded an empty report; since v15.3 the
+    new app runs the checks that look at the scope itself (an organization's eight here, a folder's Organization
+    Policies) and reports them, so an empty folder's policies are still evaluated. Both report success."""
     for module in (legacy, runner):
         monkeypatch.setattr(module, 'list_projects_for_scope', lambda scope, scope_id: [])
+    # One policy set on the organization: what the Organization Policies check evaluates with no project to list.
+    gcp.discovery.apis['cloudresourcemanager'] = fakes.FakeResourceManager({f'organizations/{SCOPE_ID}': {'compute.requireOsLogin': True}})
     legacy_run, run = run_both(legacy_client, client, gcp.bucket)
     assert_same_response(legacy_run.response, run.response)
     assert run.response.status_code == 200
-    assert run.statuses == legacy_run.statuses
-    assert [status[0] for status in run.statuses] == [5, 98, 100]
-    assert run.objects[REPORT_CSV] == legacy_run.objects[REPORT_CSV]  # no category sections, so same bytes
-    assert comparable(report_facts(run.objects[REPORT_HTML][0])) == comparable(report_facts(legacy_run.objects[REPORT_HTML][0]))
+    assert [status[0] for status in legacy_run.statuses] == [5, 98, 100]
+    assert (run.statuses[0][0], run.statuses[-1][:2]) == (5, (100, 'Scan complete!'))
+    assert any('Finished: ' in status[1] for status in run.statuses)  # the scope-level checks ran (progress is throttled)
+    legacy_html, html = legacy_run.objects[REPORT_HTML][0], run.objects[REPORT_HTML][0]
+    assert '0 of 0 projects · organization-level checks completed' in html
+    assert 'Organization Policies' in html and 'policies as recommended' in html
+    assert 'Organization Policies' not in legacy_html
 
 
 def test_scan_job_with_the_real_runner(client, prod_app, gcp, monkeypatch):
@@ -405,6 +413,23 @@ def test_runner_passes_location_discovery_failures_to_the_plan(monkeypatch):
     monkeypatch.setattr(runner, 'build_check_plan', lambda *args: (seen.append(args), [])[1])
     assert runner.run_all_checks('organization', SCOPE_ID, JOB_ID, sink=RecordingSink()) is True
     assert seen == [('organization', SCOPE_ID, JOB_ID, PROJECTS, [], ['global'], {'web-prod': error})]
+
+
+@pytest.mark.parametrize('scope, scope_id', [('folder', '42'), ('project', 'web-prod'), ('organization', SCOPE_ID)])
+def test_runner_runs_the_scope_level_checks_when_there_is_no_project(scope, scope_id, monkeypatch):
+    """v15.3: an empty folder (or a listing that failed) still gets the checks that look at the scope itself -
+    its organization policies - where the scan used to stop before any check and report every category as
+    not assessed under a header that said the folder-level checks had completed."""
+    ran = []
+    monkeypatch.setattr(runner, 'list_projects_for_scope', lambda scope, scope_id: [])
+    monkeypatch.setattr(runner, 'get_active_compute_locations', lambda *args, **kwargs: pytest.fail('no project to discover locations in'))
+    monkeypatch.setattr(runner, 'run_check_plan', lambda plan, job_id, **kwargs: ran.extend(spec.name for spec in plan))
+    assert runner.run_all_checks(scope, scope_id, JOB_ID, sink=RecordingSink()) is True
+    assert ran == [spec.name for spec in registry.scope_check_plan(scope, scope_id, JOB_ID)]
+    if scope == 'organization':
+        assert ran[:2] == ['Organization Policies', 'Organization IAM Policy'] and registry.MISCELLANEOUS_CHECK in ran
+    else:
+        assert ran == ['Organization Policies']
 
 
 def test_runner_runs_checks_concurrently(one_project, monkeypatch):

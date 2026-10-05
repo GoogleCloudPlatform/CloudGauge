@@ -344,6 +344,18 @@ def test_summary_without_a_csv_report(legacy_client, client, gcp):
     assert gcp.gemini.prompts == []
 
 
+def test_summary_speaks_of_the_scope_the_page_sends(client, gcp):
+    """New (v15.3): the report page sends its scope with the request, and a folder or project scan's summary
+    opens on the folder or project. Without a scope (``test_summary``: the legacy request) the prompt is legacy's."""
+    gcp.bucket.put('job-1/42_report.csv', CSV_REPORT, 'text/csv')
+    gcp.gemini.reply = 'summary'
+    response = client.post('/api/get-summary', json={'scope': 'folder', 'scope_id': '42', 'job_id': 'job-1'})
+    assert response.status_code == 200 and response.get_json() == {'summary': 'summary'}
+    (_, prompt), = gcp.gemini.prompts
+    assert "summarizes the overall state of the folder's cloud environment." in prompt
+    assert "organization's cloud environment" not in prompt
+
+
 def test_summary_gemini_error(legacy_client, client, gcp):
     gcp.bucket.put('job-1/p1_report.csv', CSV_REPORT, 'text/csv')
     gcp.gemini.error = RuntimeError('404 Publisher Model gemini-2.5-flash was not found')

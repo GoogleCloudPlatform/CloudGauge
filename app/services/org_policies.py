@@ -117,8 +117,9 @@ def fetch_best_practices(url=None, timeout=BEST_PRACTICES_FETCH_TIMEOUT_SECONDS)
 def get_effective_org_policies(scope, scope_id):
     """
     Calculates the effective organization policies for a resource by manually
-    traversing its ancestry and merging policies. This avoids the low daily
-    quota of the Cloud Asset Policy Analyzer API.
+    traversing its ancestry and merging policies - top-down, so a folder's policy
+    replaces the organization's and a project's replaces both. This avoids the
+    low daily quota of the Cloud Asset Policy Analyzer API.
 
     Args:
         scope (str): The scope ('organization', 'folder', 'project').
@@ -154,16 +155,22 @@ def get_effective_org_policies(scope, scope_id):
                 logging.warning(f"Could not list policies for {resource_str}: {e}")
             return policies
 
+        # The walk is top-down - organization, folders, then the resource itself - and a
+        # nearer resource's policy replaces a farther one's, the way Resource Manager
+        # evaluates boolean constraints. (v15.3: project scans applied the ancestry as
+        # getAncestry lists it, bottom-up, so the organization's policy overrode a folder's.)
         effective_policies = {}
         resource_hierarchy = []
 
         if scope == 'organization':
             resource_hierarchy.append(f"organizations/{scope_id}")
         elif scope == 'project':
+            # getAncestry lists the project first and the organization last.
             ancestry = crm_service.projects().getAncestry(projectId=scope_id, body={}).execute()
-            for ancestor in ancestry.get('ancestor', []):
-                resource_hierarchy.append(f"{ancestor['resourceId']['type']}s/{ancestor['resourceId']['id']}")
-            resource_hierarchy.append(f"projects/{scope_id}")
+            lineage = [f"{ancestor['resourceId']['type']}s/{ancestor['resourceId']['id']}"
+                       for ancestor in ancestry.get('ancestor', [])]
+            project = f"projects/{scope_id}"
+            resource_hierarchy = [resource for resource in reversed(lineage) if resource != project] + [project]
         elif scope == 'folder':
             ancestors = []
             curr_folder = f"folders/{scope_id}"

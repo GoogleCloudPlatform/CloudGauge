@@ -260,7 +260,17 @@ def condense_csv_for_prompt(csv_data, rows_per_check=SUMMARY_ROWS_PER_CHECK, max
     return result
 
 
-def generate_executive_summary(csv_data, *, settings=None):
+# What the executive summary's opening sentence is about, by scan scope (v15.3). An
+# organization scan keeps the legacy wording; so does a request that names no scope
+# (report pages rendered before v15.3 send none).
+SUMMARY_SUBJECTS = {
+    "organization": "the organization's cloud environment",
+    "folder": "the folder's cloud environment",
+    "project": "the project's cloud environment",
+}
+
+
+def generate_executive_summary(csv_data, *, scope=None, settings=None):
     """
     Uses the Gemini model to write an executive summary of a scan's CSV report.
     Moved from the ``/api/get-summary`` route, which keeps the GCS lookup and HTTP handling.
@@ -268,12 +278,16 @@ def generate_executive_summary(csv_data, *, settings=None):
     Args:
         csv_data (str): The full CSV report. Large reports are condensed for the
             prompt (``condense_csv_for_prompt``).
+        scope (str, optional): ``'organization'``, ``'folder'`` or ``'project'``: what the
+            report covers, so the summary speaks of the folder or the project that was
+            scanned (``SUMMARY_SUBJECTS``). Anything else reads as an organization.
         settings (Settings, optional): Overrides the model, project, and location read from the environment.
 
     Returns:
         str: The summary, in GitHub-flavored Markdown.
     """
     settings = settings or get_settings()
+    subject = SUMMARY_SUBJECTS.get(scope, SUMMARY_SUBJECTS["organization"])
 
     condensed = condense_csv_for_prompt(csv_data)
     if len(condensed) != len(csv_data):
@@ -289,7 +303,7 @@ def generate_executive_summary(csv_data, *, settings=None):
         ```
 
         **Instructions:**
-        1.  Start with a single, concise introductory sentence that summarizes the overall state of the organization's cloud environment.
+        1.  Start with a single, concise introductory sentence that summarizes the overall state of {subject}.
         2.  Identify the top 3-5 primary opportunities for enhancement and optimization. Use a bulleted list.
         3.  For each area, briefly explain the implication and the opportunity in plain, business-focused language. Frame the points constructively.
             * Instead of: "High security risk due to publicly accessible storage buckets."

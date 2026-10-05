@@ -226,6 +226,23 @@ def test_summary_prompt_gets_the_condensed_csv(gcp):
     assert 'b999' not in prompt and 'b24' in prompt
 
 
+# --- The summary speaks of what was scanned (v15.3) ---
+
+@pytest.mark.parametrize('scope, subject', [
+    ('organization', "the organization's cloud environment"),
+    ('folder', "the folder's cloud environment"),
+    ('project', "the project's cloud environment"),
+    (None, "the organization's cloud environment"),  # report pages rendered before v15.3 send no scope
+    ('galaxy', "the organization's cloud environment"),
+])
+def test_summary_prompt_names_the_scope(scope, subject, gcp):
+    """A folder or project scan's executive summary opens on the folder or project, not "the organization"."""
+    gemini_service.generate_executive_summary('Organization Policies\r\n', scope=scope, settings=AUTO)
+    (_, prompt), = gcp.gemini.prompts
+    assert f'summarizes the overall state of {subject}.' in prompt
+    assert prompt.count('cloud environment') == 1
+
+
 def test_remediation_finding_text_is_capped(gcp):
     gcp.gemini.reply = 'gcloud x'
     gemini_service.generate_remediation_command('x' * 50_000, 'p1', settings=AUTO)

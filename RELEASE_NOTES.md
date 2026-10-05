@@ -8,7 +8,80 @@ the test suite running inside the image, a zero-traffic canary revision scanned
 against a real organization, promotion, and a production scan compared fact for
 fact with the previous version's report.
 
-Versions are the image tags (`v5` … `v15.2`); the commit is the one that shipped.
+Versions are the image tags (`v5` … `v15.3`); the commit is the one that shipped.
+
+---
+
+## v15.3 — Folder and project scans
+
+Three fixes from the first folder and project scans run against a real
+organization (every earlier rollout had scanned at organization scope). None
+changes an organization scan's report. No new settings.
+
+### Fixed
+
+- **A project scan applies its folders' policies before the organization's.**
+  `get_effective_org_policies` walked `getAncestry` as the API lists it —
+  project, folder, organization — then the project again, and applied the
+  policies in that order, so the organization's policy replaced a folder's.
+  A project under a folder that overrides a constraint reported the
+  organization's value, while a folder scan of the same folder reported the
+  folder's. The walk is now top-down for every scope (organization, folders
+  from the farthest, then the resource itself, listed once), the nearest
+  policy winning, as Resource Manager evaluates boolean constraints.
+  Inherited from upstream beta v1; invisible in an organization whose
+  projects sit directly under it.
+- **An empty folder is still checked as a folder.** With no project to list
+  the scan stopped before any check ran and uploaded an empty report — every
+  category *Not assessed* under a header that said "0 of 0 projects ·
+  folder-level checks completed". The runner now runs the scope-level checks
+  (`registry.scope_check_plan`: Organization Policies for a folder or project;
+  for an organization the org-only checks too) and skips location discovery,
+  so the folder's effective policies are evaluated and the header is true.
+  The same applies when the project listing failed: the scope's own checks
+  run, and the listing error is in the logs as before.
+- **The executive summary speaks of what was scanned.** Its prompt always
+  asked for "the overall state of the organization's cloud environment"; it
+  now says the folder's or the project's for those scans. The Scorecard sends
+  the scope with the `/api/get-summary` request; a request without one (a
+  report page rendered before v15.3) keeps the organization wording, so the
+  legacy request shape produces the legacy prompt byte for byte.
+
+### Tests
+
+- New `tests/test_org_policies.py` with a `FakeResourceManager`
+  (`tests/fakes.py`: `getAncestry`, `listOrgPolicies` on the three resource
+  kinds, v3 `folders.get`): the listing order and the effective policies for
+  an organization, a folder under a folder, a project under both and a
+  project directly under the organization; the folder/project agreement that
+  was broken; and the same agreement in the synthetic organization (the probe
+  that found the bug). Four of the six failed before the fix.
+- The per-scope synthetic scan (`tests/test_synthetic.py`) now pins what the
+  scope changes: the title, the coverage line ("2 of 2 projects ·
+  folder-level checks completed", "1 project"), the organization-only checks
+  absent from folder and project reports, Organization Policies and Advisory
+  Notifications present in all three. A new test scans an empty folder end
+  to end: "0 of 0 projects · folder-level checks completed", a Security
+  verdict from the policies, the other three categories *Not assessed*.
+- `tests/test_worker.py`: the runner with no project runs exactly the
+  scope-level plan for each scope and never calls location discovery; the
+  no-projects scan test now states the difference from legacy (which uploaded
+  an empty report) instead of parity.
+- `tests/test_gemini.py` and `tests/test_api_parity.py`: the prompt's subject
+  for each scope, for no scope and for an unknown one; the route forwarding
+  the page's scope; `test_summary` still proves the legacy request's prompt
+  unchanged.
+
+### Upgrade notes
+
+- A project scan of a project that sits in a folder with its own policies
+  will show different Organization Policies rows than before — the folder's
+  values, which are the effective ones. Scans of projects directly under the
+  organization are unchanged.
+- An empty folder's report gains its Organization Policies result and a
+  Security score (the policies' share as recommended); Cost, Reliability and
+  Operations stay *Not assessed*, as nothing in them can be checked without a
+  project.
 
 ---
 
@@ -88,9 +161,11 @@ scan summary gains one field.
 ### Upgrade notes
 
 - Expect scores to move once, on the first v15.2 scan, without a delta: on
-  the stark organization Security 18% → 55%, Cost 100% → 100% "8 of 8"
-  (it was 100% with no check), Reliability and Operations unchanged; the
-  count cards Action Required 127 → 18, Compliant 29 → 19. The Changes card
+  the stark organization Security 18% → 55%, Cost 100% → 100% "7 of 7"
+  (it was 100% with no check; the eighth recommender, Idle Load Balancers,
+  is not offered in that organization's region and reaches no verdict),
+  Reliability and Operations unchanged; the count cards Action Required
+  127 → 18, Compliant 29 → 18. The Changes card
   shows "—" against the previous scan where the previous scan's recomputed
   score equals the new one, and the estate's real deltas otherwise.
 - A category that was 100% because nothing was found in it now reads *Not
@@ -725,6 +800,7 @@ performance; modernization; enablement; roadmap and roadblocks).
 |---|---|---|
 | **v15.1** | The QTR brief | *Shipped.* The **Scorecard** page (a stoplight per pillar with its evidence, the since line, top actions, action-plan CSV, Markdown copy, one-page print) on top of v15's scan summaries and *Changes since last scan*; the executive summary is generated there. |
 | **v15.2** | Scores count verdicts | *Shipped.* A category's score is the share of its checks that reached a verdict and were compliant: Errors are stated next to the score, not inside it; Organization Policies is one check with partial credit; a category without a verdict is *Not assessed*; the cost recommenders write all-clear rows; the previous scan is recomputed under the current rule. |
+| **v15.3** | Folder and project scans | *Shipped.* From the first real folder and project scans: a project scan applies its folders' policies before the organization's; an empty folder still gets its scope-level checks; the executive summary speaks of the folder or project that was scanned. |
 | **v16** | History and analytics | **BigQuery export** of every scan's findings; **scheduled scans**; a history page (scores over time); a guide for Gemini Enterprise / Looker over the export ("talk to your infrastructure"). |
 | **v17** | Footprint and support | A **Platform Footprint** page (what runs where: services, regions, versions); **modernization indicators** (legacy runtimes, unmanaged VMs, missing release channels); a **Support cases** briefing. |
 | Later | | VM Manager vulnerability summary, Security Command Center findings summary, SLO coverage, PDF export. |

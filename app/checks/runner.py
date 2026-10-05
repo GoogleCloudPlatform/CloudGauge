@@ -25,7 +25,7 @@ time budget runs out.
 import concurrent.futures
 import time
 
-from app.checks.registry import build_check_plan
+from app.checks.registry import build_check_plan, scope_check_plan
 from app.config import CHECK_RUNNER_MAX_WORKERS
 from app.services.resource_manager import get_active_compute_locations, list_projects_for_scope
 
@@ -132,14 +132,20 @@ def run_all_checks(scope, scope_id, job_id, progress_callback=None, *, sink, max
             already listed them; ``None`` lists them here.
 
     Returns:
-        dict: A dictionary containing all categorized findings.
-        (In practice: ``True`` once every check has finished, or
-        ``{"error": ...}`` if no projects were found. Findings are in ``sink``.)
+        bool: ``True`` once every check has finished. Findings are in ``sink``.
+        With no project in scope only the scope-level checks run
+        (``app.checks.registry.scope_check_plan``).
     """
     all_projects = list_projects(scope, scope_id) if projects is None else projects
     if not all_projects:
-        print("❌ No active projects found or failed to list projects. Aborting scan.")
-        return {"error": "Could not retrieve project list."}
+        # An empty folder, or a listing that failed (resource_manager logged why). There is nothing
+        # to discover locations in and no project check to run, but the scope's own checks still
+        # apply: a folder's organization policies hold whether or not it holds a project (v15.3;
+        # the scan used to stop here and report every category as not assessed).
+        print("⚠️ No active projects found or failed to list projects: running the scope-level checks only.")
+        run_check_plan(scope_check_plan(scope, scope_id, job_id), job_id, sink=sink,
+                       progress_callback=progress_callback, max_workers=max_workers)
+        return True
 
     # --- RUN LOCATION SCAN ONCE HERE ---
     print("📍 Discovering all active locations (running once)...")
