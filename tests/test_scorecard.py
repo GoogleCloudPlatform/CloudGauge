@@ -203,6 +203,17 @@ def test_the_since_line_names_regressions_first_then_links_the_rest_to_the_chang
     assert card(second).since is None
 
 
+def test_the_since_line_states_a_status_change_without_the_rows_note():
+    # A check that was an Error last time carries "· not compared (could not be checked then)" on the Changes card;
+    # the since line says the status change alone, and ranks it by that status (Error → Action Required is a regression).
+    first = {SECURITY: [check('A', 'Error', 'boom'), check('B', 'Error', 'boom'), check('C', 'Action Required', rows(1))]}
+    second = {SECURITY: [check('A', 'Action Required', rows(2)), check('B', 'Compliant', 'ok'), check('C', 'Compliant', 'ok')]}
+    since = two_scans(first, second).since
+    assert since.status_changes[0] == 'A Error → Action Required'
+    assert set(since.status_changes[1:]) == {'B Error → Compliant', 'C Action Required → Compliant'}
+    assert not any('not compared' in line for line in since.status_changes)
+
+
 def test_the_footers_name_what_the_table_leaves_out():
     results = {SECURITY: [check('Firewall', 'Error', rows(2)), check('Keys', 'Error', 'denied')],
                'Organization Policies': (samples.BEST_PRACTICES, samples.CURRENT_POLICIES)}

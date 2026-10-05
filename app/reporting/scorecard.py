@@ -222,11 +222,12 @@ def build_since(changes):
     if not changes:
         return None
     entries = [entry for row in changes.categories for entry in row.entries if entry.before]
-    # Regressions first: a check that got worse matters more on a scorecard than ten that were fixed.
-    entries.sort(key=lambda entry: (display_rank(entry.after) >= display_rank(entry.before), display_rank(entry.after)))
+    # Regressions first: a check that got worse matters more on a scorecard than ten that were fixed. The bare status
+    # (after_status) ranks and reads; the "not compared" note an entry may carry stays on the Overview's Changes card.
+    entries.sort(key=lambda entry: (display_rank(entry.after_status) >= display_rank(entry.before), display_rank(entry.after_status)))
     return Since(previous_job_id=changes.previous_job_id, previous_at=changes.previous_generated_at,
                  new=changes.new_total, resolved=changes.resolved_total,
-                 status_changes=tuple(f"{entry.check_name} {entry.before} → {entry.after}" for entry in entries),
+                 status_changes=tuple(f"{entry.check_name} {entry.before} → {entry.after_status}" for entry in entries),
                  projects_then=changes.previous_total_projects, projects_now=changes.total_projects)
 
 

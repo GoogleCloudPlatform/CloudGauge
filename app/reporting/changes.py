@@ -181,8 +181,13 @@ class ChangeEntry:
     """One line of the card's *Status changes* column: ``before → after``, or a note when ``before`` is None."""
     check_name: str
     slug: str  # the check's anchor within its section
-    after: str  # the current status, or the note ("not compared (new check)")
+    after: str  # the current status, with the note when the rows were not compared ("Compliant · not compared (…)"), or the note alone
     before: str | None = None  # the previous status
+
+    @property
+    def after_status(self):
+        """The current status alone (``"Compliant"`` for ``"Compliant · not compared (…)"``): what sorts and what a one-line summary says."""
+        return self.after.split(" · ", 1)[0]
 
 
 @dataclass(frozen=True)
