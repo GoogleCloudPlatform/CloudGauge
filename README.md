@@ -10,6 +10,8 @@ It is built with Python/Flask, structured as a modular application package (Flas
 
 Final results are delivered as an interactive **HTML report** and a **CSV file** stored in a Google Cloud Storage bucket. The reports also feature **Gemini-powered** executive summaries and `gCloud` remediation suggestions.
 
+![An organization scan, end to end: choosing the scope, the scan running, the report's pages, the Scorecard and its executive summary](./assets/cloudgauge.gif)
+
 ![The CloudGauge report: the Overview page](./assets/report_overview.png)
 
 ## **Table of Contents**
@@ -262,6 +264,7 @@ app/
 └── templates/           # _design.css (tokens and primitives every page inlines, v14.2), index.html, status.html, report/ (HTML, CSS, JS)
 tests/                   # pytest suite (see Local Development & Testing)
 tools/synthetic_scan.py  # Offline load test against the synthetic organization (see Load Testing)
+tools/demo_gif.py        # Records the README's demo GIF from a scan on a deployed service (Playwright + Pillow, own venv)
 Dockerfile               # Production image
 Dockerfile.test          # Runs the test suite inside the production image
 cloudbuild.yaml          # Cloud Build: build -> test -> push
