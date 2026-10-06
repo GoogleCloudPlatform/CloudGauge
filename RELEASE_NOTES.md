@@ -61,9 +61,9 @@ release (`CLOUDGAUGE_ROLE=all`, the default) keeps working unchanged.
   page on 401, which signs in again and comes back. The report's three API
   calls go through one `apiFetch`.
 - **`tools/deploy.sh`** — the deployment, in one idempotent command: the APIs,
-  the service account with its project roles, the bucket, Cloud Build's account
-  given its role (new projects often withhold it); build and test with
-  `cloudbuild.yaml`; the worker (`CLOUDGAUGE_ROLE=worker`, `--ingress
+  the service account with its project roles, the bucket; build and test with
+  `cloudbuild.yaml` **as the service account** (not as the Compute Engine
+  default account, which organizations commonly leave without roles); the worker (`CLOUDGAUGE_ROLE=worker`, `--ingress
   internal`, `--no-allow-unauthenticated`, the service account its only
   invoker); the web service (`CLOUDGAUGE_ROLE=web`, `WORKER_URL`, `--iap`,
   IAP's service agent its invoker, `PROJECT_NUMBER` set); `OPERATORS` granted

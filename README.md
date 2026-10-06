@@ -436,6 +436,10 @@ Do the **Common Prerequisites** once, then deploy with **Method 1** (the script;
 
    gcloud projects add-iam-policy-binding ${PROJECT_ID} --member="serviceAccount:${SA_EMAIL}" --role="roles/cloudtasks.admin"
 
+   # 2b. Cloud Build runs as this account too (see step 4): read the uploaded source, push the image, write the build log
+
+   gcloud projects add-iam-policy-binding ${PROJECT_ID} --member="serviceAccount:${SA_EMAIL}" --role="roles/cloudbuild.builds.builder"
+
    
 
    # 3. Service Account Token Creator and User role to the SA itself for signed URLs
@@ -452,13 +456,7 @@ gsutil mb -p ${PROJECT_ID} gs://${BUCKET_NAME}
 
 gcloud storage buckets add-iam-policy-binding gs://${BUCKET_NAME} --member="serviceAccount:${SA_EMAIL}" --role="roles/storage.objectAdmin"
 ```
-4. **Let Cloud Build build** (`tools/deploy.sh` does this too). Cloud Build runs as the project's Compute Engine default service account. Organizations commonly withhold that account's automatic Editor grant, and the build then fails before it starts — `…-compute@developer.gserviceaccount.com does not have storage.objects.get access` to the uploaded source — whether it was started by the script or by a console trigger (Method 2). The Cloud Build Service Account role is the remedy:
-```
-export PROJECT_NUMBER=$(gcloud projects describe ${PROJECT_ID} --format='value(projectNumber)')
-
-gcloud projects add-iam-policy-binding ${PROJECT_ID} \
-  --member="serviceAccount:${PROJECT_NUMBER}-compute@developer.gserviceaccount.com" --role="roles/cloudbuild.builds.builder"
-```
+4. **The image is built as `cloudgauge-sa`.** Left to itself, Cloud Build runs as the project's Compute Engine default service account; organizations commonly withhold that account's roles, and the build then fails before it starts (`…-compute@developer.gserviceaccount.com does not have storage.objects.get access` to the uploaded source). Rather than widening that account, CloudGauge builds as its own service account, which step 2b equips for it: `tools/deploy.sh` passes `--service-account` to Cloud Build (Method 1); a console trigger is told the same (Method 2, Step 2).
 ---
 
 ### **Method 1: Deploy with `tools/deploy.sh` (Recommended)** 
@@ -476,8 +474,8 @@ tools/deploy.sh
 
 The script, in order (every step is idempotent):
 
-1. **Setup** — enables the APIs, creates `cloudgauge-sa` with its project roles and self-bindings, creates the bucket `cloudgauge-reports-<project>`, gives Cloud Build's account its role (the organization-level roles stay the manual step above).
-2. **Build** — `gcloud builds submit` with `cloudbuild.yaml`: builds the image, runs the test suite inside it and pushes it only if every test passes. The tag is the short git hash.
+1. **Setup** — enables the APIs, creates `cloudgauge-sa` with its project roles (Cloud Build's among them) and self-bindings, creates the bucket `cloudgauge-reports-<project>` (the organization-level roles stay the manual step above).
+2. **Build** — `gcloud builds submit` with `cloudbuild.yaml`, as `cloudgauge-sa`: builds the image, runs the test suite inside it and pushes it only if every test passes. The tag is the short git hash.
 3. **Worker** — deploys `cloudgauge-worker` with `CLOUDGAUGE_ROLE=worker`, `--no-allow-unauthenticated --ingress internal --timeout 3600 --concurrency 4 --memory 2Gi`, and makes the service account its only invoker.
 4. **Web** — deploys `cloudgauge` with `CLOUDGAUGE_ROLE=web`, `WORKER_URL` (the worker), `PROJECT_NUMBER`, `--iap --no-allow-unauthenticated --concurrency 80 --memory 1Gi --timeout 600`, and grants IAP's service agent `roles/run.invoker` on it.
 5. **Access** — grants each `OPERATORS` entry `roles/iap.httpsResourceAccessor` on the web service.
@@ -513,7 +511,7 @@ Two Cloud Run services created from your fork of the repository with Cloud Build
 
 **Step 2: Create the worker service**
 
-1. In the Google Cloud Console, go to **Cloud Run** → **Create Service** → **Continuously deploy new revisions from a source repository** → **Set up with Cloud Build**. Connect your fork (install the Google Cloud Build app on GitHub if asked), choose the `main` branch, **Build Type** `Dockerfile`, source location `/Dockerfile`.  
+1. In the Google Cloud Console, go to **Cloud Run** → **Create Service** → **Continuously deploy new revisions from a source repository** → **Set up with Cloud Build**. Connect your fork (install the Google Cloud Build app on GitHub if asked), choose the `main` branch, **Build Type** `Dockerfile`, source location `/Dockerfile`. The trigger this creates builds *and deploys* as the Compute Engine default account; make it `cloudgauge-sa` instead (prerequisites step 4): **Cloud Build** → **Triggers** → the new trigger → **Service account** `cloudgauge-sa`, and in its advanced options **Logging: Cloud Logging only** (a build with a chosen service account must say where its log goes). Because the trigger also deploys the revision, this method needs one more project role for `cloudgauge-sa`: `gcloud projects add-iam-policy-binding <project> --member="serviceAccount:cloudgauge-sa@<project>.iam.gserviceaccount.com" --role="roles/run.admin"`.  
 2. **Service name**: `cloudgauge-worker`. **Region**: for example `asia-south1`.  
 3. **Authentication**: **Require authentication**. **Ingress**: **Internal**.  
 4. Expand *Container(s), Volumes, Networking, Security*:  
@@ -584,7 +582,8 @@ Releases before v16 ran one public service, and that still works: `CLOUDGAUGE_RO
 export REGION="asia-south1" SERVICE_NAME="cloudgauge" QUEUE_NAME="cloudgauge-scan-queue" BUCKET_NAME="cloudgauge-reports-${PROJECT_ID}"
 
 # Build, test and push the image
-gcloud builds submit . --config cloudbuild.yaml --substitutions=_IMAGE=gcr.io/${PROJECT_ID}/${SERVICE_NAME},_TAG=latest
+gcloud builds submit . --config cloudbuild.yaml --substitutions=_IMAGE=gcr.io/${PROJECT_ID}/${SERVICE_NAME},_TAG=latest \
+  --service-account=projects/${PROJECT_ID}/serviceAccounts/${SA_EMAIL}
 
 # One service, public
 gcloud run deploy ${SERVICE_NAME} --region ${REGION} --image gcr.io/${PROJECT_ID}/${SERVICE_NAME}:latest \
@@ -649,6 +648,7 @@ To roll out a new version safely, deploy it to both services as tagged revisions
 export PROJECT_ID="my-project" REGION="asia-south1"
 export SERVICE="cloudgauge" WORKER_SERVICE="${SERVICE}-worker"
 export IMAGE="gcr.io/${PROJECT_ID}/${SERVICE}" TAG=$(git rev-parse --short HEAD)
+export SA_EMAIL="cloudgauge-sa@${PROJECT_ID}.iam.gserviceaccount.com"
 export PROJECT_NUMBER=$(gcloud projects describe ${PROJECT_ID} --format='value(projectNumber)')
 export WORKER_MAIN="https://${WORKER_SERVICE}-${PROJECT_NUMBER}.${REGION}.run.app"
 export WORKER_CANARY="https://canary---${WORKER_SERVICE}-${PROJECT_NUMBER}.${REGION}.run.app"
@@ -658,7 +658,8 @@ export WEB_CANARY="https://canary---${SERVICE}-${PROJECT_NUMBER}.${REGION}.run.a
 for S in ${WORKER_SERVICE} ${SERVICE}; do gcloud run services describe $S --region ${REGION} --format='value(status.traffic[0].revisionName)'; done
 
 # 2. Build, test, and push
-gcloud builds submit . --config cloudbuild.yaml --substitutions=_IMAGE=${IMAGE},_TAG=${TAG}
+gcloud builds submit . --config cloudbuild.yaml --substitutions=_IMAGE=${IMAGE},_TAG=${TAG} \
+  --service-account=projects/${PROJECT_ID}/serviceAccounts/${SA_EMAIL}
 
 # 3. The worker canary: 0% traffic, reachable at its tag URL; its own tasks (shards, aggregation, sweeps) go there too
 gcloud run deploy ${WORKER_SERVICE} --region ${REGION} --image ${IMAGE}:${TAG} --no-traffic --tag canary \

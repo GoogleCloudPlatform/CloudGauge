@@ -8,11 +8,11 @@
 #
 # Steps (each one is idempotent, so the same command updates a deployment):
 #   1. setup    enable the APIs, create the service account with its project roles, create the
-#               results bucket, let Cloud Build build (the Compute Engine default service account
-#               gets the Cloud Build Service Account role). The organization-level scan roles are a
-#               one-time manual step (README › Deployment Instructions › Common Prerequisites).
+#               results bucket. The organization-level scan roles are a one-time manual step
+#               (README › Deployment Instructions › Common Prerequisites).
 #   2. build    cloudbuild.yaml builds the image, runs the test suite in it and pushes it only
-#               if every test passes.
+#               if every test passes. The build runs as the service account, not as the Compute
+#               Engine default account.
 #   3. worker   deploy WORKER_SERVICE: CLOUDGAUGE_ROLE=worker, --ingress internal, invoked by
 #               the service account only (that is what Cloud Tasks uses).
 #   4. web      deploy SERVICE: CLOUDGAUGE_ROLE=web, WORKER_URL=<the worker>, --iap; IAP's
@@ -140,8 +140,11 @@ if [[ "${SKIP_SETUP:-0}" != 1 ]]; then
   if [[ "$DRY_RUN" == 1 ]] || ! gcloud --project "$PROJECT_ID" iam service-accounts describe "$SA_EMAIL" >/dev/null 2>&1; then
     g iam service-accounts create "$SA_NAME" --display-name="CloudGauge Service Account"
   fi
-  # Project roles: Gemini calls, and the Cloud Tasks queue the services create and fill.
-  for role in roles/aiplatform.user roles/cloudtasks.admin; do
+  # Project roles: Gemini calls, the Cloud Tasks queue the services create and fill, and Cloud Build:
+  # the image is built as this account (it reads the uploaded source, pushes the image, writes the
+  # build log) rather than as the Compute Engine default account, which organizations commonly
+  # leave without roles - and which should not be given any.
+  for role in roles/aiplatform.user roles/cloudtasks.admin roles/cloudbuild.builds.builder; do
     g projects add-iam-policy-binding "$PROJECT_ID" --member="serviceAccount:${SA_EMAIL}" --role="$role" --condition=None >/dev/null
   done
   # On itself: signed CSV links (Token Creator) and Cloud Tasks OIDC tokens (Service Account User).
@@ -155,27 +158,14 @@ if [[ "${SKIP_SETUP:-0}" != 1 ]]; then
     g storage buckets create "gs://${BUCKET}" --location="$REGION" --uniform-bucket-level-access
   fi
   g storage buckets add-iam-policy-binding "gs://${BUCKET}" --member="serviceAccount:${SA_EMAIL}" --role=roles/storage.objectAdmin >/dev/null
-
-  step "Letting Cloud Build build"
-  # Cloud Build runs as the project's Compute Engine default service account. Organizations commonly
-  # withhold its automatic Editor grant, which leaves it unable even to read the uploaded source; the
-  # Cloud Build Service Account role is the documented remedy (it also covers pushing the image).
-  # On a brand-new project that account appears a few seconds after the Compute API is enabled.
-  BUILD_SA="${PROJECT_NUMBER}-compute@developer.gserviceaccount.com"
-  if [[ "$DRY_RUN" != 1 ]]; then
-    for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do
-      gcloud --project "$PROJECT_ID" iam service-accounts describe "$BUILD_SA" >/dev/null 2>&1 && break
-      note "waiting for ${BUILD_SA} to exist..."; sleep 5
-    done
-  fi
-  g projects add-iam-policy-binding "$PROJECT_ID" --member="serviceAccount:${BUILD_SA}" --role=roles/cloudbuild.builds.builder --condition=None >/dev/null
 fi
 
 # --- 2. build -----------------------------------------------------------------------------------
 if [[ "${SKIP_BUILD:-0}" != 1 ]]; then
   CURRENT_STEP="build"
-  step "Building and testing ${IMAGE}:${TAG} with Cloud Build"
-  (cd "$REPO_ROOT" && g builds submit . --config cloudbuild.yaml --substitutions="_IMAGE=${IMAGE},_TAG=${TAG}")
+  step "Building and testing ${IMAGE}:${TAG} with Cloud Build (as ${SA_EMAIL})"
+  (cd "$REPO_ROOT" && g builds submit . --config cloudbuild.yaml --substitutions="_IMAGE=${IMAGE},_TAG=${TAG}" \
+    --service-account="projects/${PROJECT_ID}/serviceAccounts/${SA_EMAIL}")
 fi
 
 # --- 3. worker ----------------------------------------------------------------------------------
