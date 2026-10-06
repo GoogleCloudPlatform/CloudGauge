@@ -68,21 +68,26 @@ class CheckSpec(NamedTuple):
 # Display names of the checks added in v14 (Advisory Notifications runs differently per scope; see scope_level_checks).
 SERVICE_HEALTH_CHECK = "Service Health Incidents"
 ADVISORIES_CHECK = "Advisory Notifications"
+# Beta v1's organization-only resilience check, run under every scope since v15.6 (app.checks.reliability).
+RESILIENCE_CHECK = "Resilience of Critical Assets"
+
 
 
 def build_check_plan(scope, scope_id, job_id, all_projects, active_zones, active_regions, location_errors=None):
     """
     Returns the ordered list of checks to run for a scan, as ``CheckSpec`` entries.
-    The first 18 common and 5 organization-only checks, their order, and their arguments
+    The first 18 common and 4 organization-only checks, their order, and their arguments
     are the same as in upstream beta v1's ``run_all_checks``: the legacy plan plus
     four Security checks at the end of the common list. The runner calls each one as
     ``func(*args, sink=...)``.
 
     After them come the checks added since: Service Health Incidents (v14) and GKE
-    Supported Versions (v15), over the projects of every scope, and Advisory
-    Notifications (v14), read once from the organization in an organization scan and
-    per project otherwise. Beta v1's organization-level Personalized Service Health
-    probe is retired: the per-project check covers it.
+    Supported Versions (v15), over the projects of every scope; Resilience of Critical
+    Assets, organization-only in beta v1, over the Asset Inventory of every scope since
+    v15.6 (it takes the scope, not the project list, so it stays a scope-level check);
+    and Advisory Notifications (v14), read once from the organization in an organization
+    scan and per project otherwise. Beta v1's organization-level Personalized Service
+    Health probe is retired: the per-project check covers it.
 
     The two checks that query by location (Cost-Saving Recommendations, Network
     Insights) take one argument more than in beta v1: ``location_errors``, project ID
@@ -113,6 +118,7 @@ def build_check_plan(scope, scope_id, job_id, all_projects, active_zones, active
         CheckSpec("Security & Identity", "VM External IPs", check_vm_external_ips, (scope_id, all_projects, job_id)),
         CheckSpec("Reliability & Resilience", SERVICE_HEALTH_CHECK, check_service_health_incidents, (scope_id, all_projects, job_id)),
         CheckSpec("Reliability & Resilience", GKE_VERSIONS_CHECK, check_gke_supported_versions, (scope_id, all_projects, job_id)),
+        CheckSpec("Reliability & Resilience", RESILIENCE_CHECK, check_resilience_assets, (scope, scope_id, job_id)),
     ]
 
     if scope == 'organization':
@@ -121,7 +127,6 @@ def build_check_plan(scope, scope_id, job_id, all_projects, active_zones, active
             CheckSpec("Security & Identity", "Security Command Center Status", check_scc_status, (scope_id, job_id)),
             CheckSpec("Operational Excellence & Observability", "Organization Audit Logging", check_audit_logging, (scope_id, job_id)),
             CheckSpec("Reliability & Resilience", "Essential Contacts", check_essential_contacts, (scope_id, job_id)),
-            CheckSpec("Reliability & Resilience", "Resilience of Critical Assets", check_resilience_assets, (scope_id, job_id)),
             CheckSpec("Security & Identity", ADVISORIES_CHECK, check_org_advisories, (scope_id, job_id)),
         ]
         all_checks_to_run.extend(org_only_checks)
@@ -135,9 +140,11 @@ def build_check_plan(scope, scope_id, job_id, all_projects, active_zones, active
 # scan (app.fanout) runs them once, in the "scope" shard, and the project checks
 # once per shard of projects. Rule: a check is scope-level iff its arguments
 # don't include the project list (tests/test_fanout.py verifies this agrees).
+# Resilience of Critical Assets is one in every scope: it reads the scope's Asset
+# Inventory in three listings, not its projects one by one.
 SCOPE_LEVEL_CHECKS = frozenset({
     "Organization Policies", "Organization IAM Policy", "Security Command Center Status",
-    "Organization Audit Logging", "Essential Contacts", "Resilience of Critical Assets",
+    "Organization Audit Logging", "Essential Contacts", RESILIENCE_CHECK,
 })
 # The one check that does both: organization-wide insights plus per-project work.
 # Shards split it with its keyword flags (see run_miscellaneous_checks_refactored).
@@ -151,8 +158,9 @@ def scope_level_checks(scope):
 
 
 def scope_check_plan(scope, scope_id, job_id):
-    """The scope-level checks of :func:`build_check_plan`: Organization Policies, plus, for an
-    organization, the org-only checks and the organization-wide half of the miscellaneous checks."""
+    """The scope-level checks of :func:`build_check_plan`: Organization Policies and Resilience of
+    Critical Assets, plus, for an organization, the org-only checks and the organization-wide half
+    of the miscellaneous checks."""
     scope_level = scope_level_checks(scope)
     plan = [spec for spec in build_check_plan(scope, scope_id, job_id, [], [], []) if spec.name in scope_level]
     if scope == 'organization':

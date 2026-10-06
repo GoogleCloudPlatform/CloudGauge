@@ -8,7 +8,103 @@ the test suite running inside the image, a zero-traffic canary revision scanned
 against a real organization, promotion, and a production scan compared fact for
 fact with the previous version's report.
 
-Versions are the image tags (`v5` … `v15.5`); the commit is the one that shipped.
+Versions are the image tags (`v5` … `v15.6`); the commit is the one that shipped.
+
+---
+
+## v15.6 — Resilience at every scope
+
+A folder scan could not see a single-region disk snapshot in one of its own
+projects: **Resilience of Critical Assets** (Cloud SQL high availability,
+automated backups, backup retention and point-in-time recovery; zonal managed
+instance groups; single-region disk snapshots) ran in organization scans only,
+with its three Asset Inventory listings under the organization. It now runs in
+every scope, under the scanned folder or project, and each of its six checks
+ends the scan with a verdict, so Stability counts it. The scope picker offers
+active folders and projects only and names folders by their path and ID. No new
+settings or permissions: the per-project checks already read Asset Inventory
+under a project, and the organization-level `cloudasset.viewer` inherits down.
+
+### Added
+
+- **Resilience of Critical Assets in folder and project scans**
+  (`app/checks/reliability.py`, `app/checks/registry.py`). The check takes the
+  scope and lists Cloud SQL instances, managed instance groups and snapshots
+  under `organizations/`, `folders/` or `projects/<scope id>`. It joins the
+  common check plan after GKE Supported Versions — 22 checks in a folder or
+  project scan (21 before), 26 in an organization scan as before — and stays a
+  scope-level check: a sharded scan runs it once, in the scope shard, and a
+  folder with no project runs it with Organization Policies. The
+  organization-only block is now exactly the checks that describe the
+  organization itself: Organization IAM Policy, Security Command Center Status,
+  Organization Audit Logging, Essential Contacts (and Advisory Notifications
+  read from the organization).
+- **An all-clear row per check** (v15.2's rule for the cost checks): a listing
+  that answered and flagged nothing writes a Compliant row — "No zonal (non-HA)
+  Cloud SQL instances found.", "No Cloud SQL instances without automated
+  backups found.", "No Cloud SQL instances retaining fewer than 30 backups
+  found.", "No Cloud SQL instances with backups but without point-in-time
+  recovery found.", "No zonal managed instance groups found.", "No single-region
+  disk snapshots found." — so each of the six names reaches a verdict in every
+  scan. A folder without a project reads "6 of 6 checks compliant" under
+  Stability: its listings answered and every statement is true.
+- **The scope picker** (`app/services/resource_manager.py`) asks Asset
+  Inventory for `state:ACTIVE` folders and projects (a folder pending deletion
+  was still offered) and names each folder by its path from the organization
+  down and its ID — `stark-folder (1061012327179)`, `Engineering / Platform
+  (4711)` — built from the parent the one search already returns, since folder
+  names are unique only among siblings. A parent outside the account's view
+  starts the path lower. Projects keep `Display name (project-id)`.
+
+### Changed
+
+- **Disk Snapshot Resilience names each snapshot.** One row per single-region
+  snapshot — `Project · Snapshot · Location` — instead of "Found N snapshots
+  stored in only one region.", so the report and the action-plan CSV say which
+  snapshot, as the Cloud SQL and MIG rows already did. The first organization
+  scan after the upgrade reads *not compared (rows changed)* for this check
+  (`RESHAPED_CHECKS` in `app/reporting/changes.py`: a check whose rows changed
+  shape in a release is not row-compared against a scan by an older release —
+  the status still is); the next scan compares as usual.
+- **A failed listing is an Error under the checks it served.** The Cloud SQL
+  listing failing writes Error rows under the four Cloud SQL checks, the MIG or
+  snapshot listing under its one; a credentials failure under all six. Before,
+  one row named *Resilience Asset Checks* — a seventh name that was none of the
+  six — stood for whichever listing had failed. The report counts these as
+  "could not be checked" next to the score, never inside it.
+- **Stability scores shift once.** Six verdicts join every scope's Stability
+  arithmetic. On the stark organization five of the six already flagged
+  something, so only Cloud SQL PITR's all-clear is new: 20% (2 of 10) → 27%
+  (3 of 11); its folder went from 3 of 4 to 9 of 10. The Changes card shows
+  the delta, as it did for the Cost rows in v15.2; the six rows themselves read
+  *not compared (new check)* in the first folder or project scan after the
+  upgrade (v15.5's rule).
+
+### Tests
+
+- New `tests/test_resilience.py` (the check's first unit tests, on a
+  `list_assets` fake that answers by parent): the parent per scope, the six
+  all-clear rows and their wording, the row shapes with one row per snapshot,
+  a folder or project scan seeing only its own assets, a failed listing as
+  Error rows under the names it served while the other listings reach a
+  verdict, a credentials failure under every name, every name mapped to
+  Stability. `tests/test_changes.py`: release ordering, which previous
+  releases trigger the reshape rule, the status-only change, and `compare`
+  across and within a release. `tests/test_api_parity.py`: the picker's
+  `state:ACTIVE` request and the folder labels (nested, same-named under
+  different parents, a parent outside the view, sorted) — the route is no
+  longer compared with legacy, which searched without a state filter and
+  named folders by display name alone; the organization and error cases still
+  are. `tests/test_worker.py`, `tests/test_synthetic.py`,
+  `tests/test_category_consistency.py`: the plan (22 / 26), the no-project
+  plan, the synthetic folder and project scans listing the six checks with
+  their listings under the scope, the empty folder with a Stability verdict.
+
+### Upgrade notes
+
+- Every scope's Stability score moves at its first v15.6 scan (see above);
+  nothing to migrate. Reports and summaries by older releases are unchanged.
+- Folder labels in the picker changed; the `id` the form submits did not.
 
 ---
 
@@ -955,7 +1051,7 @@ performance; modernization; enablement; roadmap and roadblocks).
 | **v15.3** | Folder and project scans | *Shipped.* From the first real folder and project scans: a project scan applies its folders' policies before the organization's; an empty folder still gets its scope-level checks; the executive summary speaks of the folder or project that was scanned. |
 | **v15.4** | Folder membership | *Shipped.* A folder scan compares Cloud Asset Inventory's project list with Resource Manager's direct children (one call): a project Asset Inventory has not caught up with is scanned too, one it still places in the folder is kept and noted, and the report says so only when the two disagree. |
 | **v15.5** | Release-aware comparison | *Shipped.* Every scan summary and the report's footer name the release; between two scans of one release a check with no earlier result is compared with nothing — its rows are new, counted and marked — instead of *not compared (new check)*, which stays for a previous scan by another release. |
-| **v15.6** | Resilience at every scope | **Resilience of Critical Assets** (Cloud SQL high availability, automated backups, backup retention and PITR; zonal MIGs; single-region disk snapshots) runs in folder and project scans too, querying Asset Inventory under the scanned folder or project instead of the organization alone — found when a folder scan could not see a snapshot in its own project. It writes an all-clear row when nothing is flagged, as the cost checks do since v15.2, so Stability counts it. The checks that describe the organization itself (Organization IAM Policy, Organization Audit Logging, Security Command Center Status, Essential Contacts) stay organization-only. Also the **scope picker**: it offers active folders and projects only (a folder pending deletion was still listed), and names each folder with its path and ID, since folder names are unique only among siblings — the picker's one Asset Inventory search already returns every folder's parent. |
+| **v15.6** | Resilience at every scope | *Shipped.* Resilience of Critical Assets (Cloud SQL HA, backups, retention and PITR; zonal MIGs; single-region snapshots, now named one by one) runs in folder and project scans under the scanned scope, and each of its six checks reaches a verdict so Stability counts it; the scope picker offers active folders and projects only and names folders by their path and ID. |
 | **v16** | History and analytics | **BigQuery export** of every scan's findings; **scheduled scans**; a history page (scores over time); a guide for Gemini Enterprise / Looker over the export ("talk to your infrastructure"). |
 | **v17** | Footprint and support | A **Platform Footprint** page (what runs where: services, regions, versions); **modernization indicators** (legacy runtimes, unmanaged VMs, missing release channels); a **Support cases** briefing. |
 | Later | | VM Manager vulnerability summary, Security Command Center findings summary, SLO coverage, PDF export. |

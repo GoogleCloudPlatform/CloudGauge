@@ -287,11 +287,35 @@ class InvalidScopeError(ValueError):
     """Raised for a scope other than 'organization', 'folder', or 'project'."""
 
 
+def folder_labels(folders):
+    """Folder ID → ``"parent / child (id)"`` for the picker: the folder's path from the organization down, then its ID.
+
+    ``folders`` maps a folder ID to ``(display_name, parent_id)``; ``parent_id`` is a folder ID, or ``None`` for a
+    folder whose parent is the organization or unknown (Asset Search did not report one). An ancestor missing
+    from ``folders`` (outside the account's view) starts the path lower. Folder display names are unique only
+    among siblings, so the path and the ID tell two "Engineering" folders apart.
+    """
+    labels = {}
+    for folder_id, (display_name, parent_id) in folders.items():
+        path, seen, ancestor = [display_name], {folder_id}, parent_id
+        while ancestor in folders and ancestor not in seen:
+            seen.add(ancestor)
+            path.append(folders[ancestor][0])
+            ancestor = folders[ancestor][1]
+        labels[folder_id] = f"{' / '.join(reversed(path))} ({folder_id})"
+    return labels
+
+
 def list_resources_for_scope(scope, org_id):
     """
-    Lists the organization, or the folders or projects under it, for the scope picker.
+    Lists the organization, or the active folders or projects under it, for the scope picker.
     This is the body of the legacy ``/api/list-resources`` route; the route keeps
     the HTTP handling (400 for an invalid scope, 500 for other errors).
+
+    One Asset Inventory search per call, restricted to ``state:ACTIVE`` (v15.6; before, a
+    folder pending deletion was still offered). A project is named ``"Display name (project-id)"``;
+    a folder by its path from the organization down and its ID, ``"Engineering / Platform (4711)"``
+    (``folder_labels``), from the parent each search result reports.
 
     Returns:
         list: ``[{"id": ..., "name": ...}]``, sorted by name.
@@ -316,23 +340,27 @@ def list_resources_for_scope(scope, org_id):
     if not asset_type:
         raise InvalidScopeError("Invalid scope")
 
-    print(f"🔍 Searching for assets of type '{asset_type}' under organization '{org_id}'...")
+    print(f"🔍 Searching for active assets of type '{asset_type}' under organization '{org_id}'...")
     response = asset_client.search_all_resources(
         request={
             "scope": parent_scope,
             "asset_types": [asset_type],
+            "query": "state:ACTIVE",
         }
     )
 
-    for resource in response:
-        display_name = resource.display_name
-        if scope == 'project':
+    if scope == 'project':
+        for resource in response:
             # For projects, the name is the project ID
             project_id = resource.name.split('/')[-1]
-            resources.append({"id": project_id, "name": f"{display_name} ({project_id})"})
-        else: # For folders
-            folder_id = resource.name.split('/')[-1]
-            resources.append({"id": folder_id, "name": f"{display_name}"})
+            resources.append({"id": project_id, "name": f"{resource.display_name} ({project_id})"})
+    else:
+        folders = {}
+        for resource in response:
+            parent = getattr(resource, 'parent_full_resource_name', '') or ''
+            parent_id = parent.split('/')[-1] if '/folders/' in parent else None
+            folders[resource.name.split('/')[-1]] = (resource.display_name, parent_id)
+        resources.extend({"id": folder_id, "name": label} for folder_id, label in folder_labels(folders).items())
 
     # Sort resources by name
     resources.sort(key=lambda x: x['name'])

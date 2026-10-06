@@ -193,22 +193,46 @@ def test_status_storage_error(legacy_client, client, gcp):
 def org_resources(gcp):
     gcp.assets.add('folders', '111', 'Engineering')
     gcp.assets.add('folders', '222', 'Analytics')
+    gcp.assets.add('folders', '333', 'Platform', parent='folders/111')
+    gcp.assets.add('folders', '444', 'Platform', parent='folders/222')  # the same name under another parent
+    gcp.assets.add('folders', '555', 'Shared', parent='folders/999')  # a parent the search did not return
     gcp.assets.add('projects', 'web-prod', 'Web Prod')
     gcp.assets.add('projects', 'data-lake', 'Data Lake')
     return gcp.assets
 
 
+def test_list_resources_organization(legacy_client, client, org_resources):
+    response = assert_parity(legacy_client, client, 'GET', '/api/list-resources?scope=organization')
+    assert response.status_code == 200
+    assert response.get_json() == [{'id': fakes.ORG_ID, 'name': f'Organization {fakes.ORG_ID}'}]
+    assert org_resources.requests == []  # nothing to search for
+
+
 @pytest.mark.parametrize('scope, expected', [
-    ('organization', [{'id': fakes.ORG_ID, 'name': f'Organization {fakes.ORG_ID}'}]),
-    ('folder', [{'id': '222', 'name': 'Analytics'}, {'id': '111', 'name': 'Engineering'}]),
+    ('folder', [{'id': '222', 'name': 'Analytics (222)'}, {'id': '444', 'name': 'Analytics / Platform (444)'},
+                {'id': '111', 'name': 'Engineering (111)'}, {'id': '333', 'name': 'Engineering / Platform (333)'},
+                {'id': '555', 'name': 'Shared (555)'}]),
     ('project', [{'id': 'data-lake', 'name': 'Data Lake (data-lake)'}, {'id': 'web-prod', 'name': 'Web Prod (web-prod)'}]),
 ])
-def test_list_resources(scope, expected, legacy_client, client, org_resources):
-    response = assert_parity(legacy_client, client, 'GET', f'/api/list-resources?scope={scope}')
+def test_list_resources_offers_active_resources_named_by_path_and_id(scope, expected, client, org_resources):
+    """v15.6: the picker's one search asks for ACTIVE resources (a folder pending deletion was still offered) and
+    names a folder by its path from the organization down and its ID, since folder names are unique only among
+    siblings; a parent outside the account's view starts the path lower. Legacy searched without a state filter
+    and named folders by display name alone, so this route is no longer compared with it (the organization
+    case and the error cases still are)."""
+    response = client.get(f'/api/list-resources?scope={scope}')
     assert response.status_code == 200
     assert response.get_json() == expected
-    legacy_requests, requests = halves(org_resources.requests)
-    assert requests == legacy_requests
+    asset_type = fakes.ASSET_TYPES['folders' if scope == 'folder' else 'projects']
+    assert org_resources.requests == [{'scope': f'organizations/{fakes.ORG_ID}', 'asset_types': [asset_type], 'query': 'state:ACTIVE'}]
+
+
+def test_folder_labels_walk_the_path_and_survive_a_cycle():
+    from app.services.resource_manager import folder_labels
+
+    assert folder_labels({'1': ('Top', None), '2': ('Mid', '1'), '3': ('Leaf', '2')}) == \
+           {'1': 'Top (1)', '2': 'Top / Mid (2)', '3': 'Top / Mid / Leaf (3)'}
+    assert folder_labels({'1': ('A', '2'), '2': ('B', '1')}) == {'1': 'B / A (1)', '2': 'A / B (2)'}  # never loops
 
 
 def test_list_resources_requires_a_scope(legacy_client, client, gcp):

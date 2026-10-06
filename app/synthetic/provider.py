@@ -525,12 +525,14 @@ class SyntheticGcp:
     # --- Asset Inventory ---
 
     def search_all_resources(self, request):
+        # The picker's ``query`` ("state:ACTIVE", v15.6) is accepted: nothing synthetic is pending deletion.
         scope, asset_types = request["scope"], request.get("asset_types", [])
         folder_id = scope.split("/")[1] if scope.startswith("folders/") else None
         results = []
         if "cloudresourcemanager.googleapis.com/Folder" in asset_types and folder_id is None:
             results += [SimpleNamespace(name=f"//cloudresourcemanager.googleapis.com/folders/{fid}", display_name=f"Synthetic folder {i}",
-                                        asset_type="cloudresourcemanager.googleapis.com/Folder", project="")
+                                        asset_type="cloudresourcemanager.googleapis.com/Folder", project="",
+                                        parent_full_resource_name=f"//cloudresourcemanager.googleapis.com/organizations/{self.world.org_id}")
                         for i, fid in enumerate(self.world.folder_ids)]
         if "cloudresourcemanager.googleapis.com/Project" in asset_types:
             results += [SimpleNamespace(name=f"//cloudresourcemanager.googleapis.com/projects/{p.project_id}", display_name=p.display_name,
@@ -541,14 +543,13 @@ class SyntheticGcp:
         return results
 
     def list_assets(self, request):
+        """The assets of the requested types under ``projects/``, ``folders/`` (its projects) or the organization (every project)."""
         parent, asset_types = request["parent"], set(request.get("asset_types", []))
         if parent.startswith("projects/"):
             project_id = parent.split("/", 1)[1]
             self.call("asset", "listAssets(project)", project_id=project_id)
             profile = self.world.project(project_id)
-            found = []
-            if "sqladmin.googleapis.com/Instance" in asset_types:
-                found += [self._sql_asset(profile, sql) for sql in profile.sql_instances]
+            found = self._resilience_assets(profile, asset_types)
             if "container.googleapis.com/Cluster" in asset_types:
                 found += [SimpleNamespace(name=f"//container.googleapis.com/projects/{project_id}/locations/{c.location}/clusters/{c.name}",
                                           resource=SimpleNamespace(data={"name": c.name})) for c in profile.gke_clusters]
@@ -556,19 +557,26 @@ class SyntheticGcp:
                 found += [SimpleNamespace(name=f"//compute.googleapis.com/projects/{project_id}/regions/{r}/forwardingRules/lb-{r}",
                                           resource=SimpleNamespace(data={"name": f"lb-{r}"})) for r in profile.forwarding_rule_regions]
             return found
-        # Organization-wide listing: one pass over every project.
+        # Folder- or organization-wide listing: one pass over the projects in scope.
+        folder_id = parent.split("/", 1)[1] if parent.startswith("folders/") else None
         found = []
-        for profile in self.world.projects():
-            if "sqladmin.googleapis.com/Instance" in asset_types:
-                found += [self._sql_asset(profile, sql) for sql in profile.sql_instances]
-            if "compute.googleapis.com/InstanceGroupManager" in asset_types:
-                found += [SimpleNamespace(name=f"//compute.googleapis.com/projects/{profile.project_id}/zones/{zone}/instanceGroupManagers/mig-{zone}",
-                                          resource=SimpleNamespace(data={"name": f"mig-{zone}", "zone": zone})) for zone in profile.mig_zones]
-            if "compute.googleapis.com/Snapshot" in asset_types:
-                found += [SimpleNamespace(name=f"//compute.googleapis.com/projects/{profile.project_id}/global/snapshots/snap-{i}",
-                                          resource=SimpleNamespace(data={"name": f"snap-{i}", "storageLocations": ["us-central1"]}))
-                          for i in range(profile.single_region_snapshots)]
-        self.call("asset", "listAssets(org)", pages=max(1, math.ceil(len(found) / PAGE_SIZE)))
+        for profile in self.world.projects(folder_id):
+            found += self._resilience_assets(profile, asset_types)
+        self.call("asset", "listAssets(folder)" if folder_id else "listAssets(org)", pages=max(1, math.ceil(len(found) / PAGE_SIZE)))
+        return found
+
+    def _resilience_assets(self, profile, asset_types):
+        """A project's Cloud SQL instances, managed instance groups and single-region snapshots, as Asset Inventory lists them."""
+        found = []
+        if "sqladmin.googleapis.com/Instance" in asset_types:
+            found += [self._sql_asset(profile, sql) for sql in profile.sql_instances]
+        if "compute.googleapis.com/InstanceGroupManager" in asset_types:
+            found += [SimpleNamespace(name=f"//compute.googleapis.com/projects/{profile.project_id}/zones/{zone}/instanceGroupManagers/mig-{zone}",
+                                      resource=SimpleNamespace(data={"name": f"mig-{zone}", "zone": zone})) for zone in profile.mig_zones]
+        if "compute.googleapis.com/Snapshot" in asset_types:
+            found += [SimpleNamespace(name=f"//compute.googleapis.com/projects/{profile.project_id}/global/snapshots/snap-{i}",
+                                      resource=SimpleNamespace(data={"name": f"snap-{i}", "storageLocations": ["us-central1"]}))
+                      for i in range(profile.single_region_snapshots)]
         return found
 
     @staticmethod

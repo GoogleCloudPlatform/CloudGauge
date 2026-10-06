@@ -24,7 +24,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.checks import categories, cost, network, registry, runner
+from app.checks import categories, cost, network, registry, reliability, runner
 from app.checks.categories import CATEGORY_MAP, categorize_findings
 
 CHECKS_DIR = pathlib.Path(categories.__file__).parent
@@ -32,6 +32,7 @@ CHECKS_DIR = pathlib.Path(categories.__file__).parent
 DYNAMIC_NAMES = {
     ('cost.py', 'check_name'): cost.COST_RECOMMENDERS,
     ('network.py', 'check_name'): network.NETWORK_INSIGHT_TYPES,
+    ('reliability.py', 'check'): reliability.RESILIENCE_CHECKS,  # v15.6: a verdict or an Error per name
     ('runner.py', 'check_name'): None,  # the registry display names (test_registry_names_...)
     ('not_checked.py', 'NOT_CHECKED'): None,  # carries its own "Category" (test_not_checked_record_...)
 }
@@ -136,7 +137,7 @@ def test_categories_are_the_report_sections():
     ('Security Command Center Status', 'Security & Identity'),       # B1
     ('Log Sink Check', 'Operational Excellence & Observability'),    # B2: check's own error result
     ('Organization IAM Policy Check', 'Security & Identity'),
-    ('Resilience Asset Checks', 'Reliability & Resilience'),
+    ('Cloud SQL PITR', 'Reliability & Resilience'),                  # v15.6: a failed listing, under the check's own name
     ('Organization Policies', 'Security & Identity'),
     ('Network Insights', 'Operational Excellence & Observability'),  # B2: runner error, display name
     ('Cost-Saving Recommendations', 'Cost Optimization'),

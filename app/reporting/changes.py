@@ -43,6 +43,10 @@ The rules of ``compare``, per check:
   row as new; the reverse lists every previous row as resolved);
 - in both scans, one of them an Error: the status change only — the rows are
   *not compared* (an Error scan did not look, so nothing was resolved);
+- in both scans, but the check's rows changed shape in a release after the one
+  that wrote the previous summary (``RESHAPED_CHECKS``): the status change only —
+  the rows are *not compared (rows changed)*, since every row would read as new
+  and every old one as resolved; the next scan compares as usual;
 - only in this scan, both scans by the same release (v15.5): the previous scan
   had nothing to check — an empty folder that has its first project now — so
   every row is new (the card says ``no result → Action Required``);
@@ -90,6 +94,12 @@ ORG_POLICIES_CHECK = "Organization Policies"
 # Columns that never enter an identity: the fix is derived from the row, and a version is a measurement
 # of its component (GKE Supported Versions), not what the finding is about.
 EXCLUDED_COLUMNS = (FIX_COLUMN, "Version")
+# Checks whose rows changed shape (and with them every row's identity) → the release that did it. Against a
+# previous scan by an older release their rows are not compared (module docstring); the status still is.
+RESHAPED_CHECKS = {
+    "Disk Snapshot Resilience": "15.6",  # one row counting the snapshots → one row per single-region snapshot
+}
+ROWS_CHANGED = "rows changed"
 
 DIGITS = re.compile(r"\d[\d,]*(?:\.\d+)?")
 MINUS = "\u2212"  # a real minus sign, as wide as the plus
@@ -171,7 +181,7 @@ class CheckChange:
     resolved: int = 0
     previous_status: str | None = None  # set when it differs from the current status
     note: str | None = None  # NOT_COMPARED, with the reason in ``note_reason``
-    note_reason: str | None = None  # "new check", "could not be checked then", "could not be checked now"
+    note_reason: str | None = None  # "new check", "could not be checked then", "could not be checked now", "rows changed"
     new_identities: frozenset = frozenset()
     resolved_items: tuple = ()  # the resolved identities, in the previous scan's order, capped at MAX_LISTED_RESOLVED
     resolved_omitted: int = 0  # how many more than ``resolved_items`` lists
@@ -311,6 +321,27 @@ def same_release(previous, current):
     return bool(previous.get("release")) and previous.get("release") == current.get("release")
 
 
+def release_tuple(release):
+    """``"15.6"`` → ``(15, 6)`` for ordering releases; ``None`` or ``""`` (a summary older than v15.5) → ``()``, before every release."""
+    return tuple(int(part) for part in re.findall(r"\d+", release or ""))
+
+
+def rows_reshaped_since(name, previous):
+    """Whether check ``name``'s rows changed shape (``RESHAPED_CHECKS``) in a release after the one that wrote ``previous``."""
+    reshaped_in = RESHAPED_CHECKS.get(name)
+    return bool(reshaped_in) and release_tuple(previous.get("release")) < release_tuple(reshaped_in)
+
+
+def reshaped_change(current, previous):
+    """``CheckChange`` for a check whose rows changed shape since the previous scan's release: the status change if
+    there is one, the rows *not compared (rows changed)*. A briefing stays ``None`` and an Error on either side keeps
+    its own reason (its rows are not compared anyway)."""
+    change = check_change(current, previous)
+    if change is None or change.note:
+        return change
+    return CheckChange(previous_status=change.previous_status, note=NOT_COMPARED, note_reason=ROWS_CHANGED)
+
+
 def compare(previous, current, slugs, section_ids):
     """The ``Changes`` between two summaries (``previous`` may be ``None``: no previous scan, returns ``None``).
 
@@ -325,7 +356,9 @@ def compare(previous, current, slugs, section_ids):
     for name, entry in cur_checks.items():
         if entry["status"] == "Informational":
             continue
-        if name in prev_checks:
+        if name in prev_checks and rows_reshaped_since(name, previous):
+            change = reshaped_change(entry, prev_checks[name])
+        elif name in prev_checks:
             change = check_change(entry, prev_checks[name])
         elif within_release:
             change = first_result_change(entry)

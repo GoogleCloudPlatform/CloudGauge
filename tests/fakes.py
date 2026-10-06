@@ -428,12 +428,16 @@ class FakeGemini:
 
 
 class FakeAssets:
-    """Replaces ``asset_v1.AssetServiceClient``; searches return the added resources of the requested types."""
+    """Replaces ``asset_v1.AssetServiceClient``: searches return the added resources of the requested types,
+    listings (``list_assets``) the added assets under the requested parent."""
 
     def __init__(self):
         self.resources = []
         self.error = None
         self.requests = []
+        self.assets = []
+        self.list_errors = {}  # asset type -> error its listing raises
+        self.list_requests = []
 
     def add(self, kind, resource_id, display_name, parent=None):
         """Adds a folder or a project (``kind`` is ``'folders'`` or ``'projects'``); ``parent`` is what Asset Search
@@ -442,6 +446,13 @@ class FakeAssets:
             name=f'//cloudresourcemanager.googleapis.com/{kind}/{resource_id}',
             display_name=display_name, asset_type=ASSET_TYPES[kind],
             parent_full_resource_name=f'//cloudresourcemanager.googleapis.com/{parent}' if parent else ''))
+
+    def add_asset(self, asset_type, name, data, folder=None):
+        """Adds an asset for ``list_assets``: ``name`` is its full name (``//compute.googleapis.com/projects/p1/global/snapshots/s1``),
+        ``data`` its resource data. It is listed under its project, under ``folder`` (a folder ID) if given, and under the organization."""
+        project_id = name.split('/projects/', 1)[1].split('/', 1)[0]
+        parents = {f'projects/{project_id}', f'organizations/{ORG_ID}'} | ({f'folders/{folder}'} if folder else set())
+        self.assets.append(SimpleNamespace(asset_type=asset_type, name=name, resource=SimpleNamespace(data=data), parents=parents))
 
     @property
     def client_class(self):
@@ -456,6 +467,13 @@ class FakeAssets:
                 if assets.error:
                     raise assets.error
                 return [r for r in assets.resources if r.asset_type in request['asset_types']]
+
+            def list_assets(self, request):
+                assets.list_requests.append(request)
+                for asset_type in request['asset_types']:
+                    if asset_type in assets.list_errors:
+                        raise assets.list_errors[asset_type]
+                return [a for a in assets.assets if a.asset_type in request['asset_types'] and request['parent'] in a.parents]
 
         return FakeAssetServiceClient
 

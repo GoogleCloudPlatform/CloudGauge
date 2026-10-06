@@ -61,9 +61,10 @@ CATEGORY_MAP = {
 
     # B2: error results. These names are only written when a check fails; the
     # legacy map left them out, so failures silently disappeared from the report.
+    # (Resilience of Critical Assets reported its failures under "Resilience Asset
+    # Checks" until v15.6; it now writes an Error row under each of its six names.)
     "Organization Policies": "Security & Identity",  # policy data couldn't be fetched
     "Organization IAM Policy Check": "Security & Identity",
-    "Resilience Asset Checks": "Reliability & Resilience",
     "Log Sink Check": "Operational Excellence & Observability",
 
     # B2: display names from app.checks.registry. When a check raises, the runner

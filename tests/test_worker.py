@@ -319,7 +319,10 @@ V14_CHECKS = {'check_service_health_incidents', 'check_org_advisories', 'check_p
 RETIRED_CHECKS = {'check_service_health_status'}
 # v15: GKE Supported Versions, after Service Health Incidents in the common list.
 V15_CHECKS = {'check_gke_supported_versions'}
-LATER_CHECKS = V14_CHECKS | V15_CHECKS
+# v15.6: Resilience of Critical Assets, organization-only in beta v1, runs under every scope after GKE Supported
+# Versions with the scope in its arguments, so it leaves the beta v1 comparison on both sides.
+V15_6_CHECKS = {'check_resilience_assets'}
+LATER_CHECKS = V14_CHECKS | V15_CHECKS | V15_6_CHECKS
 
 
 def finished_checks(progress_updates):
@@ -331,11 +334,11 @@ def test_runner_runs_the_beta_v1_check_plan(scope, scope_id, beta, monkeypatch):
     """Both runners call the same check functions with the same arguments and report the same progress.
 
     The reference is upstream beta v1's ``run_all_checks``: the legacy plan plus four Security checks.
-    The v14 and v15 checks come after them in the plan, and beta's retired probe is left out of the comparison.
+    The v14, v15 and v15.6 checks come after them in the plan, and beta's retired probe is left out of the comparison.
     """
     zones, regions = ['us-central1-a'], ['us-central1', 'global']
     names = [spec.func.__name__ for spec in registry.build_check_plan(scope, scope_id, JOB_ID, PROJECTS, zones, regions)]
-    assert len(names) == (26 if scope == 'organization' else 21)
+    assert len(names) == (26 if scope == 'organization' else 22)
     # Same order as beta v1's plan lists, which append the four checks after "Service Quota Limits".
     beta_plan = ast.parse(textwrap.dedent(inspect.getsource(beta.run_all_checks)))
     beta_lists = [[entry.elts[2].id for entry in node.elts if isinstance(entry, ast.Tuple)]
@@ -343,9 +346,9 @@ def test_runner_runs_the_beta_v1_check_plan(scope, scope_id, beta, monkeypatch):
     beta_common, beta_org_only = [plan for plan in beta_lists if plan]
     beta_names = beta_common + (beta_org_only if scope == 'organization' else [])
     shared = [name for name in names if name not in LATER_CHECKS]
-    assert shared == [name for name in beta_names if name not in RETIRED_CHECKS]
+    assert shared == [name for name in beta_names if name not in RETIRED_CHECKS | V15_6_CHECKS]
     assert names[14:18] == BETA_V1_CHECKS
-    assert names[18:20] == ['check_service_health_incidents', 'check_gke_supported_versions']
+    assert names[18:21] == ['check_service_health_incidents', 'check_gke_supported_versions', 'check_resilience_assets']
     assert names[-1] == ('check_org_advisories' if scope == 'organization' else 'check_project_advisories')
     calls = {'beta': {}, 'new': {}}
     sink = RecordingSink()
@@ -379,11 +382,12 @@ def test_runner_runs_the_beta_v1_check_plan(scope, scope_id, beta, monkeypatch):
     for name in names:
         if name in LATER_CHECKS:
             assert calls['new'][name][1] == {'sink': sink}, name
+    assert calls['new']['check_resilience_assets'][0] == (scope, scope_id, JOB_ID)  # v15.6: the scope, not the organization
     # Checks finish in any order, so compare progress as sets of messages; both runners end their checks at 95%.
     assert len(progress) == len(names) and len(beta_progress) == len(beta_names)
     assert progress[-1]['progress'] == beta_progress[-1]['progress'] == 95
-    assert finished_checks(progress) - {registry.SERVICE_HEALTH_CHECK, registry.GKE_VERSIONS_CHECK, registry.ADVISORIES_CHECK} == \
-           finished_checks(beta_progress) - {'Personalized Service Health'}
+    later = {registry.SERVICE_HEALTH_CHECK, registry.GKE_VERSIONS_CHECK, registry.ADVISORIES_CHECK, registry.RESILIENCE_CHECK}
+    assert finished_checks(progress) - later == finished_checks(beta_progress) - {'Personalized Service Health', registry.RESILIENCE_CHECK}
     assert sink.findings == []
 
 
@@ -419,8 +423,8 @@ def test_runner_passes_location_discovery_failures_to_the_plan(monkeypatch):
 @pytest.mark.parametrize('scope, scope_id', [('folder', '42'), ('project', 'web-prod'), ('organization', SCOPE_ID)])
 def test_runner_runs_the_scope_level_checks_when_there_is_no_project(scope, scope_id, monkeypatch):
     """v15.3: an empty folder (or a listing that failed) still gets the checks that look at the scope itself -
-    its organization policies - where the scan used to stop before any check and report every category as
-    not assessed under a header that said the folder-level checks had completed."""
+    its organization policies and, since v15.6, the resilience of its assets - where the scan used to stop before
+    any check and report every category as not assessed under a header that said the folder-level checks had completed."""
     ran = []
     monkeypatch.setattr(runner, 'list_projects_for_scope', lambda scope, scope_id: [])
     monkeypatch.setattr(runner, 'get_active_compute_locations', lambda *args, **kwargs: pytest.fail('no project to discover locations in'))
@@ -428,9 +432,9 @@ def test_runner_runs_the_scope_level_checks_when_there_is_no_project(scope, scop
     assert runner.run_all_checks(scope, scope_id, JOB_ID, sink=RecordingSink()) is True
     assert ran == [spec.name for spec in registry.scope_check_plan(scope, scope_id, JOB_ID)]
     if scope == 'organization':
-        assert ran[:2] == ['Organization Policies', 'Organization IAM Policy'] and registry.MISCELLANEOUS_CHECK in ran
+        assert ran[:3] == ['Organization Policies', registry.RESILIENCE_CHECK, 'Organization IAM Policy'] and registry.MISCELLANEOUS_CHECK in ran
     else:
-        assert ran == ['Organization Policies']
+        assert ran == ['Organization Policies', registry.RESILIENCE_CHECK]
 
 
 def test_runner_runs_checks_concurrently(one_project, monkeypatch):

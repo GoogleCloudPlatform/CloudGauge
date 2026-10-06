@@ -32,6 +32,7 @@ from googleapiclient.errors import HttpError
 
 import fakes
 from app import create_app, scan_job
+from app.checks.reliability import RESILIENCE_CHECKS
 from app.config import Settings
 from app.extensions import EXTENSION_KEY
 from app.reporting.html_report import generate_html_report
@@ -232,6 +233,14 @@ def test_scan_completes_against_the_synthetic_organization(gcp, scope):
     assert all((check in html) is (scope == 'organization') for check in ORG_ONLY_CHECKS)
     assert 'Organization Policies' in html and 'policies as recommended' in html
     assert 'Advisory Notifications' in html  # read from the organization, or per project
+    # v15.6: Resilience of Critical Assets runs under every scope (its listings under the scope, not the organization),
+    # and each of its six checks reaches a verdict.
+    for check in RESILIENCE_CHECKS:
+        assert check in html, check
+    metrics = provider.metrics.snapshot()
+    by_method = metrics['by_method']
+    assert by_method.get('asset.listAssets(org)', 0) == (3 if scope == 'organization' else 0)
+    assert by_method.get('asset.listAssets(folder)', 0) == (3 if scope == 'folder' else 0)
     metrics = provider.metrics.snapshot()
     assert metrics['total_calls'] > 50 and metrics['errors'] == {}
     # v15.4: a folder scan compares Asset Inventory's projects with Resource Manager's direct children (one call);
@@ -245,7 +254,9 @@ def test_scan_completes_against_the_synthetic_organization(gcp, scope):
 def test_an_empty_folder_is_still_checked_as_a_folder(gcp):
     """v15.3: a folder with no project gets its scope-level checks - its organization policies - so the
     header's "folder-level checks completed" is true and Security has a verdict; the categories that need a
-    project stay Not assessed. (The scan used to stop before any check and report every category not assessed.)"""
+    project stay Not assessed. (The scan used to stop before any check and report every category not assessed.)
+    v15.6: Resilience of Critical Assets is scope-level too, so Stability has a verdict as well: its listings
+    answered and flagged nothing."""
     provider = SyntheticGcp(3, latency_ms=0, denied_fraction=0)  # three projects over six folders: the last three are empty
     gcp_clients.install_provider(provider)
     folder = provider.world.folder_ids[-1]
@@ -257,7 +268,8 @@ def test_an_empty_folder_is_still_checked_as_a_folder(gcp):
     assert '0 of 0 projects · folder-level checks completed' in html
     assert 'Organization Policies' in html and 'policies as recommended' in html
     assert 'status-badge">Error<' not in html
-    assert html.count('Not assessed — no ') == 3 and 'Not assessed — no Security' not in html
+    assert html.count('Not assessed — no ') == 2 and 'Not assessed — no Security' not in html
+    assert 'Not assessed — no Reliability' not in html and 'No single-region disk snapshots found.' in html
     assert 'Organization Policies' in store.read_report('syn-job', folder, 'csv')
     assert provider.metrics.snapshot()['errors'] == {}
 

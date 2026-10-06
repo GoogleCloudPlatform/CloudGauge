@@ -31,9 +31,10 @@ import pytest
 import samples
 from app.config import VERSION
 from app.reporting.changes import (INLINE_STATUS_CHANGES, MAX_LISTED_RESOLVED, MINUS, NO_LONGER_CHECKED, NO_RESULT, NO_RESULT_NOW,
-                                   NOT_COMPARED, ORG_POLICIES_CHECK, SUMMARY_VERSION, CheckChange, RowIdentities, RowMatcher,
-                                   check_change, compare, count_delta, delta_class, first_result_change, identities_for,
-                                   normalize_prose, same_release, text_identities)
+                                   NOT_COMPARED, ORG_POLICIES_CHECK, RESHAPED_CHECKS, ROWS_CHANGED, SUMMARY_VERSION, CheckChange,
+                                   RowIdentities, RowMatcher, check_change, compare, count_delta, delta_class, first_result_change,
+                                   identities_for, normalize_prose, release_tuple, reshaped_change, rows_reshaped_since, same_release,
+                                   text_identities)
 from app.reporting.csv_report import NEW_COLUMN
 from app.reporting.html_report import generate_reports
 from app.reporting.layouts import NUMBER, PROSE, RESOURCE, STATE, TIME
@@ -203,6 +204,48 @@ def test_a_check_with_no_result_in_the_previous_scan_of_the_same_release_is_all_
 def test_summaries_of_the_same_release_are_told_by_the_release_they_name(then, now, same):
     """A summary written before releases were named (v15.4 and earlier) is never the same release as this one."""
     assert same_release(summary('job-1', {}, {}, release=then), summary('job-2', {}, {}, release=now)) is same
+
+
+# --- v15.6: a check whose rows changed shape ---
+
+RESHAPED = 'Disk Snapshot Resilience'  # one count row until v15.5, one row per snapshot since v15.6
+
+
+@pytest.mark.parametrize('release, expected', [('15.6', (15, 6)), ('15.10', (15, 10)), ('16', (16,)), (None, ()), ('', ())])
+def test_releases_order_numerically(release, expected):
+    assert release_tuple(release) == expected
+    assert release_tuple('15.10') > release_tuple('15.6') > release_tuple('15.5') > release_tuple(None)
+
+
+@pytest.mark.parametrize('previous_release, reshaped', [(None, True), ('', True), ('15.5', True), ('15.6', False), ('15.7', False), ('16.0', False)])
+def test_rows_are_reshaped_since_a_previous_scan_by_an_older_release(previous_release, reshaped):
+    assert rows_reshaped_since(RESHAPED, summary('job-1', {}, {}, release=previous_release)) is reshaped
+    assert rows_reshaped_since('Public GCS Buckets', summary('job-1', {}, {}, release=previous_release)) is False
+    assert RESHAPED_CHECKS == {RESHAPED: '15.6'}
+
+
+def test_a_reshaped_check_compares_its_status_but_not_its_rows():
+    """The previous scan's one count row and this scan's rows per snapshot are different identities for the same
+    posture: without the rule the chip would read "+2 new · −1 resolved" once, after the release."""
+    change = reshaped_change(entry('Action Required', 'p1 · snap-a', 'p1 · snap-b'), entry('Action Required', 'Found # snapshots stored in only one region.'))
+    assert change == CheckChange(note=NOT_COMPARED, note_reason=ROWS_CHANGED)
+    assert (change.chip, change.chip_title) == (NOT_COMPARED, 'Rows not compared: rows changed')
+    resolved = reshaped_change(entry('Compliant'), entry('Action Required', 'Found # snapshots stored in only one region.'))
+    assert resolved == CheckChange(previous_status='Action Required', note=NOT_COMPARED, note_reason=ROWS_CHANGED)
+    # An Error on either side keeps its own reason; a briefing is still never compared.
+    assert reshaped_change(entry('Error'), entry('Action Required', 'a')).note_reason == 'could not be checked now'
+    assert reshaped_change(entry('Informational', 'a'), entry('Action Required', 'b')) is None
+
+
+@pytest.mark.parametrize('previous_release, reason', [(None, ROWS_CHANGED), ('15.5', ROWS_CHANGED), (VERSION, None)])
+def test_compare_applies_the_reshape_rule_across_releases_only(previous_release, reason):
+    """Across the release that reshaped the rows: *not compared (rows changed)*; from the next scan on, the rows
+    compare as usual (here: one snapshot resolved)."""
+    previous = summary('job-1', {RESHAPED: entry('Action Required', 'row-a', 'row-b', category=RELIABILITY)}, {RELIABILITY: 0.0},
+                       release=previous_release)
+    current = summary('job-2', {RESHAPED: entry('Action Required', 'row-a', category=RELIABILITY)}, {RELIABILITY: 0.0}, release=VERSION)
+    change = compare(previous, current, {RESHAPED: 'snapshots'}, SECTION_IDS).checks[RESHAPED]
+    assert (change.note_reason, change.new, change.resolved) == (reason, 0, 0 if reason else 1)
 
 
 # --- compare(): the card ---

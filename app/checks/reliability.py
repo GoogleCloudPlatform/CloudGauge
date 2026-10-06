@@ -181,60 +181,114 @@ def check_gke_hygiene(scope_id, all_projects, job_id, *, sink):
     skipped.write(sink, job_id)
 
 
-def check_resilience_assets(org_id, job_id, *, sink):
+# Resilience of Critical Assets: the check names its three Asset Inventory listings write under, in report order.
+# Each name is a key of CATEGORY_MAP and ends every scan with a verdict (or an Error row when its listing failed).
+SQL_RESILIENCE_CHECKS = ("Cloud SQL High Availability", "Cloud SQL Automated Backups", "Cloud SQL Backup Retention", "Cloud SQL PITR")
+MIG_RESILIENCE_CHECK = "MIG Resilience (Zonal)"
+SNAPSHOT_RESILIENCE_CHECK = "Disk Snapshot Resilience"
+RESILIENCE_CHECKS = SQL_RESILIENCE_CHECKS + (MIG_RESILIENCE_CHECK, SNAPSHOT_RESILIENCE_CHECK)
+# Automated backups should keep at least this many: the "Backup Retention" rule.
+MIN_RETAINED_BACKUPS = 30
+# What a resilience check's Compliant row says when its listing answered and flagged nothing (v15.6),
+# worded like the cost checks' all-clear rows (app.checks.cost.NOTHING_FOUND).
+RESILIENCE_NOTHING_FOUND = {
+    "Cloud SQL High Availability": "No zonal (non-HA) Cloud SQL instances found.",
+    "Cloud SQL Automated Backups": "No Cloud SQL instances without automated backups found.",
+    "Cloud SQL Backup Retention": f"No Cloud SQL instances retaining fewer than {MIN_RETAINED_BACKUPS} backups found.",
+    "Cloud SQL PITR": "No Cloud SQL instances with backups but without point-in-time recovery found.",
+    "MIG Resilience (Zonal)": "No zonal managed instance groups found.",
+    "Disk Snapshot Resilience": "No single-region disk snapshots found.",
+}
+
+
+def project_of_asset(asset_name):
+    """The project ID in an asset name (``//compute.googleapis.com/projects/p1/zones/…``), or ``'unknown'``."""
+    parts = asset_name.split('/')
+    return parts[parts.index('projects') + 1] if 'projects' in parts else 'unknown'
+
+
+def check_resilience_assets(scope, scope_id, job_id, *, sink):
     """
-    Checks organization-wide assets for resilience best practices, including
-    Cloud SQL HA, backups, MIGs, and disk snapshot storage redundancy.
+    Checks the Cloud SQL instances, managed instance groups and disk snapshots under the scanned
+    scope for resilience best practices: Cloud SQL high availability, automated backups, backup
+    retention and point-in-time recovery; zonal (single-zone) MIGs; snapshots stored in one region.
+
+    The three Asset Inventory listings run under ``organizations/``, ``folders/`` or
+    ``projects/<scope_id>`` (v15.6; before, under the organization only, so the check was
+    organization-only). Each of the six check names (``RESILIENCE_CHECKS``) ends the scan with a
+    verdict: Action Required with the rows that need work, or Compliant with one all-clear row
+    (``RESILIENCE_NOTHING_FOUND``) so the Stability score counts it. A listing that fails writes an
+    Error row under each check name it served (the Cloud SQL listing serves four), which the report
+    counts as coverage ("could not be checked"), never as a verdict.
 
     Args:
-        org_id (str): The organization ID.
-
-    Returns:
-        list: A list of finding dictionaries for resilience issues.
+        scope (str): ``'organization'``, ``'folder'`` or ``'project'``.
+        scope_id (str): The organization ID, folder ID or project ID.
+        job_id (str): The scan's job ID.
     """
-    print("🏗️  Checking resilience assets (SQL, MIGs, Snapshots)...")
-    all_findings = []
-    
-    def get_project_from_asset_name(asset_name):
-        parts = asset_name.split('/'); return parts[parts.index('projects') + 1] if 'projects' in parts else 'unknown'
+    print(f"🏗️  Checking resilience assets (SQL, MIGs, Snapshots) under {scope} {scope_id}...")
+    parent = f"{scope}s/{scope_id}"
+
+    def write(check, rows):
+        """Action Required with ``rows``, or the check's all-clear row when there are none."""
+        if rows:
+            result = {"Check": check, "Finding": rows, "Status": "Action Required"}
+        else:
+            result = {"Check": check, "Finding": [{"Status": RESILIENCE_NOTHING_FOUND[check]}], "Status": "Compliant"}
+        sink.write_finding(job_id, check.replace(" ", "_"), result)
+
+    def write_errors(checks, error):
+        for check in checks:
+            sink.write_finding(job_id, check.replace(" ", "_"), {"Check": check, "Finding": [{"Error": str(error)}], "Status": "Error"})
+
+    def list_assets(asset_client, asset_type):
+        request = {"parent": parent, "asset_types": [asset_type], "content_type": asset_v1.ContentType.RESOURCE}
+        return list(asset_client.list_assets(request=request))
 
     try:
         credentials, _ = gcp.auth_default(scopes=SCOPES)
         asset_client = gcp.asset_client(credentials)
-        parent = f"organizations/{org_id}"
-
-        # Cloud SQL Checks
-        sql_req = {"parent": parent, "asset_types": ["sqladmin.googleapis.com/Instance"], "content_type": asset_v1.ContentType.RESOURCE}
-        non_ha, no_backup, bad_retention, no_pitr = [], [], [], []
-        for asset in asset_client.list_assets(request=sql_req):
-            s, name, proj = asset.resource.data.get("settings", {}), asset.resource.data.get('name'), get_project_from_asset_name(asset.name)
-            if s.get("availabilityType") == "ZONAL": non_ha.append({"Project": proj, "Instance": name})
-            backup_conf = s.get("backupConfiguration", {})
-            if not backup_conf.get("enabled"): no_backup.append({"Project": proj, "Instance": name})
-            elif not backup_conf.get("pointInTimeRecoveryEnabled"): no_pitr.append({"Project": proj, "Instance": name})
-            if backup_conf.get("retainedBackupsCount", 0) < 30 : bad_retention.append({"Project": proj, "Instance": name, "Retention": backup_conf.get("retainedBackupsCount", "N/A")})
-
-        if non_ha:
-            sink.write_finding(job_id, "Cloud_SQL_High_Availability", {"Check": "Cloud SQL High Availability", "Finding": non_ha, "Status": "Action Required"})
-        if no_backup:
-            sink.write_finding(job_id, "Cloud_SQL_Automated_Backups", {"Check": "Cloud SQL Automated Backups", "Finding": no_backup, "Status": "Action Required"})
-        if bad_retention:
-            sink.write_finding(job_id, "Cloud_SQL_Backup_Retention", {"Check": "Cloud SQL Backup Retention", "Finding": bad_retention, "Status": "Action Required"})
-        if no_pitr:
-            sink.write_finding(job_id, "Cloud_SQL_PITR", {"Check": "Cloud SQL PITR", "Finding": no_pitr, "Status": "Action Required"})
-
-        # Zonal MIGs Check
-        mig_req = {"parent": parent, "asset_types": ["compute.googleapis.com/InstanceGroupManager"], "content_type": asset_v1.ContentType.RESOURCE}
-        zonal_migs = [{"Project": get_project_from_asset_name(a.name), "MIG Name": a.resource.data.get('name')} for a in asset_client.list_assets(request=mig_req) if 'zone' in a.resource.data and not a.resource.data.get('name', '').startswith('gke-')]
-        if zonal_migs:
-            sink.write_finding(job_id, "MIG_Resilience_(Zonal)", {"Check": "MIG Resilience (Zonal)", "Finding": zonal_migs, "Status": "Action Required"})
-        
-        # Disk Snapshots Check
-        snap_req = {"parent": parent, "asset_types": ["compute.googleapis.com/Snapshot"], "content_type": asset_v1.ContentType.RESOURCE}
-        single_region = len([a for a in asset_client.list_assets(request=snap_req) if len(a.resource.data.get("storageLocations", [])) <= 1])
-        if single_region > 0:
-            sink.write_finding(job_id, "Disk_Snapshot_Resilience", {"Check": "Disk Snapshot Resilience", "Finding": [{"Issue": f"Found {single_region} snapshots stored in only one region."}], "Status": "Action Required"})
-
     except Exception as e:
-        error_result = {"Check": "Resilience Asset Checks", "Finding": [{"Error": str(e)}], "Status": "Error"}
-        sink.write_finding(job_id, "Resilience_Asset_Checks_Error", error_result)
+        write_errors(RESILIENCE_CHECKS, e)
+        return
+
+    # Cloud SQL: one listing, four verdicts.
+    try:
+        non_ha, no_backup, bad_retention, no_pitr = [], [], [], []
+        for asset in list_assets(asset_client, "sqladmin.googleapis.com/Instance"):
+            s, name, proj = asset.resource.data.get("settings", {}), asset.resource.data.get('name'), project_of_asset(asset.name)
+            if s.get("availabilityType") == "ZONAL":
+                non_ha.append({"Project": proj, "Instance": name})
+            backup_conf = s.get("backupConfiguration", {})
+            if not backup_conf.get("enabled"):
+                no_backup.append({"Project": proj, "Instance": name})
+            elif not backup_conf.get("pointInTimeRecoveryEnabled"):
+                no_pitr.append({"Project": proj, "Instance": name})
+            if backup_conf.get("retainedBackupsCount", 0) < MIN_RETAINED_BACKUPS:
+                bad_retention.append({"Project": proj, "Instance": name, "Retention": backup_conf.get("retainedBackupsCount", "N/A")})
+    except Exception as e:
+        write_errors(SQL_RESILIENCE_CHECKS, e)
+    else:
+        for check, rows in zip(SQL_RESILIENCE_CHECKS, (non_ha, no_backup, bad_retention, no_pitr)):
+            write(check, rows)
+
+    # Managed instance groups: a zonal MIG lives in one zone (GKE's node-pool MIGs are the cluster's concern).
+    try:
+        zonal_migs = [{"Project": project_of_asset(a.name), "MIG Name": a.resource.data.get('name')}
+                      for a in list_assets(asset_client, "compute.googleapis.com/InstanceGroupManager")
+                      if 'zone' in a.resource.data and not a.resource.data.get('name', '').startswith('gke-')]
+    except Exception as e:
+        write_errors((MIG_RESILIENCE_CHECK,), e)
+    else:
+        write(MIG_RESILIENCE_CHECK, zonal_migs)
+
+    # Disk snapshots: one row per snapshot kept in a single storage location (before v15.6, one row counting them).
+    try:
+        single_region = [{"Project": project_of_asset(a.name), "Snapshot": a.resource.data.get('name'),
+                          "Location": ", ".join(a.resource.data.get("storageLocations", [])) or "unknown"}
+                         for a in list_assets(asset_client, "compute.googleapis.com/Snapshot")
+                         if len(a.resource.data.get("storageLocations", [])) <= 1]
+    except Exception as e:
+        write_errors((SNAPSHOT_RESILIENCE_CHECK,), e)
+    else:
+        write(SNAPSHOT_RESILIENCE_CHECK, single_region)
