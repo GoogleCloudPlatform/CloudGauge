@@ -324,18 +324,24 @@ Do the **Common Prerequisites** once, then deploy with **Method 1** (the script;
 1. **Enable APIs**:  
    * A Google Cloud Project with billing enabled.  
    * [gcloud CLI](https://cloud.google.com/sdk/install) installed, current (`gcloud components update` — `--iap` is a recent flag) and authenticated (`gcloud auth login`).  
-   * Run the following command to enable all necessary APIs (`tools/deploy.sh` does this too):
+   * An account that is **Owner** of that project: the setup enables APIs, creates the service account and grants its project roles, creates the bucket, runs Cloud Build, deploys to Cloud Run and sets the IAP policy (`roles/iap.admin`, part of Owner). The organization-level roles in step 2 additionally need someone who can grant roles on the organization.
+   * Run the following two commands to enable all necessary APIs (`tools/deploy.sh` does this too). Two, because gcloud enables at most 20 APIs per command — first what CloudGauge runs on, then what it reads:
 
    ```
    gcloud services enable \
        run.googleapis.com \
        cloudbuild.googleapis.com \
+       artifactregistry.googleapis.com \
        cloudtasks.googleapis.com \
        iap.googleapis.com \
        iam.googleapis.com \
        iamcredentials.googleapis.com \
        cloudresourcemanager.googleapis.com \
+       storage.googleapis.com \
        logging.googleapis.com \
+       aiplatform.googleapis.com
+
+   gcloud services enable \
        recommender.googleapis.com \
        securitycenter.googleapis.com \
        servicehealth.googleapis.com \
@@ -346,8 +352,6 @@ Do the **Common Prerequisites** once, then deploy with **Method 1** (the script;
        sqladmin.googleapis.com \
        osconfig.googleapis.com \
        monitoring.googleapis.com \
-       storage.googleapis.com \
-       aiplatform.googleapis.com \
        cloudasset.googleapis.com
    ```
 
@@ -448,6 +452,13 @@ gsutil mb -p ${PROJECT_ID} gs://${BUCKET_NAME}
 
 gcloud storage buckets add-iam-policy-binding gs://${BUCKET_NAME} --member="serviceAccount:${SA_EMAIL}" --role="roles/storage.objectAdmin"
 ```
+4. **Let Cloud Build build** (`tools/deploy.sh` does this too). Cloud Build runs as the project's Compute Engine default service account. Organizations commonly withhold that account's automatic Editor grant, and the build then fails before it starts — `…-compute@developer.gserviceaccount.com does not have storage.objects.get access` to the uploaded source — whether it was started by the script or by a console trigger (Method 2). The Cloud Build Service Account role is the remedy:
+```
+export PROJECT_NUMBER=$(gcloud projects describe ${PROJECT_ID} --format='value(projectNumber)')
+
+gcloud projects add-iam-policy-binding ${PROJECT_ID} \
+  --member="serviceAccount:${PROJECT_NUMBER}-compute@developer.gserviceaccount.com" --role="roles/cloudbuild.builds.builder"
+```
 ---
 
 ### **Method 1: Deploy with `tools/deploy.sh` (Recommended)** 
@@ -465,7 +476,7 @@ tools/deploy.sh
 
 The script, in order (every step is idempotent):
 
-1. **Setup** — enables the APIs, creates `cloudgauge-sa` with its project roles and self-bindings, creates the bucket `cloudgauge-reports-<project>` (the organization-level roles stay the manual step above).
+1. **Setup** — enables the APIs, creates `cloudgauge-sa` with its project roles and self-bindings, creates the bucket `cloudgauge-reports-<project>`, gives Cloud Build's account its role (the organization-level roles stay the manual step above).
 2. **Build** — `gcloud builds submit` with `cloudbuild.yaml`: builds the image, runs the test suite inside it and pushes it only if every test passes. The tag is the short git hash.
 3. **Worker** — deploys `cloudgauge-worker` with `CLOUDGAUGE_ROLE=worker`, `--no-allow-unauthenticated --ingress internal --timeout 3600 --concurrency 4 --memory 2Gi`, and makes the service account its only invoker.
 4. **Web** — deploys `cloudgauge` with `CLOUDGAUGE_ROLE=web`, `WORKER_URL` (the worker), `PROJECT_NUMBER`, `--iap --no-allow-unauthenticated --concurrency 80 --memory 1Gi --timeout 600`, and grants IAP's service agent `roles/run.invoker` on it.
@@ -513,7 +524,7 @@ Two Cloud Run services created from your fork of the repository with Cloud Build
      * `CLOUDGAUGE_ROLE`: `worker`  
      * `WORKER_URL`: `https://cloudgauge-worker-<project number>.<region>.run.app` — the URL Cloud Run will give the service (the project number is on the console's dashboard). Or leave it out and, after the first deployment, grant the service account `roles/run.viewer` on the service so that it discovers its own URL.  
      * Optional settings such as `GEMINI_MODEL` are listed in the [Configuration Reference](#configuration-reference).  
-5. **Create**. Once it is up, let Cloud Tasks — which calls as the service account — invoke it:
+5. **Create**. Once it is up, let Cloud Tasks — which calls as the service account — invoke it: on the **Cloud Run** service list tick `cloudgauge-worker`, open the info panel's **Permissions** tab, **Add principal** `cloudgauge-sa@<project>.iam.gserviceaccount.com` with the role **Cloud Run Invoker**. The same with gcloud:
 
 ```
 gcloud run services add-iam-policy-binding cloudgauge-worker --region=<region> \
@@ -522,14 +533,14 @@ gcloud run services add-iam-policy-binding cloudgauge-worker --region=<region> \
 
 **Step 3: Create the web service**
 
-As in Step 2, with these differences: **Service name** `cloudgauge`; **Authentication**: **Require authentication**, and turn on **Identity-Aware Proxy (IAP)**; **Ingress**: **All**; **General**: timeout `600`, concurrency `80`, memory `1 GiB`; variables: the same five, plus `CLOUDGAUGE_ROLE`: `web`, `WORKER_URL`: the worker's URL, `PROJECT_NUMBER`: your project number. Enabling IAP from Cloud Run grants IAP's service agent the invoker role by itself; should the service answer 403 to everyone afterwards, grant it by hand:
+As in Step 2, with these differences: **Service name** `cloudgauge`; **Authentication**: **Require authentication**, and turn on **Identity-Aware Proxy (IAP)**; **Ingress**: **All**; **General**: timeout `600`, concurrency `80`, memory `1 GiB`; variables: the same five, plus `CLOUDGAUGE_ROLE`: `web`, `WORKER_URL`: the worker's URL, `PROJECT_NUMBER`: your project number. Enabling IAP from Cloud Run grants IAP's service agent the invoker role by itself; should the service answer 403 to everyone afterwards, grant it by hand — the same **Permissions** panel, principal `service-<project number>@gcp-sa-iap.iam.gserviceaccount.com`, role **Cloud Run Invoker** — or:
 
 ```
 gcloud run services add-iam-policy-binding cloudgauge --region=<region> \
   --member="serviceAccount:service-<project number>@gcp-sa-iap.iam.gserviceaccount.com" --role="roles/run.invoker"
 ```
 
-Then grant access ([Who can use it](#who-can-use-it)). From now on each push to `main` builds and deploys both services.
+Then grant access ([Who can use it](#who-can-use-it); in the console, **Security** → **Identity-Aware Proxy**). From now on each push to `main` builds and deploys both services.
 
 ---
 
@@ -543,7 +554,7 @@ gcloud iap web add-iam-policy-binding --project=<project> --region=<region> \
   --member="group:cloud-team@example.com" --role="roles/iap.httpsResourceAccessor"
 ```
 
-`remove-iam-policy-binding` with the same arguments revokes it; `tools/deploy.sh OPERATORS=…` grants it. A change takes up to a minute to apply; until then the person sees Google's *You don't have access* page. Everyone who gets through sees the same thing — every scan, every report; the page header says who is signed in, and a scan's report who requested it.
+`remove-iam-policy-binding` with the same arguments revokes it; `tools/deploy.sh OPERATORS=…` grants it. In the console: **Security** → **Identity-Aware Proxy**, tick the `cloudgauge` row (Cloud Run services are listed with their region), **Add principal**, role **IAP-secured Web App User**. A change takes up to a minute to apply; until then the person sees Google's *You don't have access* page. Everyone who gets through sees the same thing — every scan, every report; the page header says who is signed in, and a scan's report who requested it.
 
 **Programmatic access** (`curl`, scripts, `tools/demo_gif.py`). IAP on Cloud Run does not accept Google-issued ID tokens (`gcloud auth print-identity-token`); it accepts a JWT signed by a service account that holds the accessor role. `tools/iap_token.py` mints one through the IAM Credentials API, with the signed-in gcloud account:
 

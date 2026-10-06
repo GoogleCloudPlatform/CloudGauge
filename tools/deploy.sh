@@ -8,8 +8,9 @@
 #
 # Steps (each one is idempotent, so the same command updates a deployment):
 #   1. setup    enable the APIs, create the service account with its project roles, create the
-#               results bucket. The organization-level scan roles are a one-time manual step
-#               (README › Deployment Instructions › Common Prerequisites).
+#               results bucket, let Cloud Build build (the Compute Engine default service account
+#               gets the Cloud Build Service Account role). The organization-level scan roles are a
+#               one-time manual step (README › Deployment Instructions › Common Prerequisites).
 #   2. build    cloudbuild.yaml builds the image, runs the test suite in it and pushes it only
 #               if every test passes.
 #   3. worker   deploy WORKER_SERVICE: CLOUDGAUGE_ROLE=worker, --ingress internal, invoked by
@@ -106,17 +107,34 @@ note "queue / bucket   ${QUEUE} / gs://${BUCKET}"
 note "operators        ${MEMBERS:-(none: grant access afterwards, see the end)}"
 if [[ "$DRY_RUN" == 1 ]]; then note "DRY RUN: nothing is executed"; fi
 
+# --- project number and URLs ---------------------------------------------------------------------------------------
+# Cloud Run's deterministic URLs: known before the services exist, so the worker can be told its
+# own URL and nothing has to discover anything at startup.
+CURRENT_STEP="project number"
+if [[ "$DRY_RUN" == 1 ]]; then
+  PROJECT_NUMBER="000000000000"
+else
+  PROJECT_NUMBER="$(gcloud --project "$PROJECT_ID" projects describe "$PROJECT_ID" --format='value(projectNumber)')"
+fi
+WORKER_URL="https://${WORKER_SERVICE}-${PROJECT_NUMBER}.${REGION}.run.app"
+WEB_URL="https://${SERVICE}-${PROJECT_NUMBER}.${REGION}.run.app"
+IAP_AGENT="service-${PROJECT_NUMBER}@gcp-sa-iap.iam.gserviceaccount.com"
+COMMON_ENV="PROJECT_ID=${PROJECT_ID},LOCATION=${REGION},TASK_QUEUE=${QUEUE},RESULTS_BUCKET=${BUCKET},SERVICE_ACCOUNT_EMAIL=${SA_EMAIL}${EXTRA_ENV:+,${EXTRA_ENV}}"
+
 # --- 1. setup -----------------------------------------------------------------------------------
 if [[ "${SKIP_SETUP:-0}" != 1 ]]; then
   CURRENT_STEP="setup"
   step "Enabling the APIs"
+  # Two calls: gcloud enables at most 20 APIs per command. What CloudGauge runs on, then what it reads.
   g services enable \
-    run.googleapis.com cloudbuild.googleapis.com cloudtasks.googleapis.com iap.googleapis.com \
-    iam.googleapis.com iamcredentials.googleapis.com cloudresourcemanager.googleapis.com \
-    logging.googleapis.com recommender.googleapis.com securitycenter.googleapis.com \
-    servicehealth.googleapis.com advisorynotifications.googleapis.com essentialcontacts.googleapis.com \
-    compute.googleapis.com container.googleapis.com sqladmin.googleapis.com osconfig.googleapis.com \
-    monitoring.googleapis.com storage.googleapis.com aiplatform.googleapis.com cloudasset.googleapis.com
+    run.googleapis.com cloudbuild.googleapis.com artifactregistry.googleapis.com cloudtasks.googleapis.com \
+    iap.googleapis.com iam.googleapis.com iamcredentials.googleapis.com cloudresourcemanager.googleapis.com \
+    storage.googleapis.com logging.googleapis.com aiplatform.googleapis.com
+  g services enable \
+    recommender.googleapis.com securitycenter.googleapis.com servicehealth.googleapis.com \
+    advisorynotifications.googleapis.com essentialcontacts.googleapis.com compute.googleapis.com \
+    container.googleapis.com sqladmin.googleapis.com osconfig.googleapis.com monitoring.googleapis.com \
+    cloudasset.googleapis.com
 
   step "Service account ${SA_EMAIL}"
   if [[ "$DRY_RUN" == 1 ]] || ! gcloud --project "$PROJECT_ID" iam service-accounts describe "$SA_EMAIL" >/dev/null 2>&1; then
@@ -137,6 +155,20 @@ if [[ "${SKIP_SETUP:-0}" != 1 ]]; then
     g storage buckets create "gs://${BUCKET}" --location="$REGION" --uniform-bucket-level-access
   fi
   g storage buckets add-iam-policy-binding "gs://${BUCKET}" --member="serviceAccount:${SA_EMAIL}" --role=roles/storage.objectAdmin >/dev/null
+
+  step "Letting Cloud Build build"
+  # Cloud Build runs as the project's Compute Engine default service account. Organizations commonly
+  # withhold its automatic Editor grant, which leaves it unable even to read the uploaded source; the
+  # Cloud Build Service Account role is the documented remedy (it also covers pushing the image).
+  # On a brand-new project that account appears a few seconds after the Compute API is enabled.
+  BUILD_SA="${PROJECT_NUMBER}-compute@developer.gserviceaccount.com"
+  if [[ "$DRY_RUN" != 1 ]]; then
+    for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do
+      gcloud --project "$PROJECT_ID" iam service-accounts describe "$BUILD_SA" >/dev/null 2>&1 && break
+      note "waiting for ${BUILD_SA} to exist..."; sleep 5
+    done
+  fi
+  g projects add-iam-policy-binding "$PROJECT_ID" --member="serviceAccount:${BUILD_SA}" --role=roles/cloudbuild.builds.builder --condition=None >/dev/null
 fi
 
 # --- 2. build -----------------------------------------------------------------------------------
@@ -145,20 +177,6 @@ if [[ "${SKIP_BUILD:-0}" != 1 ]]; then
   step "Building and testing ${IMAGE}:${TAG} with Cloud Build"
   (cd "$REPO_ROOT" && g builds submit . --config cloudbuild.yaml --substitutions="_IMAGE=${IMAGE},_TAG=${TAG}")
 fi
-
-# --- URLs ---------------------------------------------------------------------------------------
-# Cloud Run's deterministic URLs: known before the services exist, so the worker can be told its
-# own URL and nothing has to discover anything at startup.
-CURRENT_STEP="project number"
-if [[ "$DRY_RUN" == 1 ]]; then
-  PROJECT_NUMBER="000000000000"
-else
-  PROJECT_NUMBER="$(gcloud --project "$PROJECT_ID" projects describe "$PROJECT_ID" --format='value(projectNumber)')"
-fi
-WORKER_URL="https://${WORKER_SERVICE}-${PROJECT_NUMBER}.${REGION}.run.app"
-WEB_URL="https://${SERVICE}-${PROJECT_NUMBER}.${REGION}.run.app"
-IAP_AGENT="service-${PROJECT_NUMBER}@gcp-sa-iap.iam.gserviceaccount.com"
-COMMON_ENV="PROJECT_ID=${PROJECT_ID},LOCATION=${REGION},TASK_QUEUE=${QUEUE},RESULTS_BUCKET=${BUCKET},SERVICE_ACCOUNT_EMAIL=${SA_EMAIL}${EXTRA_ENV:+,${EXTRA_ENV}}"
 
 # --- 3. worker ----------------------------------------------------------------------------------
 CURRENT_STEP="worker"

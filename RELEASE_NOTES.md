@@ -61,7 +61,8 @@ release (`CLOUDGAUGE_ROLE=all`, the default) keeps working unchanged.
   page on 401, which signs in again and comes back. The report's three API
   calls go through one `apiFetch`.
 - **`tools/deploy.sh`** — the deployment, in one idempotent command: the APIs,
-  the service account with its project roles, the bucket; build and test with
+  the service account with its project roles, the bucket, Cloud Build's account
+  given its role (new projects often withhold it); build and test with
   `cloudbuild.yaml`; the worker (`CLOUDGAUGE_ROLE=worker`, `--ingress
   internal`, `--no-allow-unauthenticated`, the service account its only
   invoker); the web service (`CLOUDGAUGE_ROLE=web`, `WORKER_URL`, `--iap`,
@@ -1186,6 +1187,7 @@ performance; modernization; enablement; roadmap and roadblocks).
 | **v15.6** | Resilience at every scope | *Shipped.* Resilience of Critical Assets (Cloud SQL HA, backups, retention and PITR; zonal MIGs; single-region snapshots, now named one by one) runs in folder and project scans under the scanned scope, and each of its six checks reaches a verdict so Stability counts it; the scope picker offers active folders and projects only and names folders by their path and ID. |
 | **v16** | Authenticated by default | *Shipped.* Deployed **without `--allow-unauthenticated`**: people sign in through Identity-Aware Proxy on the web service's own `run.app` URL — no load balancer, domain, certificate or OAuth client — and a separate worker service is reachable by Cloud Tasks alone (`--ingress internal`, IAM); the pages say who is signed in and the report who requested the scan; `tools/deploy.sh` is the deployment; the public single service becomes an explicit, discouraged option. |
 | **v16.1** | Multi-region snapshots are resilient | *Disk Snapshot Resilience* reads the kind of a snapshot's storage location, not just its count: a snapshot in a multi-region (`asia`, `us`, `eu`) is geo-redundant and compliant; only a single region is flagged. Found during the v15.6 rollout, where every one of an organization's 56 flagged snapshots lived in `asia`. |
+| **v16.2** | Every download through the sign-in | The status page's **Download CSV** is a signed Cloud Storage link, good for an hour for whoever holds it; it becomes the web service's own CSV route, so a report's downloads — like its pages — exist only for someone IAP let in. Nothing else in the bucket is reachable from outside. |
 | **v17** | History and analytics | **BigQuery export** of every scan's findings; **scheduled scans**; a history page (scores over time); a guide for Gemini Enterprise / Looker over the export ("talk to your infrastructure"). |
 | **v18** | Footprint and support | A **Platform Footprint** page (what runs where: services, regions, versions); **modernization indicators** (legacy runtimes, unmanaged VMs, missing release channels); a **Support cases** briefing. |
 | Later | | VM Manager vulnerability summary, Security Command Center findings summary, SLO coverage, PDF export. |
