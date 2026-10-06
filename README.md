@@ -4,11 +4,11 @@
 
 **Note:** This is not an officially supported Google product. This project is not eligible for the [Google Open Source Software Vulnerability Rewards Program](https://bughunters.google.com/open-source-security).
 
-CloudGauge is a web application designed to run a comprehensive set of compliance, security, cost optimization, and best-practice checks against a Google Cloud Organization.
+CloudGauge is a web application designed to run a comprehensive set of compliance, security, cost optimization, and best-practice checks against a Google Cloud **organization, folder or project**.
 
-It is built with Python/Flask, structured as a modular application package (Flask *application factory*), and deployed as a serverless application on **Google Cloud Run**. The application leverages **Cloud Tasks** to run scans asynchronously, ensuring that even very large organizations can be scanned without browser timeouts.
+It is built with Python/Flask, structured as a modular application package (Flask *application factory*), and deployed as a serverless application on **Google Cloud Run**. The application leverages **Cloud Tasks** to run scans asynchronously — a large organization is split into shards that run in parallel — ensuring that even very large organizations can be scanned without browser timeouts.
 
-Final results are delivered as an interactive **HTML report** and a **CSV file** stored in a Google Cloud Storage bucket. The reports also feature **Gemini-powered** executive summaries and `gCloud` remediation suggestions.
+Final results are delivered as an interactive **HTML report** (an Overview, a one-page **Scorecard**, and a page per category) and a **CSV file**, stored in a Google Cloud Storage bucket and compared with the previous scan of the same scope. The reports also feature **Gemini-powered** executive summaries and `gcloud` remediation suggestions.
 
 ![An organization scan, end to end: choosing the scope, the scan running, the report's pages, the Scorecard and its executive summary](./assets/cloudgauge.gif)
 
@@ -35,14 +35,14 @@ Final results are delivered as an interactive **HTML report** and a **CSV file**
 
 ## **Features**
 
-CloudGauge scans your organization across several key domains, modeled after the Google Cloud Architecture Framework.
+CloudGauge scans an organization, a folder or a project across several key domains, modeled after the Google Cloud Architecture Framework. Items marked *(organization scans)* describe the organization itself or query an organization-level API, so they run in an organization scan only; everything else runs in all three scopes, for the projects in scope.
 
 ### **Security & Identity**
 
 * **Organization Policies**: Checks boolean policies against a list of best practices. The policies are the scope's *effective* ones: for a folder or project scan the check walks the hierarchy from the organization down to the scanned resource, the nearest policy winning (a folder's over the organization's, a project's over both). It runs even for a folder that holds no project.
-* **Organization IAM**: Scans for public principals (`allUsers`, `allAuthenticatedUsers`) and primitive roles (`owner`, `orgAdmin`) at the org level.
+* **Organization IAM** *(organization scans)*: Scans for public principals (`allUsers`, `allAuthenticatedUsers`) and primitive roles (`owner`, `orgAdmin`) at the org level.
 * **Project IAM**: Scans all projects for the use of primitive `roles/owner` and `roles/editor`.
-* **Security Command Center**: Verifies that SCC Premium is enabled.
+* **Security Command Center** *(organization scans)*: Verifies that SCC Premium is enabled.
 * **SA Key Rotation**: Finds user-managed service account keys older than 90 days.
 * **Public GCS Buckets**: Detects GCS buckets that are publicly accessible.
 * **Open Firewall Rules**: Scans all VPCs for firewall rules open to the internet (`0.0.0.0/0`).
@@ -57,28 +57,30 @@ CloudGauge scans your organization across several key domains, modeled after the
 
 * **Idle Resources**: Finds idle Cloud SQL instances, VMs, persistent disks, and unassociated IP addresses.
 * **Rightsizing**: Identifies overprovisioned VMs and underutilized reservations.
-* **Cost Insights**: Provides an on-demand, detailed scan for CPU/memory usage, idle images, and more.
+* **Detailed insights** *(on demand)*: The Cost Optimization page's **Get detailed insights** button asks the Recommender's insight types for every project in scope — CPU and memory usage, idle images, and more — and renders them in the page without re-running the scan.
 
 ### **Reliability & Resilience**
 
-* **Essential Contacts**: Ensures a contact is subscribed to the `SECURITY`, `TECHNICAL`, `LEGAL` and `SUSPENSION` categories (a contact subscribed to `ALL` covers them all).
+* **Essential Contacts** *(organization scans)*: Ensures a contact is subscribed to the `SECURITY`, `TECHNICAL`, `LEGAL` and `SUSPENSION` categories (a contact subscribed to `ALL` covers them all).
 * **Service Health Incidents** *(briefing)*: The Google Cloud incidents that were *Impacted* or *Related* to the scanned projects in the last 90 days, from Personalized Service Health, one row per incident naming every project it touched (active incidents first). Always *Informational*. The relevance and window are configurable (`SERVICE_HEALTH_RELEVANCE`, `SERVICE_HEALTH_WINDOW_DAYS`).
 * **Personalized Service Health API Coverage**: Flags every project in which the Service Health API is not enabled (*Action Required*): such a project has no personalized incident view, alerts or relevance.
-* **Cloud SQL Resilience**: Checks for High Availability (HA) configuration, automated backups, and Point-in-Time Recovery (PITR).
+* **Cloud SQL Resilience** *(organization scans)*: Checks for High Availability (HA) configuration, automated backups, backup retention and Point-in-Time Recovery (PITR). Folder and project scans are on the roadmap (v15.6).
 * **GCS Versioning**: Finds buckets without object versioning enabled.
 * **GKE Hygiene**: Checks for clusters not on a release channel and node pools with auto-upgrade disabled.
 * **GKE Supported Versions**: Finds control planes and node pools on a GKE minor that is no longer offered (*Action Required*) or on the oldest minor still offered — the next to leave support (*Investigation Recommended*). The reference is GKE's own `getServerConfig` for the cluster's location: a cluster on a release channel is judged against its channel's versions, one without against the static lists. Every row carries the `gcloud container clusters upgrade` command to the right target (a node pool never beyond its control plane).
-* **Resilience Assets**: Identifies zonal MIGs (recommends regional) and single-region disk snapshots.
+* **Resilience Assets** *(organization scans)*: Identifies zonal MIGs (recommends regional) and single-region disk snapshots. Folder and project scans are on the roadmap (v15.6).
 
 ### **Operational Excellence & Observability**
 
-* **Audit Logging**: Checks for an organization-level log sink.
+* **Audit Logging** *(organization scans)*: Checks for an organization-level log sink.
 * **OS Config Coverage**: Identifies running VMs (excluding GKE/Dataproc) that are not reporting to the OS Config service.
 * **Monitoring Coverage**: Scans for projects missing key alert policies (e.g., Quota, Cloud SQL, GKE).
 * **Network Analyzer**: Ingests and normalizes insights for VPC, GKE, and PSA IP address utilization.
 * **Standalone VMs**: Finds VMs not managed by a Managed Instance Group (MIG).
 * **Quota Utilization**: Identifies any regional compute quotas exceeding 80% utilization.
-* **Unattended Projects**: Flags projects with low utilization.
+* **Firewall Complexity**: Flags projects whose VPC firewall rule count suggests a review (*Investigation Recommended*).
+* **Recent Changes** *(briefing)*: The Recommender's recent-change insights for each project, and for the organization in an organization scan. *Informational*.
+* **Unattended Projects** *(organization scans)*: Flags projects the Recommender reports as unattended (low utilization).
 
 ### **AI-Powered Insights (Gemini)**
 
@@ -87,75 +89,97 @@ CloudGauge scans your organization across several key domains, modeled after the
 
 ##  **Architecture**
 
-The application follows a robust, scalable, and asynchronous "fire-and-forget" pattern. This ensures the user gets an immediate response while the heavy work (which can take many minutes) is done in the background. The same flow serves a single project and an organization with thousands of projects; the difference is only in how the work is split behind the scenes.
+The application follows a robust, scalable, and asynchronous "fire-and-forget" pattern. This ensures the user gets an immediate response while the heavy work (which can take many minutes) is done in the background. The same flow serves a single project and an organization with thousands of projects; the difference is only in how the work is split behind the scenes. One Cloud Run service hosts all of it as three Flask blueprints: the **pages** (`app/routes/ui.py`), the **API** the pages call (`app/routes/api.py`), and the **worker** endpoints that only Cloud Tasks invokes (`app/routes/worker.py`).
 
-1.  **UI Trigger**: A user navigates to the Cloud Run URL and submits an Organization ID.
-2.  **Task Creation**: The `/scan` endpoint creates a **Cloud Task** with the scan details and redirects the user to a status page.
-3.  **Background Worker**: Cloud Tasks securely invokes the `/run-scan` endpoint in the background. The worker lists the projects in scope and decides:
-    * **Up to `SCAN_SHARD_SIZE` projects (default 20)**: it runs the whole scan in this one request, exactly as before.
-    * **More projects**: it becomes a **dispatcher**. It writes the job's *manifest* (which projects belong to which shard), enqueues one `/scan-shard` task per shard of `SCAN_SHARD_SIZE` projects plus one **scope shard** for the checks that look at the organization itself (Organization Policies, org IAM, SCC, audit logging, Essential Contacts, the organization's Advisory Notifications, ...), schedules a *sweeper*, and returns within seconds.
-4.  **Parallel Processing**: Each shard executes its checks concurrently using a thread pool (`app/checks/runner.py`) under a time budget (`SHARD_TIME_BUDGET_SECONDS`). Every finding is written to an intermediate file in GCS as soon as it is found. Cloud Tasks runs up to `SCAN_MAX_CONCURRENT_SHARDS` shards at a time and retries a failed shard; a shard that fails on its last attempt records its checks as error rows so one bad shard never costs the whole report.
-5.  **Automatic Fan-in**: When a shard finishes it writes a *marker* file. The shard that sees a marker for every shard enqueues the `/run-aggregation` task. The task name is deterministic (`<job>-aggregate`), so when two shards finish together Cloud Tasks accepts only one; nothing is counted, nothing needs a database. The `/sweep` task runs every `SWEEP_INTERVAL_SECONDS` as a safety net: it gives shards whose task has vanished error rows and finishes the job, so a scan always terminates.
-6.  **Report Storage**: The aggregation merges the shards' findings into the same report a single-task scan produces (one item per check, with a **coverage** line stating how many projects were scanned), generates the HTML/CSV reports, uploads them to Google Cloud Storage, and deletes the intermediate files.
-7.  **Status Polling**: The user's status page polls an API endpoint; for a sharded scan it shows *"Scanned 640 of 1,000 projects · organization-level checks: completed"* until the report files are found in GCS, at which point it displays the download links. Shards are an implementation detail: everything the user reads (status page, coverage line, error rows) speaks of projects and organization-level checks.
+1.  **Choosing the scope**: The landing page offers three scopes — **organization**, **folder** or **project**. Choosing one calls `/api/list-resources`, which lists the matching resources of the organization the service runs in (Cloud Asset Inventory), and the user picks one from the list.
+2.  **Task creation**: The `/scan` endpoint creates a **Cloud Task** with the scope, its ID and a fresh job ID, and redirects the user to the status page.
+3.  **Background worker**: Cloud Tasks securely invokes the `/run-scan` endpoint in the background. The worker lists the active projects in scope (Cloud Asset Inventory's recursive search; a folder scan also asks Resource Manager for the folder's direct children and reconciles the two lists, so a project moved in minutes ago is scanned too) and decides:
+    * **Up to `SCAN_SHARD_SIZE` projects (default 20)**: it runs the whole scan in this one request.
+    * **More projects**: it becomes a **dispatcher**. It writes the job's *manifest* (which projects belong to which shard), enqueues one `/scan-shard` task per shard of `SCAN_SHARD_SIZE` projects plus one **scope shard** for the checks that look at the scope itself (Organization Policies and, in an organization scan, org IAM, SCC, audit logging, Essential Contacts, Resilience of Critical Assets, the organization's Advisory Notifications), schedules a *sweeper*, and returns within seconds.
+4.  **Parallel processing**: Each shard executes its checks concurrently using a thread pool (`app/checks/runner.py`) under a time budget (`SHARD_TIME_BUDGET_SECONDS`). Every finding is written to an intermediate file in GCS as soon as it is found. Cloud Tasks runs up to `SCAN_MAX_CONCURRENT_SHARDS` shards at a time and retries a failed shard; a shard that fails on its last attempt records its checks as error rows so one bad shard never costs the whole report.
+5.  **Automatic fan-in**: When a shard finishes it writes a *marker* file. The shard that sees a marker for every shard enqueues the `/run-aggregation` task. The task name is deterministic (`<job>-aggregate`), so when two shards finish together Cloud Tasks accepts only one; nothing is counted, nothing needs a database. The `/sweep` task runs every `SWEEP_INTERVAL_SECONDS` as a safety net: it gives shards whose task has vanished error rows and finishes the job, so a scan always terminates.
+6.  **Report build**: The single task, or the aggregation, reads the findings back (one item per check, with a **coverage** line stating how many projects were scanned), reads the **previous scan's summary** of the same scope from the bucket's `scopes/` prefix and compares the two (the report's *since* line and its deltas), renders the HTML and CSV reports, uploads them to Google Cloud Storage, files this scan's own summary under `scopes/` for the next scan to find, and deletes the intermediate files.
+7.  **Status and report pages**: The status page polls `/api/status/<job>/<scope_id>` every few seconds; for a sharded scan it shows *"Scanned 640 of 1,000 projects · organization-level checks: completed"*. When the job completes it offers **View interactive report** (`/report/<job>/<scope_id>`, the HTML served from the bucket by the service) and **Download CSV** (a signed URL). The report's on-demand features call the API from its pages: the Scorecard's executive summary (`/api/get-summary`, Gemini over the CSV in the bucket), the Overview's **Draft fixes** (`/api/get-suggestions`, Gemini) and the Cost Optimization page's **Get detailed insights** (`/api/get-insights`, the Recommender's insight types). Shards are an implementation detail: everything the user reads (status page, coverage line, error rows) speaks of projects and organization-level checks.
 
 ### **Architecture Diagram**
 
-The diagram below illustrates the asynchronous "fire-and-forget" pattern with the sharded path a large scope takes.
+The diagram below shows the whole flow: the pages and the API they call, the worker with the sharded path a large scope takes, the results bucket, and the report's on-demand features.
 
 ```mermaid
-graph LR
-    %% Column 1: User
-    subgraph User
-        A[Selects Scan Scope] --> B{Lists Resources};
-        B --> C[Selects Resource ID];
-        C --> D[Submits Form];
+graph TD
+    subgraph browser["Browser"]
+        A(["Landing page: pick an organization, folder or project"])
+        B(["Status page: progress, then View interactive report / Download CSV"])
+        A -->|"redirected to"| B
     end
 
-    %% Column 2: The "Frontend" part of the Cloud Run service
-    subgraph Cloud Run - Initial Request
-        D -- "1. POST Request" --> E{Scan Endpoint};
-        E -- "2. Creates Task" --> F[(Cloud Tasks)];
-        E -- "3. Redirects" --> G[Status Page];
-        G -- "Polls API" --> H{Status API};
+    subgraph pages["Cloud Run: pages and API (routes/ui.py, routes/api.py)"]
+        LIST["/api/list-resources"]
+        SCAN["/scan"]
+        STATUS["/api/status/job/scope_id"]
+        REPORT["/report/job/scope_id: Overview, Scorecard, category pages (and /csv)"]
+        ONDEMAND["/api/get-summary, /api/get-suggestions, /api/get-insights"]
     end
 
-    %% Column 3: The dispatcher (the same Cloud Run service, invoked by Cloud Tasks)
-    subgraph Cloud Run - Dispatcher
-        F -- "4. Invokes /run-scan" --> I{Lists Projects};
-        I -- "up to SCAN_SHARD_SIZE projects" --> J[Runs every check in this request];
-        I -- "more projects" --> K[Writes manifest];
-        K -- "5. One task per shard + scope shard + sweep" --> F;
+    subgraph tasks["Cloud Tasks"]
+        Q[("Queue (TASK_QUEUE)")]
     end
 
-    %% Column 4: The shards (concurrent Cloud Run requests)
-    subgraph Cloud Run - Shards
-        F -- "6. Invokes /scan-shard (N at a time)" --> L[Shard: 20 projects, every project check];
-        F -- "6. Invokes /scan-shard" --> S[Scope shard: org-level checks];
-        L -- "Writes findings + marker" --> M([Intermediate Findings in GCS]);
-        S -- "Writes findings + marker" --> M;
-        L -- "7. Last marker? Enqueue aggregation (named task)" --> F;
-        F -- "Every 30 min: /sweep" --> SW[Sweeper: finishes a job whose shards died];
+    subgraph worker["Cloud Run: worker (routes/worker.py), invoked by Cloud Tasks only"]
+        RUN{"/run-scan: lists the active projects in scope"}
+        ONE["Up to SCAN_SHARD_SIZE projects: every check in this request"]
+        DISPATCH["More projects: the dispatcher writes the manifest and enqueues the shards"]
+        SHARD["/scan-shard: 20 projects each, N at a time (+ one scope shard for the scope-level checks)"]
+        SWEEP["/sweep: finishes a job whose shards died"]
+        AGG["/run-aggregation: merges every shard's findings"]
+        BUILD["Report build: coverage, comparison with the previous scan, HTML + CSV"]
     end
 
-    %% Column 5: Aggregation and delivery
-    subgraph Cloud Run - Aggregation
-        F -- "8. Invokes /run-aggregation" --> N[Merges every shard's findings];
-        J --> N;
-        M --> N;
-        N --> O[Generates Reports with coverage];
-        O --> P[Uploads Reports];
-        P --> Q[Cleans up intermediate files];
+    subgraph bucket["Cloud Storage: results bucket (RESULTS_BUCKET)"]
+        ST[("job/scope_id_status.json")]
+        INT[("intermediate/job/: findings, manifest, markers")]
+        REP[("job/scope_id_report.html and .csv")]
+        HIST[("scopes/scope/scope_id/: one summary per completed scan")]
     end
 
-    %% External Google Cloud Services
-    subgraph External GCP Services
-        L -- "queries" --> APIS([Cloud APIs]);
-        S -- "queries" --> APIS;
-        H -- "reads" --> GCS_STATUS([status.json in GCS]);
-        L -- "progress: shards done / projects scanned" --> GCS_STATUS;
-        P -- "writes to" --> GCS_REPORTS([Final Reports in GCS]);
+    subgraph gcp["Google Cloud"]
+        APIS[["Cloud APIs: Asset Inventory, Resource Manager, Compute, IAM, Recommender, ..."]]
+        GEMINI[["Vertex AI: Gemini"]]
     end
+
+    A -->|"1. lists the scope's resources"| LIST
+    LIST --> APIS
+    A -->|"2. POST scope + ID"| SCAN
+    SCAN -->|"3. creates a task"| Q
+    B -->|"polls every 3 s"| STATUS
+    STATUS -->|"reads"| ST
+
+    Q -->|"4. invokes"| RUN
+    RUN -->|"small scope"| ONE
+    RUN -->|"large scope"| DISPATCH
+    DISPATCH -->|"5. one task per shard + sweeper"| Q
+    Q -->|"6. invokes"| SHARD
+    Q -->|"every SWEEP_INTERVAL_SECONDS"| SWEEP
+    ONE -->|"queries"| APIS
+    SHARD -->|"queries"| APIS
+    SHARD -->|"findings + marker"| INT
+    SHARD -.->|"progress"| ST
+    SHARD -->|"7. last marker: enqueues the named aggregation task"| Q
+    Q -->|"8. invokes"| AGG
+    AGG -->|"reads back, then deletes"| INT
+
+    ONE --> BUILD
+    AGG --> BUILD
+    BUILD -->|"reads the previous summary, files this one"| HIST
+    BUILD -->|"uploads"| REP
+    BUILD -->|"status: completed"| ST
+
+    B -->|"9. View interactive report"| REPORT
+    REPORT -->|"reads"| REP
+    REPORT -->|"on demand: executive summary, Draft fixes, detailed insights"| ONDEMAND
+    ONDEMAND -->|"reads the CSV"| REP
+    ONDEMAND --> GEMINI
+    ONDEMAND -->|"Recommender insight types"| APIS
 ```
 
 ### **Scaling to Large Organizations**
@@ -248,7 +272,7 @@ app/
 ├── fanout.py            # Sharded scans: dispatcher, shard worker, marker fan-in, aggregation, sweeper
 ├── routes/              # Blueprints
 │   ├── ui.py            #   /, /scan, /status/..., /report/...
-│   ├── api.py           #   /api/list-resources, /api/status/..., /api/get-summary, ...
+│   ├── api.py           #   /api/list-resources, /api/status/..., /api/get-summary, /api/get-suggestions, /api/get-insights
 │   └── worker.py        #   /run-scan, /scan-shard, /run-aggregation, /sweep (invoked by Cloud Tasks)
 ├── checks/              # Checks grouped by pillar: security, cost, reliability, operations, network
 │   ├── registry.py      #   The check plan: which checks run, and in what order
@@ -258,7 +282,7 @@ app/
 │   ├── advisories.py    #   Advisory Notifications briefing + Advisory Notifications Settings (v14)
 │   ├── gke_versions.py  #   GKE Supported Versions: clusters and node pools on minors GKE no longer offers (v15)
 │   └── not_checked.py   #   The projects a check could not cover, reported as "Projects not checked"
-├── services/            # GCP clients, Cloud Tasks, GCS results store, Gemini, insights, org policies
+├── services/            # gcp.py (clients), tasks.py (Cloud Tasks), results_store.py (the bucket: findings, status, reports, per-scope scan summaries), resource_manager.py (scope listing, projects in scope, folder membership reconciled with Resource Manager, v15.4), org_policies.py, gemini.py, insights.py, worker_url.py
 ├── reporting/           # HTML and CSV report builders; layouts.py lays out a check's table (v14.1); changes.py compares two scans (v15); scorecard.py builds the Scorecard page and its exports (v15.1); scoring.py is the score rule (v15.2)
 ├── synthetic/           # Synthetic load mode: a generated organization behind the GCP client seam
 └── templates/           # _design.css (tokens and primitives every page inlines, v14.2), index.html, status.html, report/ (HTML, CSS, JS)
@@ -630,12 +654,14 @@ gcloud run services update-traffic ${SERVICE_NAME} --region ${REGION} --to-revis
 
 1. Navigate to your service's URL (`${SERVICE_URL}`).  
 2. Choose your scope: Organization, Folder or Project.
-3. Choose the resource.
+3. Choose the resource from the list (the organization the service runs in, or one of its folders or projects).
 4. Click **Start scan**.  
-5. You will be redirected to a status page. Wait for the scan to complete (this can take 5-15 minutes depending on org size).  
-6. Once finished, **View interactive report** and **Download CSV** appear. The report itself also has a **Download CSV** button (all rows, no expiry), a filter box, and sortable, paged tables (see [Reports for Large Organizations](#reports-for-large-organizations) and [The Pages](#the-pages)).
+5. You will be redirected to a status page. A project or a small organization takes a few minutes; a large organization runs in parallel shards and the page counts the projects scanned (see [Sizing for your organization](#sizing-for-your-organization) for what to expect).  
+6. Once finished, **View interactive report** and **Download CSV** appear. The report itself also has a **Download CSV** button (all rows, no expiry), a filter box, and sortable, paged tables (see [Reports for Large Organizations](#reports-for-large-organizations) and [The Pages](#the-pages)). Three things run on demand from the report, so they cost nothing until asked for: the Scorecard's **executive summary**, the Overview's **Draft fixes**, and the Cost Optimization page's **Get detailed insights**.
 
-> **Checks that can't run are reported, not hidden.** If a check fails (for example, a missing permission or a disabled API), the report shows it with status **Error** and the reason, in the check's own section. Errors do not count against that section's score — they are stated next to it ("1 could not be checked") and a section with nothing but errors is *Not assessed* — so fix the cause (see [Permission Denied on Google Cloud APIs](#permission-denied-on-google-cloud-apis)) for a complete score. Organization scans also include the **Security Command Center Status** check.
+> **Checks that can't run are reported, not hidden.** If a check fails (for example, a missing permission or a disabled API), the report shows it with status **Error** and the reason, in the check's own section. Errors do not count against that section's score — they are stated next to it ("1 could not be checked") and a section with nothing but errors is *Not assessed* — so fix the cause (see [Permission Denied on Google Cloud APIs](#permission-denied-on-google-cloud-apis)) for a complete score.
+
+> **What differs by scope.** Every scope runs the same project checks over the projects in scope, and Organization Policies as they are *effective* at the scanned resource. An organization scan adds the checks that describe the organization itself: **Organization IAM**, **Security Command Center Status**, **Organization Audit Logging**, **Essential Contacts**, **Resilience of Critical Assets** (which includes Cloud SQL HA, backups and PITR), **Unattended Projects**, and the organization's own Advisory Notifications and Recent Changes. Running Resilience of Critical Assets for folders and projects is on the roadmap (v15.6, see [Release Notes](./RELEASE_NOTES.md)).
 
 > **Folder scans and recently moved projects.** A folder scan finds the folder's projects with Cloud Asset Inventory, which can lag a project move or creation by an hour or more, so it also asks Resource Manager for the folder's direct child projects (one call) and compares the two. A project Resource Manager lists in the folder that Asset Inventory does not yet is scanned too; one Asset Inventory still places there that Resource Manager no longer does (moved out, deleted, or not readable by the scanner) is scanned anyway. When the two disagree the header shows a **Folder membership** row and the Overview a note naming the projects; when they agree — the usual case — nothing appears. Projects under a subfolder of the scanned folder come from Asset Inventory alone.
 
@@ -720,8 +746,8 @@ If the status page is stuck for a long time, the background worker is likely fai
 1. Go to the **Cloud Run** page in the Google Cloud Console.  
 2. Click on your service (`cloudgauge-service`).  
 3. Go to the **LOGS** tab.  
-4. Look for log entries for requests made to the `/run-scan` URL.  
-5. If you see logs for `/run-scan`, look for any errors in red.
+4. Look for log entries for requests made to the worker URLs: `/run-scan` (every scan starts there), and for a large scope `/scan-shard`, `/run-aggregation` and `/sweep`.  
+5. Every line the worker logs starts with the job ID in brackets — the status page shows it as *Job …* — so filtering the logs on `[<job-id>]` shows one scan's whole story across its shards. Look for any errors in red.
 
 ### **Step 2: Check the Cloud Tasks Logs**
 
@@ -790,7 +816,7 @@ gcloud run services update cloudgauge-service \
 #### **Request Timeout**
 
 * **Error Message**: The logs show an HTTP `504` status code or a message like "The request has been terminated because it has reached its deadline."  
-* **Cause**: The scan is taking longer to complete than the configured request timeout on the Cloud Run service.  
+* **Cause**: A request is taking longer than the configured request timeout on the Cloud Run service. A scope of up to `SCAN_SHARD_SIZE` projects runs in one `/run-scan` request, so that request is as long as the whole scan; a larger scope runs as shards, and each `/scan-shard` request is bounded by the task's dispatch deadline (`TASK_DISPATCH_DEADLINE_SECONDS`, 30 minutes at most) and stops starting new checks after `SHARD_TIME_BUDGET_SECONDS` (default 20 minutes), so it should never reach a 1-hour request timeout — if a shard does time out, see [A Large Scan Reports "Partially Scanned" or Error Rows](#a-large-scan-reports-partially-scanned-or-error-rows).  
 * **Solution**: The deployment instructions recommend a timeout of `3600` seconds (1 hour). Verify this was set correctly.  
   * **Via Console**: Go to **"Edit & Deploy New Revision"** and check the **"Request timeout"** value under the "General" tab.  
   * **Via gcloud CLI**: You can update the service with the correct timeout using:
@@ -920,13 +946,13 @@ Before running the script, replace the placeholder values in the first few lines
 #!/bin/bash
 
 # --- CONFIGURE THESE VARIABLES ---
-export YOUR_ORG_ID="123456789012" # Replace with your Organization ID
-export PROJECT_ID="your-gcp-project-id"   # Replace with your Project ID
-export REGION="asia-south1"         # Replace with the region you deployed to
+export ORG_ID="123456789012"              # The Organization ID you granted the roles on
+export PROJECT_ID="your-gcp-project-id"   # The project CloudGauge was deployed in
+export REGION="asia-south1"               # The region you deployed to
 # --- END CONFIGURATION ---
 
 
-# Set derived variables
+# Set derived variables (the names the deployment instructions use; change them if you chose others)
 export SERVICE_NAME="cloudgauge-service"
 export QUEUE_NAME="cloudgauge-scan-queue"
 export BUCKET_NAME="cloudgauge-reports-${PROJECT_ID}"
@@ -937,43 +963,53 @@ export SA_EMAIL="${SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
 
 echo "--- Starting Cleanup for CloudGauge in project ${PROJECT_ID} ---"
 
-# 1. Delete the Cloud Run service
+# 1. Delete the Cloud Run service (its roles/run.invoker and roles/run.viewer bindings go with it)
 echo "Deleting Cloud Run service: ${SERVICE_NAME}..."
 gcloud run services delete ${SERVICE_NAME} --region=${REGION} --platform=managed --quiet
 
-# 2. Delete the Cloud Tasks queue
+# 2. Delete the Cloud Tasks queue (the service created it at startup)
 echo "Deleting Cloud Tasks queue: ${QUEUE_NAME}..."
 gcloud tasks queues delete ${QUEUE_NAME} --location=${REGION} --quiet
 
-# 3. Delete the GCS bucket and all its contents
+# 3. Delete the results bucket and everything in it: reports, status files and the per-scope
+#    scan history (the bucket's roles/storage.objectAdmin binding goes with it)
 echo "Deleting GCS bucket: gs://${BUCKET_NAME}..."
 gsutil -m rm -r "gs://${BUCKET_NAME}"
 
-# 4. Delete the container image from GCR
+# 4. Delete the container image (Method 2 pushes it to gcr.io; see the explanation below for Method 1)
 echo "Deleting container image..."
 gcloud container images delete "gcr.io/${PROJECT_ID}/${SERVICE_NAME}" --force-delete-tags --quiet
 
-# 5. Remove all IAM policy bindings for the service account
+# 5. Remove the IAM bindings the prerequisites granted: the same roles, in the same order
 echo "Removing IAM bindings for ${SA_EMAIL}..."
 
-# Organization-level roles
-gcloud organizations remove-iam-policy-binding ${YOUR_ORG_ID} --member="serviceAccount:${SA_EMAIL}" --role="roles/cloudresourcemanager.organizationViewer" --quiet
-gcloud organizations remove-iam-policy-binding ${YOUR_ORG_ID} --member="serviceAccount:${SA_EMAIL}" --role="roles/iam.securityReviewer" --quiet
-gcloud organizations remove-iam-policy-binding ${YOUR_ORG_ID} --member="serviceAccount:${SA_EMAIL}" --role="roles/recommender.organizationViewer" --quiet
-gcloud organizations remove-iam-policy-binding ${YOUR_ORG_ID} --member="serviceAccount:${SA_EMAIL}" --role="roles/cloudasset.viewer" --quiet
+# Organization-level roles, including the custom Advisory Notifications role (v14)
+for ROLE in \
+    roles/browser \
+    roles/cloudasset.viewer \
+    roles/compute.networkViewer \
+    roles/essentialcontacts.viewer \
+    roles/recommender.iamViewer \
+    roles/logging.viewer \
+    roles/monitoring.viewer \
+    roles/orgpolicy.policyViewer \
+    roles/resourcemanager.organizationViewer \
+    roles/servicehealth.viewer \
+    roles/securitycenter.settingsViewer \
+    roles/iam.securityReviewer \
+    "organizations/${ORG_ID}/roles/CloudGaugeAdvisoryViewer"; do
+  gcloud organizations remove-iam-policy-binding ${ORG_ID} --member="serviceAccount:${SA_EMAIL}" --role="${ROLE}" --quiet
+done
 
-# The custom Advisory Notifications role (v14): unbind it, then delete it
-gcloud organizations remove-iam-policy-binding ${YOUR_ORG_ID} --member="serviceAccount:${SA_EMAIL}" --role="organizations/${YOUR_ORG_ID}/roles/CloudGaugeAdvisoryViewer" --quiet
-gcloud iam roles delete CloudGaugeAdvisoryViewer --organization=${YOUR_ORG_ID} --quiet
+# The custom role itself, now that nothing is bound to it
+gcloud iam roles delete CloudGaugeAdvisoryViewer --organization=${ORG_ID} --quiet
 
-# Project-level roles
-gcloud projects remove-iam-policy-binding ${PROJECT_ID} --member="serviceAccount:${SA_EMAIL}" --role="roles/cloudtasks.admin" --quiet
-gcloud projects remove-iam-policy-binding ${PROJECT_ID} --member="serviceAccount:${SA_EMAIL}" --role="roles/storage.objectAdmin" --quiet
-gcloud projects remove-iam-policy-binding ${PROJECT_ID} --member="serviceAccount:${SA_EMAIL}" --role="roles/iam.serviceAccountTokenCreator" --quiet
-gcloud projects remove-iam-policy-binding ${PROJECT_ID} --member="serviceAccount:${SA_EMAIL}" --role="roles/aiplatform.user" --quiet
-gcloud projects remove-iam-policy-binding ${PROJECT_ID} --member="serviceAccount:${SA_EMAIL}" --role="roles/run.invoker" --quiet # This was added to the SA itself, but good to be explicit
+# Project-level roles (on the project CloudGauge was deployed in)
+for ROLE in roles/aiplatform.user roles/cloudtasks.admin; do
+  gcloud projects remove-iam-policy-binding ${PROJECT_ID} --member="serviceAccount:${SA_EMAIL}" --role="${ROLE}" --quiet
+done
 
-# 6. Delete the Service Account
+# 6. Delete the Service Account (its own Token Creator and Service Account User bindings go with it)
 echo "Deleting service account: ${SA_EMAIL}..."
 gcloud iam service-accounts delete ${SA_EMAIL} --quiet
 
@@ -986,17 +1022,17 @@ echo "✅ Cleanup complete!"
 Here's a breakdown of what each command in the script does:
 
 1. **Delete Cloud Run Service**: `gcloud run services delete`  
-   * This removes the main web application itself, stopping it from running and incurring costs.  
+   * This removes the web application itself, stopping it from running and incurring costs. The `roles/run.invoker` and `roles/run.viewer` bindings were granted on the service, so they disappear with it.  
 2. **Delete Cloud Tasks Queue**: `gcloud tasks queues delete`  
-   * Your script automatically creates a Cloud Tasks queue named `cloudgauge-scan-queue`. This command deletes that queue.  
+   * The service creates the Cloud Tasks queue named in `TASK_QUEUE` (`cloudgauge-scan-queue`) when it starts, if it does not exist. This command deletes that queue, and with it any scan still queued.  
 3. **Delete GCS Bucket**: `gsutil -m rm -r`  
-   * This command deletes the `cloudgauge-reports-...` bucket and all the HTML/CSV reports stored inside it. The `-m` flag helps it run faster if there are many report files.  
+   * This command deletes the `cloudgauge-reports-...` bucket and everything stored inside it: the HTML/CSV reports, the status files, and the per-scope scan summaries under `scopes/` that the report's *since* line compares against. The `-m` flag helps it run faster if there are many files. The `roles/storage.objectAdmin` binding was granted on the bucket, so it goes with it.  
 4. **Delete Container Image**: `gcloud container images delete`  
-   * When you deployed the service, Cloud Build created a container image and stored it in Google Container Registry (GCR). This command deletes that stored image to keep your registry clean.  
+   * Method 2 builds the image with Cloud Build and stores it in Google Container Registry (`gcr.io`); this command deletes it. Method 1 (deploy from source) stores its images in the Artifact Registry repository `cloud-run-source-deploy` and creates a Cloud Build trigger for your fork; delete both from the console (**Artifact Registry** and **Cloud Build › Triggers**), as their names depend on your repository. If you followed [Forcing Image Storage to a Specific Region](#forcing-image-storage-to-a-specific-region), delete the `cloudgauge-repo` repository as well.  
 5. **Remove IAM Bindings**: `gcloud ... remove-iam-policy-binding`  
-   * This is a critical step. Before deleting the service account, you should remove all the permissions (roles) you granted it at both the **Organization** and **Project** levels. This prevents "ghost" principals from showing up in your IAM policies.  
+   * This is a critical step. Before deleting the service account, remove the roles the prerequisites granted it at the **Organization** level (the twelve predefined roles and the custom `CloudGaugeAdvisoryViewer` role, which is then deleted) and at the **Project** level (`roles/aiplatform.user`, `roles/cloudtasks.admin`). This prevents "ghost" principals from showing up in your IAM policies.  
 6. **Delete Service Account**: `gcloud iam service-accounts delete`  
-   * This is the final step. After removing its permissions, you can safely delete the `cloudgauge-sa` service account itself.
+   * This is the final step. After removing its permissions, you can safely delete the `cloudgauge-sa` service account itself; the Token Creator and Service Account User bindings it held on itself (for the signed CSV links) are deleted with it.
 
 
 ## **License & Support** 
