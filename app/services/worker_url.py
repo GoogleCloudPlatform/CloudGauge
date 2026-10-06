@@ -54,10 +54,16 @@ def resolve_worker_url(settings):
     """Returns ``WORKER_URL`` if it is set, otherwise discovers the URL via the Cloud Run Admin API.
 
     The legacy code told users to set ``WORKER_URL`` but never read it (plan B5).
-    Call this once at startup and reuse the result.
+    Call this once at startup and reuse the result. A ``web`` service never
+    discovers itself: its scans run on the worker service, so ``WORKER_URL``
+    must name it (``Settings.validate`` says so at startup in production; this
+    is the guard for the other profiles).
     """
     if settings.worker_url:
         worker_url = settings.worker_url.rstrip('/')
         print(f"✅ Using WORKER_URL from environment: {worker_url}")
         return worker_url
+    if settings.is_web_role:
+        raise RuntimeError("CLOUDGAUGE_ROLE=web needs WORKER_URL, the URL of the worker service; "
+                           "the web service never runs scans itself.")
     return discover_self_url(settings)

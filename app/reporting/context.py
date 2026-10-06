@@ -404,6 +404,9 @@ class ReportContext:
     # What a folder scan reconciled between Asset Inventory and Resource Manager (the header's Folder
     # membership row and an Overview note). None, the normal case: the two agreed, and nothing is rendered.
     membership: FolderMembership | None = None
+    # Who asked for the scan: the signed-in email behind Identity-Aware Proxy (the header's Requested by row,
+    # and the scan summary). None: unknown (a public deployment), and the row is not rendered.
+    requested_by: str | None = None
     rows_per_page: int = ROWS_PER_PAGE
     max_rows_per_check: int = MAX_ROWS_PER_CHECK
     generated_at: str = ""  # when the report was rendered, "2026-10-03 20:11 UTC" (the sidebar's footer)
@@ -597,7 +600,7 @@ def build_org_policy_summary(org_policy_data):
 
 
 def build_report_context(scope, scope_id, job_id, all_results, banner=None, coverage=None, total_projects=None, previous=None,
-                         membership=None):
+                         membership=None, requested_by=None):
     """
     Builds the data for the HTML report.
 
@@ -620,6 +623,8 @@ def build_report_context(scope, scope_id, job_id, all_results, banner=None, cove
         membership (dict, optional): What a folder scan reconciled between Asset
             Inventory and Resource Manager (``app.services.resource_manager.folder_membership``).
             ``None``: the two agreed; the report says nothing about it.
+        requested_by (str, optional): The signed-in email of whoever asked for the
+            scan (``app.identity``); the header shows it. ``None``: unknown.
 
     Returns:
         ReportContext: Everything the report templates display.
@@ -740,6 +745,7 @@ def build_report_context(scope, scope_id, job_id, all_results, banner=None, cove
         banner=banner,
         coverage=coverage_model,
         membership=membership_model,
+        requested_by=requested_by or None,
         total_projects=total_projects,
         generated_at=generated_at,
         generated_ts=generated_ts,

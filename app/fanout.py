@@ -112,17 +112,24 @@ def job_time_limit_seconds(settings, total_shards):
     return max(MIN_JOB_TIME_LIMIT_SECONDS, JOB_TIME_LIMIT_FACTOR * waves * settings.task_dispatch_deadline_seconds)
 
 
-def build_manifest(scope, scope_id, job_id, projects, shard_size, now=None, time_limit_seconds=None):
-    """The job's shard plan: the project shards plus the scope shard (which has no projects)."""
+def build_manifest(scope, scope_id, job_id, projects, shard_size, now=None, time_limit_seconds=None, requested_by=None):
+    """The job's shard plan: the project shards plus the scope shard (which has no projects).
+
+    ``requested_by`` (the signed-in requester, when known) rides along for the
+    aggregation, which puts it on the report.
+    """
     shards = plan_shards(projects, shard_size)
     shards[SCOPE_SHARD] = []
-    return {
+    manifest = {
         "job_id": job_id, "scope": scope, "scope_id": scope_id,
         "shard_size": shard_size, "total_projects": len(projects), "total_shards": len(shards),
         "shards": shards,
         "created_at": (now or datetime.now(timezone.utc)).isoformat(timespec="seconds"),
         "time_limit_seconds": time_limit_seconds,
     }
+    if requested_by:
+        manifest["requested_by"] = requested_by
+    return manifest
 
 
 def build_coverage(manifest, markers):
@@ -219,7 +226,7 @@ class FanOut:
         """Whether the job already has a manifest (a retried dispatcher must not re-plan it)."""
         return self.store.read_manifest(job_id) is not None
 
-    def dispatch(self, scope, scope_id, job_id, projects=None):
+    def dispatch(self, scope, scope_id, job_id, projects=None, requested_by=None):
         """Plans the shards (or re-reads the plan), enqueues every shard task and the first sweep.
 
         Safe to call again for the same job: the manifest is reused and the
@@ -230,7 +237,8 @@ class FanOut:
         if fresh:
             if projects is None:
                 raise RuntimeError(f"[{job_id}] No manifest and no projects to plan shards from.")
-            manifest = build_manifest(scope, scope_id, job_id, projects, self.settings.scan_shard_size, now=self.now())
+            manifest = build_manifest(scope, scope_id, job_id, projects, self.settings.scan_shard_size, now=self.now(),
+                                      requested_by=requested_by)
             manifest["time_limit_seconds"] = job_time_limit_seconds(self.settings, manifest["total_shards"])
             self.store.write_manifest(job_id, manifest)
         body = {"scope": scope, "scope_id": scope_id, "job_id": job_id}
@@ -438,7 +446,8 @@ class FanOut:
             # The manifest's project dicts carry what the folder listing reconciled (app.services.resource_manager).
             membership = folder_membership([project for shard in manifest["shards"].values() for project in shard])
             html_report, csv_report, summary = generate_reports(scope, scope_id, job_id, all_results, banner=self.banner,
-                                                                coverage=coverage, previous=previous, membership=membership)
+                                                                coverage=coverage, previous=previous, membership=membership,
+                                                                requested_by=manifest.get("requested_by"))
             self.store.upload_reports(job_id, scope_id, html_report, csv_report)
             if not self.banner:
                 self.store.write_scan_summary(summary)

@@ -21,8 +21,10 @@ Final results are delivered as an interactive **HTML report** (an Overview, a on
   * [Project Structure](#project-structure)
 * [Deployment Instructions](#deployment-instructions)
   * [Common Prerequisites (Required for all methods)](#common-prerequisites-required-for-all-methods)
-  * [Method 1: Deploy from Source (Recommended)](#method-1-deploy-from-source-recommended)
-  * [Method 2: Manual Build & Deploy via gcloud](#method-2-manual-build--deploy-via-gcloud)
+  * [Method 1: Deploy with `tools/deploy.sh` (Recommended)](#method-1-deploy-with-toolsdeploysh-recommended)
+  * [Method 2: Deploy from the Console](#method-2-deploy-from-the-console)
+  * [Who can use it](#who-can-use-it)
+  * [A public deployment (discouraged)](#a-public-deployment-discouraged)
 * [Configuration Reference](#configuration-reference)
 * [Updating an Existing Deployment (Zero-Downtime)](#updating-an-existing-deployment-zero-downtime)
 * [How to Use](#how-to-use)
@@ -89,11 +91,11 @@ CloudGauge scans an organization, a folder or a project across several key domai
 
 ##  **Architecture**
 
-The application follows a robust, scalable, and asynchronous "fire-and-forget" pattern. This ensures the user gets an immediate response while the heavy work (which can take many minutes) is done in the background. The same flow serves a single project and an organization with thousands of projects; the difference is only in how the work is split behind the scenes. One Cloud Run service hosts all of it as three Flask blueprints: the **pages** (`app/routes/ui.py`), the **API** the pages call (`app/routes/api.py`), and the **worker** endpoints that only Cloud Tasks invokes (`app/routes/worker.py`).
+The application follows a robust, scalable, and asynchronous "fire-and-forget" pattern. This ensures the user gets an immediate response while the heavy work (which can take many minutes) is done in the background. The same flow serves a single project and an organization with thousands of projects; the difference is only in how the work is split behind the scenes. Three Flask blueprints make up the application: the **pages** (`app/routes/ui.py`), the **API** the pages call (`app/routes/api.py`), and the **worker** endpoints that only Cloud Tasks invokes (`app/routes/worker.py`). The recommended deployment runs them as **two Cloud Run services from one image**, told apart by `CLOUDGAUGE_ROLE`: the **web service** (`web`: the pages and the API) sits behind **Identity-Aware Proxy**, so opening it means signing in with a Google account that was granted access, and the **worker service** (`worker`) is reachable by Cloud Tasks alone (see [Deployment Instructions](#deployment-instructions)). `CLOUDGAUGE_ROLE=all` runs everything on one service, as every release before v16 did.
 
-1.  **Choosing the scope**: The landing page offers three scopes — **organization**, **folder** or **project**. Choosing one calls `/api/list-resources`, which lists the *active* folders or projects of the organization the service runs in (one Cloud Asset Inventory search); folders are named by their path and ID (`Engineering / Platform (4711)`), since folder names are unique only among siblings, projects by `Display name (project-id)`. The user picks one from the list.
-2.  **Task creation**: The `/scan` endpoint creates a **Cloud Task** with the scope, its ID and a fresh job ID, and redirects the user to the status page.
-3.  **Background worker**: Cloud Tasks securely invokes the `/run-scan` endpoint in the background. The worker lists the active projects in scope (Cloud Asset Inventory's recursive search; a folder scan also asks Resource Manager for the folder's direct children and reconciles the two lists, so a project moved in minutes ago is scanned too) and decides:
+1.  **Signing in and choosing the scope**: Identity-Aware Proxy asks for a Google sign-in and lets through the accounts that were granted access; the landing page's header says who is signed in. The page offers three scopes — **organization**, **folder** or **project**. Choosing one calls `/api/list-resources`, which lists the *active* folders or projects of the organization the service runs in (one Cloud Asset Inventory search); folders are named by their path and ID (`Engineering / Platform (4711)`), since folder names are unique only among siblings, projects by `Display name (project-id)`. The user picks one from the list.
+2.  **Task creation**: The `/scan` endpoint creates a **Cloud Task** with the scope, its ID, a fresh job ID and who asked for the scan (the identity IAP attached to the request, verified by `app/identity.py`; the report shows it as *Requested by*), and redirects the user to the status page.
+3.  **Background worker**: Cloud Tasks invokes the `/run-scan` endpoint of the worker service in the background, with an OIDC token of the service account — the only identity allowed to invoke it; `--ingress internal` keeps the internet out even with a token. The worker lists the active projects in scope (Cloud Asset Inventory's recursive search; a folder scan also asks Resource Manager for the folder's direct children and reconciles the two lists, so a project moved in minutes ago is scanned too) and decides:
     * **Up to `SCAN_SHARD_SIZE` projects (default 20)**: it runs the whole scan in this one request.
     * **More projects**: it becomes a **dispatcher**. It writes the job's *manifest* (which projects belong to which shard), enqueues one `/scan-shard` task per shard of `SCAN_SHARD_SIZE` projects plus one **scope shard** for the checks that look at the scope itself (Organization Policies, Resilience of Critical Assets over the scope's Asset Inventory and, in an organization scan, org IAM, SCC, audit logging, Essential Contacts, the organization's Advisory Notifications), schedules a *sweeper*, and returns within seconds.
 4.  **Parallel processing**: Each shard executes its checks concurrently using a thread pool (`app/checks/runner.py`) under a time budget (`SHARD_TIME_BUDGET_SECONDS`). Every finding is written to an intermediate file in GCS as soon as it is found. Cloud Tasks runs up to `SCAN_MAX_CONCURRENT_SHARDS` shards at a time and retries a failed shard; a shard that fails on its last attempt records its checks as error rows so one bad shard never costs the whole report.
@@ -103,7 +105,7 @@ The application follows a robust, scalable, and asynchronous "fire-and-forget" p
 
 ### **Architecture Diagram**
 
-The diagram below shows the whole flow: the pages and the API they call, the worker with the sharded path a large scope takes, the results bucket, and the report's on-demand features.
+The diagram below shows the whole flow: Identity-Aware Proxy in front of the web service's pages and API, the worker service with the sharded path a large scope takes, the results bucket, and the report's on-demand features.
 
 ```mermaid
 graph TD
@@ -113,7 +115,9 @@ graph TD
         A -->|"redirected to"| B
     end
 
-    subgraph pages["Cloud Run: pages and API (routes/ui.py, routes/api.py)"]
+    IAP{{"Identity-Aware Proxy: Google sign-in, roles/iap.httpsResourceAccessor"}}
+
+    subgraph pages["Cloud Run web service (CLOUDGAUGE_ROLE=web): pages and API (routes/ui.py, routes/api.py)"]
         LIST["/api/list-resources"]
         SCAN["/scan"]
         STATUS["/api/status/job/scope_id"]
@@ -125,7 +129,7 @@ graph TD
         Q[("Queue (TASK_QUEUE)")]
     end
 
-    subgraph worker["Cloud Run: worker (routes/worker.py), invoked by Cloud Tasks only"]
+    subgraph worker["Cloud Run worker service (CLOUDGAUGE_ROLE=worker): routes/worker.py, invoked by Cloud Tasks only, ingress internal"]
         RUN{"/run-scan: lists the active projects in scope"}
         ONE["Up to SCAN_SHARD_SIZE projects: every check in this request"]
         DISPATCH["More projects: the dispatcher writes the manifest and enqueues the shards"]
@@ -147,6 +151,8 @@ graph TD
         GEMINI[["Vertex AI: Gemini"]]
     end
 
+    browser -.->|"every request: sign in"| IAP
+    IAP -.->|"X-Goog-IAP-JWT-Assertion, verified by app/identity.py"| pages
     A -->|"1. lists the scope's resources"| LIST
     LIST --> APIS
     A -->|"2. POST scope + ID"| SCAN
@@ -289,6 +295,8 @@ app/
 tests/                   # pytest suite (see Local Development & Testing)
 tools/synthetic_scan.py  # Offline load test against the synthetic organization (see Load Testing)
 tools/demo_gif.py        # Records the README's demo GIF from a scan on a deployed service (Playwright + Pillow, own venv)
+tools/deploy.sh          # Deploys or updates the two services (worker, web behind IAP) and grants access; see Deployment
+tools/iap_token.py       # A token that passes IAP, for curl, scripts and demo_gif.py (service-account signed JWT)
 Dockerfile               # Production image
 Dockerfile.test          # Runs the test suite inside the production image
 cloudbuild.yaml          # Cloud Build: build -> test -> push
@@ -300,21 +308,32 @@ requirements-dev.txt     # Adds pytest and ruff
 
 ## **Deployment Instructions** 
 
-Follow the **Common Prerequisites** first, then choose **Method 1** or **Method 2** to deploy.
+CloudGauge runs as **two Cloud Run services from one image**, in a project of your choice:
+
+| Service | `CLOUDGAUGE_ROLE` | Who reaches it | How it is deployed |
+|---|---|---|---|
+| **Web** — `cloudgauge` | `web` | People, through **Identity-Aware Proxy**: a Google sign-in on the service's own `run.app` URL, open to the accounts, groups or domains granted `roles/iap.httpsResourceAccessor`. | `--iap --no-allow-unauthenticated`; `WORKER_URL` names the worker. Small: concurrency 80, 1 GiB, 600 s. |
+| **Worker** — `cloudgauge-worker` | `worker` | Cloud Tasks only, as the service account (`roles/run.invoker`); `--ingress internal` keeps the internet out even with a token. | `--no-allow-unauthenticated --ingress internal`; 3600 s, concurrency 4, 2 GiB. |
+
+No load balancer, domain, certificate or OAuth client is involved: IAP on Cloud Run needs the `iap.googleapis.com` API and the `--iap` flag. A project that belongs to an organization needs no console step; gcloud warns that a project without one may need a one-time setup in the console the first time IAP is enabled.
+
+Do the **Common Prerequisites** once, then deploy with **Method 1** (the script; recommended, and also the way to update) or **Method 2** (the console), and grant access: [Who can use it](#who-can-use-it). The single public service that releases before v16 deployed is still possible: [A public deployment (discouraged)](#a-public-deployment-discouraged).
 
 ### **Common Prerequisites (Required for all methods)** 
 
 1. **Enable APIs**:  
    * A Google Cloud Project with billing enabled.  
-   * [gcloud CLI](https://cloud.google.com/sdk/install) installed and authenticated (`gcloud auth login`).  
-   * Run the following command to enable all necessary APIs:
+   * [gcloud CLI](https://cloud.google.com/sdk/install) installed, current (`gcloud components update` — `--iap` is a recent flag) and authenticated (`gcloud auth login`).  
+   * Run the following command to enable all necessary APIs (`tools/deploy.sh` does this too):
 
    ```
    gcloud services enable \
        run.googleapis.com \
        cloudbuild.googleapis.com \
        cloudtasks.googleapis.com \
+       iap.googleapis.com \
        iam.googleapis.com \
+       iamcredentials.googleapis.com \
        cloudresourcemanager.googleapis.com \
        logging.googleapis.com \
        recommender.googleapis.com \
@@ -336,7 +355,8 @@ Follow the **Common Prerequisites** first, then choose **Method 1** or **Method 
    
 
 2. **Create Service Account & Grant Permissions**:  
-   * This SA will be used by the Cloud Run service to scan the organization and create tasks.
+   * This SA is the identity of both services: it scans the organization, creates the tasks and invokes the worker.
+   * `tools/deploy.sh` creates it and grants the **project-level** roles (2 and 3 below) if they are missing. The **organization-level** roles (1 and 1b) are the one manual step, for an account that can grant roles on the organization.
 ```
    # Set your Organization ID
    export ORG_ID="<your-org-id>"
@@ -420,7 +440,7 @@ Follow the **Common Prerequisites** first, then choose **Method 1** or **Method 
 
    gcloud iam service-accounts add-iam-policy-binding ${SA_EMAIL} --member="serviceAccount:${SA_EMAIL}"  --role="roles/iam.serviceAccountUser"
 ```
-3. **Create GCS Bucket**:
+3. **Create GCS Bucket** (`tools/deploy.sh` creates it in the services' region, with uniform bucket-level access, if it is missing):
 ```
 export BUCKET_NAME="cloudgauge-reports-${PROJECT_ID}"
 
@@ -430,144 +450,143 @@ gcloud storage buckets add-iam-policy-binding gs://${BUCKET_NAME} --member="serv
 ```
 ---
 
-### 
+### **Method 1: Deploy with `tools/deploy.sh` (Recommended)** 
 
-### **Method 1: Deploy from Source (Recommended)** 
+One command deploys everything; run again, it updates the deployment.
 
-### **Step 1: Fork the GitHub Repository** 
+```
+git clone https://github.com/GoogleCloudPlatform/CloudGauge
+cd CloudGauge
 
-First, you need your own copy of the code.
+PROJECT_ID="my-project" REGION="asia-south1" \
+OPERATORS="group:cloud-team@example.com,user:alice@example.com" \
+tools/deploy.sh
+```
+
+The script, in order (every step is idempotent):
+
+1. **Setup** — enables the APIs, creates `cloudgauge-sa` with its project roles and self-bindings, creates the bucket `cloudgauge-reports-<project>` (the organization-level roles stay the manual step above).
+2. **Build** — `gcloud builds submit` with `cloudbuild.yaml`: builds the image, runs the test suite inside it and pushes it only if every test passes. The tag is the short git hash.
+3. **Worker** — deploys `cloudgauge-worker` with `CLOUDGAUGE_ROLE=worker`, `--no-allow-unauthenticated --ingress internal --timeout 3600 --concurrency 4 --memory 2Gi`, and makes the service account its only invoker.
+4. **Web** — deploys `cloudgauge` with `CLOUDGAUGE_ROLE=web`, `WORKER_URL` (the worker), `PROJECT_NUMBER`, `--iap --no-allow-unauthenticated --concurrency 80 --memory 1Gi --timeout 600`, and grants IAP's service agent `roles/run.invoker` on it.
+5. **Access** — grants each `OPERATORS` entry `roles/iap.httpsResourceAccessor` on the web service.
+
+It ends with the URL to open. Both services are told `WORKER_URL` = Cloud Run's deterministic URL of the worker, `https://cloudgauge-worker-<project number>.<region>.run.app`, which is known before the worker exists, so nothing is discovered at startup and no `roles/run.viewer` is needed.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `PROJECT_ID` | *required* | The project CloudGauge runs in. |
+| `REGION` | `asia-south1` | Region of the services, the queue and the bucket. |
+| `SERVICE`, `WORKER_SERVICE` | `cloudgauge`, `${SERVICE}-worker` | The two service names. |
+| `QUEUE`, `BUCKET`, `SERVICE_ACCOUNT` | `cloudgauge-scan-queue`, `cloudgauge-reports-${PROJECT_ID}`, `cloudgauge-sa` | The names from the prerequisites (an email works for the service account). |
+| `IMAGE`, `TAG` | `gcr.io/${PROJECT_ID}/${SERVICE}`, the short git hash | What to build and deploy. |
+| `OPERATORS` | – | Comma-separated principals allowed to sign in: `user:`, `group:`, `domain:` (a bare email counts as a user). |
+| `EXTRA_ENV` | – | More settings for both services, `KEY=VALUE,KEY=VALUE` (see [Configuration Reference](#configuration-reference)). |
+| `SKIP_SETUP=1`, `SKIP_BUILD=1` | – | Skip step 1 (updating a deployment that works); skip step 2 and deploy `IMAGE:TAG` as it is. |
+| `PROGRAMMATIC_ACCESS=1` | – | Also lets the service account through IAP and lets your gcloud account sign tokens for it, so `tools/iap_token.py` works ([Who can use it](#who-can-use-it)). |
+| `DRY_RUN=1` | – | Prints the gcloud commands instead of running them. |
+
+To update, run the same command (`SKIP_SETUP=1` saves a minute); for a canary first, see [Updating an Existing Deployment](#updating-an-existing-deployment-zero-downtime). If a step fails right after the first setup, the IAM grants may still be propagating: run the command again a minute later. The script needs a shell with bash and gcloud (Cloud Shell works).
+
+---
+
+### **Method 2: Deploy from the Console** 
+
+Two Cloud Run services created from your fork of the repository with Cloud Build (the console builds the `Dockerfile`), the worker first.
+
+**Step 1: Fork the GitHub repository**
 
 1. Navigate to the [CloudGauge GitHub repository](https://github.com/GoogleCloudPlatform/CloudGauge/).  
 2. Click the **Fork** button in the top-right corner of the page.  
 3. Choose your GitHub account as the destination for the fork. This will create a copy of the repository under your account (e.g., `https://github.com/your-username/CloudGauge`).
 
----
+**Step 2: Create the worker service**
 
-### **Step 2: Create the Cloud Run Service** 
-
-Now, let's create the initial Cloud Run service and connect it to your new repository.
-
-1. In the Google Cloud Console, go to the **Cloud Run** page.  
-2. Click **Create Service**.  
-3. Select **Continuously deploy new revisions from a source repository** and click **Set up with Cloud Build**.  
-4. A new panel will appear. In the "Source" section, under "Repository", click **Manage connected repositories**.  
-5. A new window will pop up, prompting you to **install the Google Cloud Build app** on GitHub.  
-   * Select your GitHub username or organization.  
-   * In the "Repository access" section, choose either **All repositories** or **Only select repositories**. If you choose the latter, make sure you select your forked `CloudGauge` repository.  
-   * Click **Install** or **Save**.  
-6. Back in the Cloud Console, select your newly connected forked repository and branch (`main`), then click **Next**.  
-7. In the **Build Settings** section:  
-   * **Build Type**: Select `Dockerfile`.  
-   * **Source location**: Keep the default `/Dockerfile`.  
-   * Click **Save**.  
-8. Configure the service details:  
-   * **Service name**: Give it a name like `cloudgauge-service`.  
-   * **Region**: Choose a region, for example, `asia-south1`.  
-9. Expand the "Container(s), Volumes, Networking, Security" section.  
-   * Go to the **Identity & Security** tab and select the service account you previously created (e.g., `cloudgauge-sa@...`).  
-   * Go to the **General** tab and set the **Request Timeout** to `3600` seconds, and under **Requests** set the **Maximum concurrent requests per instance** to `4` (the shards of a large scan then spread over several instances; see [Scaling to Large Organizations](#scaling-to-large-organizations)).  
-   * Go to the **Variables & Secrets** tab and add the following **Environment Variables**. Replace the example values with your own.  
-     * `PROJECT_ID`: Your GCP Project ID (e.g., `my-gcp-project`)  
-     * `TASK_QUEUE`: `cloudgauge-scan-queue`  
-     * `RESULTS_BUCKET`: The name of your GCS bucket (e.g., `cloudgauge-reports-my-gcp-project`)  
-     * `SERVICE_ACCOUNT_EMAIL`: The full email of your service account  
-     * `LOCATION`: The region you selected (e.g., `asia-south1`)  
+1. In the Google Cloud Console, go to **Cloud Run** → **Create Service** → **Continuously deploy new revisions from a source repository** → **Set up with Cloud Build**. Connect your fork (install the Google Cloud Build app on GitHub if asked), choose the `main` branch, **Build Type** `Dockerfile`, source location `/Dockerfile`.  
+2. **Service name**: `cloudgauge-worker`. **Region**: for example `asia-south1`.  
+3. **Authentication**: **Require authentication**. **Ingress**: **Internal**.  
+4. Expand *Container(s), Volumes, Networking, Security*:  
+   * **Identity & Security**: the `cloudgauge-sa` service account.  
+   * **General**: request timeout `3600`, maximum concurrent requests per instance `4`, memory `2 GiB` (a shard of a large scan may run for 30 minutes; see [Scaling to Large Organizations](#scaling-to-large-organizations)).  
+   * **Variables & Secrets**:  
+     * `PROJECT_ID`, `LOCATION` (the region), `TASK_QUEUE` (`cloudgauge-scan-queue`), `RESULTS_BUCKET`, `SERVICE_ACCOUNT_EMAIL`  
+     * `CLOUDGAUGE_ROLE`: `worker`  
+     * `WORKER_URL`: `https://cloudgauge-worker-<project number>.<region>.run.app` — the URL Cloud Run will give the service (the project number is on the console's dashboard). Or leave it out and, after the first deployment, grant the service account `roles/run.viewer` on the service so that it discovers its own URL.  
      * Optional settings such as `GEMINI_MODEL` are listed in the [Configuration Reference](#configuration-reference).  
-10. Click **Create**. The service will start building and deploying.
+5. **Create**. Once it is up, let Cloud Tasks — which calls as the service account — invoke it:
+
+```
+gcloud run services add-iam-policy-binding cloudgauge-worker --region=<region> \
+  --member="serviceAccount:cloudgauge-sa@<project>.iam.gserviceaccount.com" --role="roles/run.invoker"
+```
+
+**Step 3: Create the web service**
+
+As in Step 2, with these differences: **Service name** `cloudgauge`; **Authentication**: **Require authentication**, and turn on **Identity-Aware Proxy (IAP)**; **Ingress**: **All**; **General**: timeout `600`, concurrency `80`, memory `1 GiB`; variables: the same five, plus `CLOUDGAUGE_ROLE`: `web`, `WORKER_URL`: the worker's URL, `PROJECT_NUMBER`: your project number. Enabling IAP from Cloud Run grants IAP's service agent the invoker role by itself; should the service answer 403 to everyone afterwards, grant it by hand:
+
+```
+gcloud run services add-iam-policy-binding cloudgauge --region=<region> \
+  --member="serviceAccount:service-<project number>@gcp-sa-iap.iam.gserviceaccount.com" --role="roles/run.invoker"
+```
+
+Then grant access ([Who can use it](#who-can-use-it)). From now on each push to `main` builds and deploys both services.
 
 ---
 
-### **Step 3: Grant Required IAM Roles** 
+### **Who can use it**
 
-To function correctly, the service account needs two key permissions granted directly on the Cloud Run service itself. This ensures all permissions are tightly scoped and follow security best practices.
-
-**Cloud Run Invoker (roles/run.invoker)**: This role is required to allow the Cloud Tasks service to securely trigger your CloudGauge service to start a scan. This permission is granted specifically on the new Cloud Run service you just deployed.
-
-**Cloud Run Viewer (roles/run.viewer)**: This role allows the service to automatically discover its own public URL when it starts up. This feature enables a single-step deployment, removing the need to manually update the service with its own URL. This permission is granted at the service level.
-
-By granting both roles at the **service level**, you ensure the service account only has the minimum permissions required on the specific resource it needs to access.
-
-Open the **Cloud Shell** or your local terminal with `gCloud` installed and run the following commands, replacing the placeholders with your values.
+Access to the pages is the `roles/iap.httpsResourceAccessor` binding on the web service — for a person, a Google group or a whole domain:
 
 ```
-# Store your service account email in a variable for convenience  
-SA_EMAIL="cloudgauge-sa@your-project-id.iam.gserviceaccount.com"
-SERVICE_NAME="your-chosen-service-name"
-export REGION="asia-south1" # Or your chosen region
+gcloud iap web add-iam-policy-binding --project=<project> --region=<region> \
+  --resource-type=cloud-run --service=cloudgauge \
+  --member="group:cloud-team@example.com" --role="roles/iap.httpsResourceAccessor"
+```
 
-# Grants permission to be invoked by Cloud Tasks
-gcloud run services add-iam-policy-binding ${SERVICE_NAME} --member="serviceAccount:${SA_EMAIL}" --role="roles/run.invoker" --region=${REGION}
+`remove-iam-policy-binding` with the same arguments revokes it; `tools/deploy.sh OPERATORS=…` grants it. A change takes up to a minute to apply; until then the person sees Google's *You don't have access* page. Everyone who gets through sees the same thing — every scan, every report; the page header says who is signed in, and a scan's report who requested it.
 
-# Grants permission to view its own service details to find its URL
-gcloud run services add-iam-policy-binding ${SERVICE_NAME} --member="serviceAccount:${SA_EMAIL}" --role="roles/run.viewer" --region=${REGION}
+**Programmatic access** (`curl`, scripts, `tools/demo_gif.py`). IAP on Cloud Run does not accept Google-issued ID tokens (`gcloud auth print-identity-token`); it accepts a JWT signed by a service account that holds the accessor role. `tools/iap_token.py` mints one through the IAM Credentials API, with the signed-in gcloud account:
 
 ```
-With these permissions set, your CloudGauge instance is fully deployed and ready to use. You can now proceed to the application's URL to start your first scan.
+# Once: let the service account through IAP, and let yourself sign tokens for it
+# (PROGRAMMATIC_ACCESS=1 tools/deploy.sh does both)
+gcloud iap web add-iam-policy-binding --project=<project> --region=<region> --resource-type=cloud-run --service=cloudgauge \
+  --member="serviceAccount:${SA_EMAIL}" --role="roles/iap.httpsResourceAccessor"
+gcloud iam service-accounts add-iam-policy-binding ${SA_EMAIL} \
+  --member="user:you@example.com" --role="roles/iam.serviceAccountTokenCreator"
+
+# Then
+BASE="https://cloudgauge-<project number>.<region>.run.app"
+TOKEN=$(python tools/iap_token.py ${SA_EMAIL} ${BASE})
+curl -H "Authorization: Bearer ${TOKEN}" ${BASE}/api/status/<job id>/<scope id>
+```
+
+The token is good for an hour and for that URL only (a canary tag URL needs its own). The pages then read *Signed in as* the service account.
 
 ---
 
-### **Method 2: Manual Build & Deploy via gcloud** 
+### **A public deployment (discouraged)**
 
-This method gives you manual control over the build and deploy steps.
+Releases before v16 ran one public service, and that still works: `CLOUDGAUGE_ROLE=all` (the default) serves the pages, the API and the worker endpoints together, and the service discovers its own URL. Anyone with the URL can start scans against your organization and read every report, so prefer the two services above. If you need it anyway:
 
-1. **Clone this repository**:
 ```
-git clone https://github.com/GoogleCloudPlatform/CloudGauge
-cd CloudGauge
-```
-2. **Set Environment Variables**:  
-   * (You should already have `PROJECT_ID` and `SA_EMAIL` from the common setup)
-```
-     export REGION="asia-south1" # Or your preferred region  
-     export SERVICE_NAME="cloudgauge-service"  
-     export BUCKET_NAME="cloudgauge-reports-${PROJECT_ID}"  
-     export QUEUE_NAME="cloudgauge-scan-queue"
-```   
+export REGION="asia-south1" SERVICE_NAME="cloudgauge" QUEUE_NAME="cloudgauge-scan-queue" BUCKET_NAME="cloudgauge-reports-${PROJECT_ID}"
 
-3. **Build and Deploy Service**:
-   * Build the container image with **one** of the two options below, then deploy it.
-   * **Option A (recommended): build, test, and push with `cloudbuild.yaml`.** Cloud Build builds the image, runs the full test suite inside it, and pushes the image only if every test passes.
-```
-gcloud builds submit . --config cloudbuild.yaml \
-  --substitutions=_IMAGE=gcr.io/${PROJECT_ID}/${SERVICE_NAME},_TAG=latest
-```
-   * **Option B: build only.**
-```
-# Build the container image using Cloud Build  
-gcloud builds submit . --tag "gcr.io/${PROJECT_ID}/${SERVICE_NAME}" --region=${REGION}
-```
-   * `.gcloudignore` keeps local files such as `.git/` and virtual environments out of the upload.
-   * Then deploy:
-```
-# Deploy to Cloud Run  
-gcloud run deploy ${SERVICE_NAME} \
-  --image "gcr.io/${PROJECT_ID}/${SERVICE_NAME}" \
-  --service-account ${SA_EMAIL} \
-  --region ${REGION} \
-  --allow-unauthenticated \
-  --platform managed \
-  --timeout=3600 \
-  --concurrency=4 \
-  --memory=2Gi \
-  --set-env-vars=PROJECT_ID=${PROJECT_ID},TASK_QUEUE=${QUEUE_NAME},RESULTS_BUCKET=${BUCKET_NAME},SERVICE_ACCOUNT_EMAIL=${SA_EMAIL},LOCATION=${REGION}
-```
-   * `--timeout=3600` and `--concurrency=4` matter for large organizations: a shard of a sharded scan may run for up to 30 minutes, and a low per-instance concurrency spreads a burst of shards over several instances (see [Scaling to Large Organizations](#scaling-to-large-organizations)). For an existing service: `gcloud run services update ${SERVICE_NAME} --region ${REGION} --timeout=3600 --concurrency=4`.
-4. **Grant Invoker & Viewer Permission**:  
-   * Now that the service exists, give its SA permission to invoke it.
-```
-gcloud run services add-iam-policy-binding ${SERVICE_NAME} \
-  --member="serviceAccount:${SA_EMAIL}" \
-  --role="roles/run.invoker" \
-  --region=${REGION}
+# Build, test and push the image
+gcloud builds submit . --config cloudbuild.yaml --substitutions=_IMAGE=gcr.io/${PROJECT_ID}/${SERVICE_NAME},_TAG=latest
 
-gcloud run services add-iam-policy-binding ${SERVICE_NAME} \
-  --member="serviceAccount:${SA_EMAIL}" \
-  --role="roles/run.viewer" \
-  --region=${REGION}
+# One service, public
+gcloud run deploy ${SERVICE_NAME} --region ${REGION} --image gcr.io/${PROJECT_ID}/${SERVICE_NAME}:latest \
+  --service-account ${SA_EMAIL} --allow-unauthenticated \
+  --timeout=3600 --concurrency=4 --memory=2Gi \
+  --set-env-vars=PROJECT_ID=${PROJECT_ID},LOCATION=${REGION},TASK_QUEUE=${QUEUE_NAME},RESULTS_BUCKET=${BUCKET_NAME},SERVICE_ACCOUNT_EMAIL=${SA_EMAIL}
+
+# Cloud Tasks invokes it, and it looks up its own URL at startup
+gcloud run services add-iam-policy-binding ${SERVICE_NAME} --region ${REGION} --member="serviceAccount:${SA_EMAIL}" --role="roles/run.invoker"
+gcloud run services add-iam-policy-binding ${SERVICE_NAME} --region ${REGION} --member="serviceAccount:${SA_EMAIL}" --role="roles/run.viewer"
 ```
 
-Your service is now fully deployed and configured\!
+Where the **Domain Restricted Sharing** organization policy (`iam.allowedPolicyMemberDomains`) forbids `allUsers`, `--allow-unauthenticated` fails; `--no-invoker-iam-check` in its place makes the service public by skipping the invoker check altogether. Behind neither IAP nor IAM the pages show no name and scans record none. To move such a deployment to the two services later, run `tools/deploy.sh` with its names: it adds the worker and turns the service into the web service.
 
 ## **Configuration Reference**
 
@@ -580,10 +599,12 @@ CloudGauge is configured entirely through environment variables on the Cloud Run
 | `TASK_QUEUE` | Yes | – | Cloud Tasks queue name. The queue is created automatically at startup if it doesn't exist. |
 | `RESULTS_BUCKET` | Yes | – | GCS bucket for status files, intermediate findings, and reports. |
 | `SERVICE_ACCOUNT_EMAIL` | Yes | – | Service account used for Cloud Tasks OIDC tokens and signed report URLs. |
+| `CLOUDGAUGE_ROLE` | No | `all` | Which part of the application this service is: `web` (the pages and the API, behind IAP; needs `WORKER_URL`), `worker` (the Cloud Tasks endpoints only), or `all` (everything on one service, as before v16). |
+| `PROJECT_NUMBER` | No | the metadata server's | The project's number: the audience of IAP's identity assertions names it, so a `web` service needs it to verify who is signed in. Cloud Run's metadata server provides it; set it to skip that lookup (`tools/deploy.sh` does). |
 | `GEMINI_MODEL` | No | `auto` | `auto` uses the newest stable Gemini Flash model available to the project (falls back to `gemini-flash-latest` if models can't be listed). Set a model ID (e.g. `gemini-2.5-flash`) to pin one. |
 | `VERTEX_LOCATION` | No | `global` | Vertex AI location used for Gemini calls. |
-| `WORKER_URL` | No | auto-discovered | URL that Cloud Tasks calls for `/run-scan`. By default the service discovers its own URL at startup (needs `roles/run.viewer`). Set it to override discovery, for example for a tagged canary revision. |
-| `WORKER_AUDIENCE` | No | the task URL | Audience of the OIDC token on scan tasks. Leave unset normally. For a canary, set it to the service's **main** URL: Cloud Run rejects tokens whose audience is a revision tag URL (HTTP 401). |
+| `WORKER_URL` | `web`: yes | discovered | URL that Cloud Tasks calls for `/run-scan` and the other worker endpoints. On a `web` service: the worker service's URL (required; the web service never runs scans). On a `worker` or `all` service: its own URL — discovered at startup through the Cloud Run Admin API (needs `roles/run.viewer` on the service) unless set; `tools/deploy.sh` sets it to the deterministic `https://<service>-<project number>.<region>.run.app`. For a canary, the worker's tag URL. |
+| `WORKER_AUDIENCE` | No | the task URL | Audience of the OIDC token on the tasks. Leave unset normally. For a canary, set it to the **worker's main** URL: Cloud Run rejects tokens whose audience is a revision tag URL (HTTP 401). |
 | `BEST_PRACTICES_CSV_URL` | No | GitHub-hosted CSV | Source of the best-practice list used by the Organization Policies check. |
 | `SERVICE_HEALTH_WINDOW_DAYS` | No | `90` | How far back the **Service Health Incidents** briefing looks (1–366 days). |
 | `SERVICE_HEALTH_RELEVANCE` | No | `IMPACTED,RELATED` | Which Personalized Service Health relevance levels the briefing lists, comma-separated: `IMPACTED`, `RELATED`, `PARTIALLY_RELATED`, `NOT_IMPACTED`, `UNKNOWN`. Add `PARTIALLY_RELATED` for a wider view. |
@@ -611,48 +632,60 @@ gcloud tasks queues update ${QUEUE_NAME} --location ${REGION} \
 
 ## **Updating an Existing Deployment (Zero-Downtime)**
 
-To roll out a new version safely, deploy it as a tagged revision that receives **no traffic**, test it, then shift traffic gradually.
+To roll out a new version safely, deploy it to both services as tagged revisions that receive **no traffic**, test it at the web canary's URL, then shift traffic.
 
 ```
-export SERVICE_NAME="cloudgauge-service"   # your service
-export REGION="asia-south1"                # its region
-export IMAGE="gcr.io/${PROJECT_ID}/${SERVICE_NAME}"
-export TAG=$(git rev-parse --short HEAD)
+export PROJECT_ID="my-project" REGION="asia-south1"
+export SERVICE="cloudgauge" WORKER_SERVICE="${SERVICE}-worker"
+export IMAGE="gcr.io/${PROJECT_ID}/${SERVICE}" TAG=$(git rev-parse --short HEAD)
 export PROJECT_NUMBER=$(gcloud projects describe ${PROJECT_ID} --format='value(projectNumber)')
-export MAIN_URL="https://${SERVICE_NAME}-${PROJECT_NUMBER}.${REGION}.run.app"
-export CANARY_URL="https://canary---${SERVICE_NAME}-${PROJECT_NUMBER}.${REGION}.run.app"
+export WORKER_MAIN="https://${WORKER_SERVICE}-${PROJECT_NUMBER}.${REGION}.run.app"
+export WORKER_CANARY="https://canary---${WORKER_SERVICE}-${PROJECT_NUMBER}.${REGION}.run.app"
+export WEB_CANARY="https://canary---${SERVICE}-${PROJECT_NUMBER}.${REGION}.run.app"
 
-# 1. Note the revision currently serving traffic (your rollback target)
-gcloud run services describe ${SERVICE_NAME} --region ${REGION} --format='value(status.traffic[0].revisionName)'
+# 1. Note the revisions currently serving traffic (your rollback targets)
+for S in ${WORKER_SERVICE} ${SERVICE}; do gcloud run services describe $S --region ${REGION} --format='value(status.traffic[0].revisionName)'; done
 
 # 2. Build, test, and push
 gcloud builds submit . --config cloudbuild.yaml --substitutions=_IMAGE=${IMAGE},_TAG=${TAG}
 
-# 3. Deploy the new revision with 0% traffic, reachable only at its tag URL
-gcloud run deploy ${SERVICE_NAME} --region ${REGION} --image ${IMAGE}:${TAG} \
-  --no-traffic --tag canary \
-  --update-env-vars WORKER_URL=${CANARY_URL},WORKER_AUDIENCE=${MAIN_URL}
+# 3. The worker canary: 0% traffic, reachable at its tag URL; its own tasks (shards, aggregation, sweeps) go there too
+gcloud run deploy ${WORKER_SERVICE} --region ${REGION} --image ${IMAGE}:${TAG} --no-traffic --tag canary \
+  --update-env-vars WORKER_URL=${WORKER_CANARY},WORKER_AUDIENCE=${WORKER_MAIN}
 
-# 4. Test it at ${CANARY_URL}, then shift traffic gradually
-gcloud run services update-traffic ${SERVICE_NAME} --region ${REGION} --to-tags canary=10
-gcloud run services update-traffic ${SERVICE_NAME} --region ${REGION} --to-tags canary=100
+# 4. The web canary: its scans go to the worker canary
+gcloud run deploy ${SERVICE} --region ${REGION} --image ${IMAGE}:${TAG} --no-traffic --tag canary \
+  --update-env-vars WORKER_URL=${WORKER_CANARY},WORKER_AUDIENCE=${WORKER_MAIN}
 
-# 5. Finalize: remove the canary-only overrides and the tag
-gcloud run services update ${SERVICE_NAME} --region ${REGION} --remove-env-vars WORKER_URL,WORKER_AUDIENCE
-gcloud run services update-traffic ${SERVICE_NAME} --region ${REGION} --to-latest
-gcloud run services update-traffic ${SERVICE_NAME} --region ${REGION} --remove-tags canary
+# 5. Test at ${WEB_CANARY}: IAP protects the tag URL like the main one (sign in, or tools/iap_token.py with the tag URL)
 
-# Rollback at any time
-gcloud run services update-traffic ${SERVICE_NAME} --region ${REGION} --to-revisions <OLD_REVISION>=100
+# 6. Shift traffic, the worker first
+gcloud run services update-traffic ${WORKER_SERVICE} --region ${REGION} --to-tags canary=100
+gcloud run services update-traffic ${SERVICE} --region ${REGION} --to-tags canary=10
+gcloud run services update-traffic ${SERVICE} --region ${REGION} --to-tags canary=100
+
+# 7. Finalize: deploy the tested tag as the latest revision of both services with the normal settings
+#    (WORKER_URL back to the worker's main URL, WORKER_AUDIENCE removed), then drop the tags
+SKIP_SETUP=1 SKIP_BUILD=1 TAG=${TAG} tools/deploy.sh
+for S in ${WORKER_SERVICE} ${SERVICE}; do
+  gcloud run services update-traffic $S --region ${REGION} --to-latest
+  gcloud run services update-traffic $S --region ${REGION} --remove-tags canary
+done
+
+# Rollback at any time (both services)
+gcloud run services update-traffic ${WORKER_SERVICE} --region ${REGION} --to-revisions <OLD_WORKER_REVISION>=100
+gcloud run services update-traffic ${SERVICE} --region ${REGION} --to-revisions <OLD_WEB_REVISION>=100
 ```
 
-**Why the canary needs two overrides:**
-* `WORKER_URL`: the service discovers its *main* URL at startup. Without this override, scans started from the canary would be executed by the revision serving the main URL.
-* `WORKER_AUDIENCE`: by default the scan task's OIDC token is issued for the task URL, which is now the tag URL. Cloud Run rejects that with HTTP 401, and the scan never starts. A token issued for the service's main URL is accepted on any of its tag URLs.
+**Why the canaries need two overrides:**
+* `WORKER_URL`: the web canary must send its scans to the worker *canary*, and the worker canary must send its own shard, aggregation and sweep tasks to itself, not to the revision serving the worker's main URL.
+* `WORKER_AUDIENCE`: by default a task's OIDC token is issued for the task URL, which is now the tag URL. Cloud Run rejects that with HTTP 401, and the scan never starts. A token issued for the worker's main URL is accepted on any of its tag URLs.
+
+A canary does not touch the pages' access: the IAP bindings belong to the service, so the same people can open the tag URL.
 
 ## **How to Use** 
 
-1. Navigate to your service's URL (`${SERVICE_URL}`).  
+1. Open the web service's URL and sign in with a Google account that was granted access ([Who can use it](#who-can-use-it)); the header says who is signed in.  
 2. Choose your scope: Organization, Folder or Project.
 3. Choose the resource from the list (the organization the service runs in, or one of its folders or projects).
 4. Click **Start scan**.  
@@ -744,7 +777,7 @@ If the status page is stuck for a long time, the background worker is likely fai
 ### **Step 1: Check the Cloud Run Logs**
 
 1. Go to the **Cloud Run** page in the Google Cloud Console.  
-2. Click on your service (`cloudgauge-service`).  
+2. Click on the **worker** service (`cloudgauge-worker`; in a public single-service deployment, the one service) — every scan runs there. The web service's logs cover the pages and the API only.  
 3. Go to the **LOGS** tab.  
 4. Look for log entries for requests made to the worker URLs: `/run-scan` (every scan starts there), and for a large scope `/scan-shard`, `/run-aggregation` and `/sweep`.  
 5. Every line the worker logs starts with the job ID in brackets — the status page shows it as *Job …* — so filtering the logs on `[<job-id>]` shows one scan's whole story across its shards. Look for any errors in red.
@@ -754,9 +787,33 @@ If the status page is stuck for a long time, the background worker is likely fai
 1. Go to the **Cloud Tasks** page in the Google Cloud Console.  
 2. Click on your queue (`cloudgauge-scan-queue`).  
 3. Go to the **LOGS** tab.  
-4. Look at the status of the task attempts. If you see a `PERMISSION_DENIED` (HTTP 403\) error, it means you missed the **"Grant Invoker Permission"** step.
+4. Look at the status of the task attempts. `PERMISSION_DENIED` (HTTP 403) means the service account is not `roles/run.invoker` on the worker service (the script's step 3; Method 2's Step 2). `NOT_FOUND` (HTTP 404) means the task reached a service that has no worker endpoints: the web service's `WORKER_URL` names the web service itself instead of the worker. Requests that Identity-Aware Proxy rejects never appear in Cloud Run's logs, only here.
 
 ### **Step 3: Resolve Common Errors**
+
+#### **A Google sign-in, then "You don't have access"**
+
+* **Symptom**: The web service's URL asks for a Google sign-in and then shows Google's *You don't have access* page.  
+* **Cause**: The account is not `roles/iap.httpsResourceAccessor` on the web service, or was granted it less than a minute ago.  
+* **Solution**: Grant it (see [Who can use it](#who-can-use-it)) and reload after a minute. A `tools/iap_token.py` token answers the same way when its service account lacks the role.
+
+---
+
+#### **The web service answers 403 to everyone**
+
+* **Symptom**: `gcloud run deploy --iap` warned that setting the IAP service agent failed, or every signed-in person gets 403.  
+* **Cause**: IAP forwards requests as its service agent, `service-<project number>@gcp-sa-iap.iam.gserviceaccount.com`, which must be `roles/run.invoker` on the web service.  
+* **Solution**: `gcloud run services add-iam-policy-binding cloudgauge --region=<region> --member="serviceAccount:service-<project number>@gcp-sa-iap.iam.gserviceaccount.com" --role="roles/run.invoker"` (`tools/deploy.sh` does this).
+
+---
+
+#### **A report's buttons stop working after an hour**
+
+* **Symptom**: In an open report, **Draft fixes**, **Generate executive summary** or **Get detailed insights** do nothing, or the status page stops updating.  
+* **Cause**: The Identity-Aware Proxy session expired (after about an hour). Pages rendered by v16 or later notice the 401 and reload themselves, which signs in again; reports stored by earlier releases keep their older script and do not.  
+* **Solution**: Reload the page.
+
+---
 
 #### **Memory Limit Exceeded**
 
@@ -794,7 +851,7 @@ gcloud run services update cloudgauge-service \
 * **Solution**:  
   1. Check the **LOGS** tab for the specific error message that occurs when the container tries to start.  
   2. If the error is related to a variable, click **"Edit & Deploy New Revision,"** go to the **"Variables & Secrets"** tab, and ensure all required variables (`PROJECT_ID`, `LOCATION`, `TASK_QUEUE`, `RESULTS_BUCKET`, `SERVICE_ACCOUNT_EMAIL`) are present and have the correct values. The startup log line `FATAL: Missing required environment variables: ...` names the missing ones.  
-  3. If the log shows `FATAL: Could not discover WORKER_URL via API`, the service account is missing `roles/run.viewer` on the service (see **Grant Invoker & Viewer Permission**). Alternatively, set `WORKER_URL` to the service URL.  
+  3. If the log shows `FATAL: CLOUDGAUGE_ROLE=web needs WORKER_URL`, the web service was deployed without the worker's URL: set `WORKER_URL` to it. If it shows `FATAL: Could not discover WORKER_URL via API`, a `worker` or `all` service tried to look up its own URL without `roles/run.viewer` on itself: grant the role, or set `WORKER_URL` to the service's URL (what `tools/deploy.sh` does).  
   4. If it is a code error, you will need to fix the source code and deploy a new revision.
 
 ---
@@ -953,7 +1010,8 @@ export REGION="asia-south1"               # The region you deployed to
 
 
 # Set derived variables (the names the deployment instructions use; change them if you chose others)
-export SERVICE_NAME="cloudgauge-service"
+export SERVICE_NAME="cloudgauge"
+export WORKER_SERVICE="${SERVICE_NAME}-worker"   # a public single-service deployment has no worker
 export QUEUE_NAME="cloudgauge-scan-queue"
 export BUCKET_NAME="cloudgauge-reports-${PROJECT_ID}"
 export SA_NAME="cloudgauge-sa"
@@ -963,9 +1021,11 @@ export SA_EMAIL="${SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
 
 echo "--- Starting Cleanup for CloudGauge in project ${PROJECT_ID} ---"
 
-# 1. Delete the Cloud Run service (its roles/run.invoker and roles/run.viewer bindings go with it)
-echo "Deleting Cloud Run service: ${SERVICE_NAME}..."
+# 1. Delete the two Cloud Run services (their IAM bindings go with them: the operators' IAP access,
+#    the IAP service agent's and the service account's roles/run.invoker)
+echo "Deleting Cloud Run services: ${SERVICE_NAME}, ${WORKER_SERVICE}..."
 gcloud run services delete ${SERVICE_NAME} --region=${REGION} --platform=managed --quiet
+gcloud run services delete ${WORKER_SERVICE} --region=${REGION} --platform=managed --quiet
 
 # 2. Delete the Cloud Tasks queue (the service created it at startup)
 echo "Deleting Cloud Tasks queue: ${QUEUE_NAME}..."
@@ -1021,8 +1081,8 @@ echo "✅ Cleanup complete!"
 
 Here's a breakdown of what each command in the script does:
 
-1. **Delete Cloud Run Service**: `gcloud run services delete`  
-   * This removes the web application itself, stopping it from running and incurring costs. The `roles/run.invoker` and `roles/run.viewer` bindings were granted on the service, so they disappear with it.  
+1. **Delete Cloud Run Services**: `gcloud run services delete`  
+   * This removes the web service and the worker, stopping them from running and incurring costs. Everything granted on them disappears with them: the `roles/iap.httpsResourceAccessor` bindings of the people who could sign in, the IAP service agent's and the service account's `roles/run.invoker`. IAP itself leaves nothing behind. A public single-service deployment has no worker; the second command then reports it as not found.  
 2. **Delete Cloud Tasks Queue**: `gcloud tasks queues delete`  
    * The service creates the Cloud Tasks queue named in `TASK_QUEUE` (`cloudgauge-scan-queue`) when it starts, if it does not exist. This command deletes that queue, and with it any scan still queued.  
 3. **Delete GCS Bucket**: `gsutil -m rm -r`  
@@ -1032,7 +1092,7 @@ Here's a breakdown of what each command in the script does:
 5. **Remove IAM Bindings**: `gcloud ... remove-iam-policy-binding`  
    * This is a critical step. Before deleting the service account, remove the roles the prerequisites granted it at the **Organization** level (the twelve predefined roles and the custom `CloudGaugeAdvisoryViewer` role, which is then deleted) and at the **Project** level (`roles/aiplatform.user`, `roles/cloudtasks.admin`). This prevents "ghost" principals from showing up in your IAM policies.  
 6. **Delete Service Account**: `gcloud iam service-accounts delete`  
-   * This is the final step. After removing its permissions, you can safely delete the `cloudgauge-sa` service account itself; the Token Creator and Service Account User bindings it held on itself (for the signed CSV links) are deleted with it.
+   * This is the final step. After removing its permissions, you can safely delete the `cloudgauge-sa` service account itself; the Token Creator and Service Account User bindings it held on itself (for the signed CSV links), and any `roles/iam.serviceAccountTokenCreator` granted to a person for `tools/iap_token.py`, are deleted with it.
 
 
 ## **License & Support** 

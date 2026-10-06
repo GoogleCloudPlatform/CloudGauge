@@ -14,6 +14,8 @@
 """Runs one scan job end to end: the body of the legacy ``run_scan_worker`` route.
 
 ``execute_scan_job`` takes the Cloud Tasks payload ``{"scope", "scope_id", "job_id"}``
+(plus ``"requested_by"``, the signed-in requester, when the scan was asked for through
+Identity-Aware Proxy; the report shows it as *Requested by*)
 and, in order: writes status updates, runs every check with throttled progress
 reporting, reads the findings back and categorizes them, renders the HTML and
 CSV reports, uploads them, and marks the job complete. If anything fails, the
@@ -70,6 +72,7 @@ def execute_scan_job(data, *, store, banner=None, fanout=None):
         scope = data['scope']
         scope_id = data['scope_id']
         job_id = data['job_id']
+        requested_by = data.get('requested_by') or None  # the signed-in requester behind IAP; absent on public deployments
         print(f"[{job_id}] Worker received task for ID: {scope_id}")
 
         # Cloud Tasks delivers at least once: a task retried after the scan finished must not run it again.
@@ -90,7 +93,7 @@ def execute_scan_job(data, *, store, banner=None, fanout=None):
         # coverage, and a large scope is split into shards by it.
         projects = list_projects(scope, scope_id)
         if fanout is not None and fanout.should_fan_out(projects):
-            fanout.dispatch(scope, scope_id, job_id, projects)
+            fanout.dispatch(scope, scope_id, job_id, projects, requested_by=requested_by)
             dispatched = True
             return True
 
@@ -119,7 +122,8 @@ def execute_scan_job(data, *, store, banner=None, fanout=None):
         previous = None if banner else store.read_previous_summary(scope, scope_id, job_id)
         html_report, csv_report, summary = generate_reports(scope, scope_id, job_id, all_results, banner=banner,
                                                             total_projects=total_projects, previous=previous,
-                                                            membership=folder_membership(projects or []))
+                                                            membership=folder_membership(projects or []),
+                                                            requested_by=requested_by)
 
         store.upload_reports(job_id, scope_id, html_report, csv_report)
         if not banner:

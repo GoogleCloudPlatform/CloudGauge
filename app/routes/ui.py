@@ -17,6 +17,7 @@ import uuid
 from flask import Blueprint, Response, redirect, render_template, request, url_for
 from werkzeug.utils import secure_filename
 
+from app import identity
 from app.extensions import get_services
 from app.services import tasks
 
@@ -41,11 +42,12 @@ def create_scan_task():
         return "Scope and ID are required.", 400
 
     job_id = str(uuid.uuid4())
-    print(f"Creating scan task for {scope}: {scope_id} with Job ID: {job_id}")
+    requested_by = identity.current_user_email()  # None unless the request came through Identity-Aware Proxy
+    print(f"Creating scan task for {scope}: {scope_id} with Job ID: {job_id}" + (f" (requested by {requested_by})" if requested_by else ""))
 
     services = get_services()
     tasks.enqueue_scan(services.settings, services.get_worker_url(), scope, scope_id, job_id,
-                       client=services.get_tasks_client())
+                       client=services.get_tasks_client(), requested_by=requested_by)
 
     # NEW: Pass both IDs to the status page
     return redirect(url_for('ui.get_status', job_id=job_id, scope_id=scope_id, scope=scope))

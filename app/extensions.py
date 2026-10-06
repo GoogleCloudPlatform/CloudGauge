@@ -43,6 +43,8 @@ class Services:
             The synthetic load mode sets it so no synthetic report can pass for a real one.
         fanout: The sharded-scan orchestrator (``app.fanout.FanOut``); ``None`` means
             build it on first use from the fields above.
+        identity_verifier: Verifies the Identity-Aware Proxy assertion on requests
+            (``app.identity.IapVerifier``); ``None`` means build it on first use.
     """
     settings: Settings
     results_store: GcsResultsStore
@@ -50,6 +52,7 @@ class Services:
     worker_url: str | None = None
     report_banner: str | None = None
     fanout: object = None
+    identity_verifier: object = None
     _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False, compare=False)
 
     def get_tasks_client(self):
@@ -85,6 +88,16 @@ class Services:
                     self.fanout = FanOut(self.settings, self.results_store, enqueue=self.enqueue_task,
                                          task_exists=self.task_exists, banner=self.report_banner)
         return self.fanout
+
+    def get_identity_verifier(self):
+        """Returns the IAP assertion verifier, built on first use."""
+        if self.identity_verifier is None:
+            from app.identity import IapVerifier
+
+            with self._lock:
+                if self.identity_verifier is None:
+                    self.identity_verifier = IapVerifier(self.settings)
+        return self.identity_verifier
 
 
 def build_services(settings):

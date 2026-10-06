@@ -65,6 +65,9 @@
                 <dl class="report-meta">
                     <dt>Scope</dt><dd>{{ scope_title }} {{ scope_id }}</dd>
                     <dt>Report ID</dt><dd>{{ job_id }}</dd>
+{% if requested_by %}
+                    <dt>Requested by</dt><dd>{{ requested_by }}</dd>
+{% endif %}
 {% if coverage %}
                     <dt>Coverage</dt><dd class="coverage{% if not coverage.complete %} coverage-incomplete{% endif %}"><span class="dot dot-{{ 'compliant' if coverage.complete else 'investigation' }}"></span>{{ coverage.header_text }}</dd>
 {% endif %}

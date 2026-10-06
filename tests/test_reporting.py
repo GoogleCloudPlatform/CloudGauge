@@ -257,7 +257,11 @@ def test_report_is_self_contained():
     assert paging <= set(re.findall(r'onclick="(\w+)\(', generate_html_report('project', 'p1', 'job-42', **long_table)))
     for handler in handlers | paging | {'scheduleRowFilter', 'applyRowFilter', 'sortTable', 'toggleClamp'}:  # defined in the inlined script
         assert re.search(rf'function {handler}\(', html), handler
-    assert sorted(set(re.findall(r"fetch\('([^']+)'", html))) == ['/api/get-insights', '/api/get-suggestions', '/api/get-summary']
+    # v16: the calls go through apiFetch, which sends X-Requested-With and reloads the page when an expired
+    # Identity-Aware Proxy session answers 401; the paths are the contract stored reports keep.
+    assert sorted(set(re.findall(r"apiFetch\('([^']+)'", html))) == ['/api/get-insights', '/api/get-suggestions', '/api/get-summary']
+    assert re.findall(r"(?<![\w.])fetch\(", html) == ['fetch(']  # the one real fetch is inside apiFetch
+    assert "'X-Requested-With': 'XMLHttpRequest'" in html and 'response.status === 401' in html
     assert 'JSON.stringify({ scope: "organization", scope_id: "123456789", job_id: "job-42" })' in html  # get-summary (v15.3: with the scope)
     assert 'JSON.stringify({ scope: "organization", scope_id: "123456789" })' in html
 

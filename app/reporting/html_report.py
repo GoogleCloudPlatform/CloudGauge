@@ -91,7 +91,7 @@ def generate_html_report(scope, scope_id, job_id, banner=None, coverage=None, to
 
 
 def generate_reports(scope, scope_id, job_id, all_results, *, banner=None, coverage=None, total_projects=None, previous=None,
-                     membership=None):
+                     membership=None, requested_by=None):
     """Everything a finished scan uploads: ``(html, csv, summary)``.
 
     The HTML and the CSV come from one context, so a row the page marks *New*
@@ -100,10 +100,12 @@ def generate_reports(scope, scope_id, job_id, all_results, *, banner=None, cover
     with ``GcsResultsStore.write_scan_summary`` once the reports are uploaded.
     ``membership`` is what a folder scan reconciled between Asset Inventory and
     Resource Manager (``app.services.resource_manager.folder_membership``), None
-    when they agreed.
+    when they agreed. ``requested_by`` is the signed-in person who asked for the
+    scan (behind Identity-Aware Proxy), None when unknown.
     """
     print(f"[{job_id}] 📊 Generating final report for {scope}: {scope_id}...")
     context = build_report_context(scope, scope_id, job_id, all_results, banner=banner, coverage=coverage,
-                                   total_projects=total_projects, previous=previous, membership=membership)
+                                   total_projects=total_projects, previous=previous, membership=membership,
+                                   requested_by=requested_by)
     csv_report = generate_csv_data(all_results, row_matchers=context.row_matchers if context.changes else None)
     return render_report(context), csv_report, summarize(context)

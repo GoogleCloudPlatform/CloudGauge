@@ -33,7 +33,8 @@
         body { min-height: 100vh; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px; padding: 24px; }
         .setup-card { width: 100%; max-width: 448px; padding: 32px; }
         .notice { width: 100%; max-width: 448px; }
-        .brand { margin-bottom: 28px; font-size: 13px; font-weight: 600; letter-spacing: -0.01em; color: var(--ink); }
+        .brand { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; margin-bottom: 28px; font-size: 13px; font-weight: 600; letter-spacing: -0.01em; color: var(--ink); }
+        .signed-in { font-weight: 400; letter-spacing: 0; font-size: 12px; color: var(--muted); overflow-wrap: anywhere; text-align: right; }
         .setup-card h1 { font-size: 22px; margin-bottom: 6px; }
         .lede { margin-bottom: 24px; color: var(--muted); }
         form { display: flex; flex-direction: column; gap: 18px; }
@@ -44,7 +45,7 @@
 <body class="dotgrid">
     {% if banner %}<div role="note" class="notice notice-amber">{{ banner }}</div>{% endif %}
     <main class="card setup-card">
-        <div class="brand">CloudGauge</div>
+        <div class="brand">CloudGauge{% if current_user %}<span class="signed-in">Signed in as {{ current_user }}</span>{% endif %}</div>
         <h1>Review your cloud environment</h1>
         <p class="lede">Choose a scope, then the resource to review.</p>
         <form action="/scan" method="post">

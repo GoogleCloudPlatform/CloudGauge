@@ -22,14 +22,25 @@ as in the legacy module. Reports already stored in GCS call the ``/api/get-*``
 paths, and Cloud Tasks posts ``{scope, scope_id, job_id}`` to ``/run-scan``.
 Endpoint names now carry their blueprint (``get_status`` is ``ui.get_status``).
 
+Which blueprints a service registers depends on its ``CLOUDGAUGE_ROLE``
+(``app.config.ROLES``): ``web`` has the pages and the API and no worker
+endpoints, so nobody who passes Identity-Aware Proxy can post to
+``/run-aggregation``; ``worker`` has only the Cloud Tasks endpoints; ``all``
+has everything on one service.
+
 Handlers get their dependencies from ``app.extensions.get_services()``.
 """
 from app.routes import api, ui, worker
 
 BLUEPRINTS = (ui.bp, api.bp, worker.bp)
+BLUEPRINTS_BY_ROLE = {
+    'all': BLUEPRINTS,
+    'web': (ui.bp, api.bp),
+    'worker': (worker.bp,),
+}
 
 
-def register_blueprints(app):
-    """Registers every CloudGauge blueprint on ``app``."""
-    for blueprint in BLUEPRINTS:
+def register_blueprints(app, role='all'):
+    """Registers the CloudGauge blueprints that ``role`` serves on ``app``."""
+    for blueprint in BLUEPRINTS_BY_ROLE[role]:
         app.register_blueprint(blueprint)

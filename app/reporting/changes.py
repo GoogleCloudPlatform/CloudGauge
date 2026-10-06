@@ -444,6 +444,7 @@ def summarize(context):
         "version": SUMMARY_VERSION, "release": VERSION, "job_id": context.job_id, "scope": context.scope, "scope_id": context.scope_id,
         "generated_at": context.generated_at, "generated_ts": context.generated_ts,
         "total_projects": context.total_projects,
+        "requested_by": context.requested_by,  # None: unknown (not behind IAP)
         "overview": {"action_count": overview.action_count, "investigation_count": overview.investigation_count,
                      "compliant_count": overview.compliant_count, "error_count": overview.error_count},
         "scores": {row.category_name: row.score for row in context.score_summary},  # None: not assessed

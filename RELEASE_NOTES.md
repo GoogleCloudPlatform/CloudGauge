@@ -8,7 +8,139 @@ the test suite running inside the image, a zero-traffic canary revision scanned
 against a real organization, promotion, and a production scan compared fact for
 fact with the previous version's report.
 
-Versions are the image tags (`v5` … `v15.6`); the commit is the one that shipped.
+Versions are the image tags (`v5` … `v16`); the commit is the one that shipped.
+
+---
+
+## v16 — Authenticated by default
+
+Every deployment so far was public: `--allow-unauthenticated`, or the invoker
+check disabled where an organization policy forbids `allUsers`, and nothing in
+front of the pages. v16 puts **Identity-Aware Proxy** in front of them and keeps
+Cloud Tasks away from it. One image, two Cloud Run services told apart by
+`CLOUDGAUGE_ROLE`: the **web** service serves the pages and the API behind IAP —
+a Google sign-in on the service's own `run.app` URL, and only accounts holding
+`roles/iap.httpsResourceAccessor` get through — and the **worker** service runs
+the scans and accepts Cloud Tasks only (`--ingress internal`, invoked by the
+service account). No load balancer, domain, certificate or OAuth client to
+create: `gcloud run deploy --iap`. The pages say who is signed in; a scan
+records who asked for it and the report says *Requested by*. `tools/deploy.sh`
+is the whole deployment, and the update. The single service of every earlier
+release (`CLOUDGAUGE_ROLE=all`, the default) keeps working unchanged.
+
+### Added
+
+- **`CLOUDGAUGE_ROLE`** (`app/config.py`, `app/routes/__init__.py`,
+  `app/__init__.py`): `web` registers the `ui` and `api` blueprints, `worker`
+  the `worker` blueprint, `all` (default) everything — the single service of
+  every earlier release. A `web` service must be told `WORKER_URL` (startup
+  fails naming the variable if not: self-discovery would hand it its own URL,
+  which has no `/run-scan`); a `worker` or `all` service discovers its own, as
+  before, unless `WORKER_URL` says it. Both create the queue if it is missing.
+  Nothing that passes IAP can post to `/run-aggregation`: the web service has
+  no such route, and the worker has no pages to sign in to.
+- **Who is signed in** (`app/identity.py`, new). Behind IAP every request
+  carries `X-Goog-IAP-JWT-Assertion`; the service **verifies** it — ES256
+  signature against IAP's published keys (cached an hour, refetched once on an
+  unknown key ID), issuer `https://cloud.google.com/iap`, audience
+  `/projects/NUMBER/locations/REGION/services/SERVICE`, expiry — and takes the
+  email from the verified claims. The plain `X-Goog-Authenticated-User-Email`
+  header is never read, so a service reachable without IAP cannot be told a
+  name. The project number comes from `PROJECT_NUMBER` or the metadata server
+  (read once); without it identities count as absent, with one warning. The
+  pages' header reads *Signed in as alice@example.com*; `/scan` adds
+  `requested_by` to the task body (only then — the legacy body is otherwise
+  unchanged); the worker hands it to the report, through the manifest for a
+  sharded scan, and the report's header gains a *Requested by* row after the
+  Report ID. The scan summary carries `requested_by` too (`null` when unknown;
+  `SUMMARY_VERSION` unchanged, comparisons with older scans unaffected).
+- **Sessions that expire** (`status.html`, `report/_script.js`): an IAP
+  session lasts about an hour, after which a `fetch` from the status page or
+  a report would get a sign-in redirect it cannot follow. The pages' calls send
+  `X-Requested-With: XMLHttpRequest` (IAP answers 401 instead) and reload the
+  page on 401, which signs in again and comes back. The report's three API
+  calls go through one `apiFetch`.
+- **`tools/deploy.sh`** — the deployment, in one idempotent command: the APIs,
+  the service account with its project roles, the bucket; build and test with
+  `cloudbuild.yaml`; the worker (`CLOUDGAUGE_ROLE=worker`, `--ingress
+  internal`, `--no-allow-unauthenticated`, the service account its only
+  invoker); the web service (`CLOUDGAUGE_ROLE=web`, `WORKER_URL`, `--iap`,
+  IAP's service agent its invoker, `PROJECT_NUMBER` set); `OPERATORS` granted
+  `roles/iap.httpsResourceAccessor`. It uses Cloud Run's deterministic URLs,
+  so the worker is told its own URL before it exists and needs no
+  `roles/run.viewer`. `PROGRAMMATIC_ACCESS=1` lets the service account through
+  IAP and lets the gcloud account sign tokens for it; `SKIP_SETUP`,
+  `SKIP_BUILD`, `EXTRA_ENV` and `DRY_RUN` cover updates and reviews. The
+  organization-level scan roles stay the one manual step.
+- **`tools/iap_token.py`** — a token that passes IAP, for `curl`, scripts and
+  the demo recorder: a JWT signed by the service account through the IAM
+  Credentials API (`signJwt`), audience `BASE_URL/*`, up to an hour, minted
+  with the signed-in gcloud identity (which needs
+  `roles/iam.serviceAccountTokenCreator` on the account). Google-issued ID
+  tokens — `gcloud auth print-identity-token`, Cloud Tasks OIDC tokens — do
+  not pass IAP on Cloud Run with its Google-managed OAuth client, whatever
+  their audience: the finding of the v16 spike, and the reason for the two
+  services. `tools/demo_gif.py --iap-service-account` records through it.
+
+### Changed
+
+- `WORKER_URL` on a web service names the worker service; on a worker it is
+  optional (its own URL). `WORKER_AUDIENCE` keeps its canary meaning, now on
+  the worker: the web canary's `WORKER_URL` is the worker canary's tag URL and
+  `WORKER_AUDIENCE` the worker's main URL.
+- The web service runs small — `--concurrency 80`, `--memory 1Gi`, `--timeout
+  600` (pages and the three on-demand Gemini / Recommender calls); the worker
+  keeps `--timeout 3600 --concurrency 4 --memory 2Gi`.
+- The README's deployment is written around the two services and IAP: Method 1
+  (console) is two services with *Require authentication → Identity-Aware
+  Proxy* on the web one, Method 2 is the script; a *Who can use it* section;
+  the single public service is a discouraged appendix with the Domain
+  Restricted Sharing caveat; the zero-downtime recipe runs two canaries.
+- `tests/test_packaging.py` counts `app.identity` among the web modules (it
+  imports Flask); the scan modules still import no Flask and open no socket.
+
+### Tests
+
+- New `tests/test_identity.py`, on a stand-in IAP that signs with real P-256
+  keys: a valid assertion names the person; no assertion, the raw email
+  header alone, another service's or project's audience, a URL-form audience,
+  another issuer, expiry, a missing email, garbage, a rogue key under IAP's
+  key ID or a new one (one refetch, then rejected), key rotation followed
+  with one refetch, the hour-long key cache, a failed key fetch, the project
+  number from the metadata server once or missing with one warning, the
+  assertion never logged. In the app: one verification per request, the two
+  pages showing and escaping the name, `/scan` with and without IAP, and the
+  *Requested by* row and summary field from an inline and from a sharded scan,
+  absent without a person.
+- New `tests/test_roles.py`: the blueprints per role, the web service
+  answering 404 on every worker path and the worker on every page, the
+  production startup per role (web without `WORKER_URL` fails before any GCP
+  call; web with it never discovers; worker discovers or is told), the role
+  read case-insensitively, an unknown role rejected, the default unchanged.
+- `tests/test_reporting.py`: the stored report's calls go through `apiFetch`
+  with the XHR header and the 401 reload; the three paths are unchanged.
+
+### Upgrade notes
+
+- Nothing changes for an existing single-service deployment: `CLOUDGAUGE_ROLE`
+  defaults to `all`, no new variable is required, and without IAP the pages
+  show no name and scans record none.
+- To move to the authenticated shape run `tools/deploy.sh` with the names you
+  deployed with (`SERVICE`, `REGION`, `QUEUE`, `BUCKET`, `SERVICE_ACCOUNT`)
+  and `OPERATORS`: it adds the worker, turns the service into the web service
+  (IAP on, `allUsers` and the disabled invoker check gone) and grants access.
+  Do it between scans: the shard and sweep tasks of a sharded scan in flight
+  are addressed to the old service's URL, which has no worker routes once it
+  is the web service. IAM grants take up to a minute; a 403 right after the
+  switch goes away on reload. Access to the pages is then the
+  `roles/iap.httpsResourceAccessor` binding, per person, group or domain.
+- Reports stored by earlier releases keep their frozen script: after an IAP
+  session expires, their *Draft fixes*, *executive summary* and *detailed
+  insights* buttons do nothing until the page is reloaded.
+- `curl`, scripts and `tools/demo_gif.py` need a token from
+  `tools/iap_token.py` (`PROGRAMMATIC_ACCESS=1` in the deploy script sets up
+  the two grants it needs); `gcloud auth print-identity-token` no longer
+  opens the service.
 
 ---
 
@@ -1052,7 +1184,7 @@ performance; modernization; enablement; roadmap and roadblocks).
 | **v15.4** | Folder membership | *Shipped.* A folder scan compares Cloud Asset Inventory's project list with Resource Manager's direct children (one call): a project Asset Inventory has not caught up with is scanned too, one it still places in the folder is kept and noted, and the report says so only when the two disagree. |
 | **v15.5** | Release-aware comparison | *Shipped.* Every scan summary and the report's footer name the release; between two scans of one release a check with no earlier result is compared with nothing — its rows are new, counted and marked — instead of *not compared (new check)*, which stays for a previous scan by another release. |
 | **v15.6** | Resilience at every scope | *Shipped.* Resilience of Critical Assets (Cloud SQL HA, backups, retention and PITR; zonal MIGs; single-region snapshots, now named one by one) runs in folder and project scans under the scanned scope, and each of its six checks reaches a verdict so Stability counts it; the scope picker offers active folders and projects only and names folders by their path and ID. |
-| **v16** | Authenticated by default | Deploy **without `--allow-unauthenticated`**: people sign in on the service's own `run.app` URL — no load balancer, domain or certificate — and the scan worker is reachable by Cloud Tasks through IAM alone; the public deployment becomes an explicit, discouraged option. |
+| **v16** | Authenticated by default | *Shipped.* Deployed **without `--allow-unauthenticated`**: people sign in through Identity-Aware Proxy on the web service's own `run.app` URL — no load balancer, domain, certificate or OAuth client — and a separate worker service is reachable by Cloud Tasks alone (`--ingress internal`, IAM); the pages say who is signed in and the report who requested the scan; `tools/deploy.sh` is the deployment; the public single service becomes an explicit, discouraged option. |
 | **v16.1** | Multi-region snapshots are resilient | *Disk Snapshot Resilience* reads the kind of a snapshot's storage location, not just its count: a snapshot in a multi-region (`asia`, `us`, `eu`) is geo-redundant and compliant; only a single region is flagged. Found during the v15.6 rollout, where every one of an organization's 56 flagged snapshots lived in `asia`. |
 | **v17** | History and analytics | **BigQuery export** of every scan's findings; **scheduled scans**; a history page (scores over time); a guide for Gemini Enterprise / Looker over the export ("talk to your infrastructure"). |
 | **v18** | Footprint and support | A **Platform Footprint** page (what runs where: services, regions, versions); **modernization indicators** (legacy runtimes, unmanaged VMs, missing release channels); a **Support cases** briefing. |

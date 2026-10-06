@@ -173,24 +173,32 @@ def build_task(worker_url, path, body, service_account_email, *, audience=None, 
     return task
 
 
-def build_scan_task(worker_url, service_account_email, scope, scope_id, job_id, audience=None, dispatch_deadline_seconds=None):
+def build_scan_task(worker_url, service_account_email, scope, scope_id, job_id, audience=None, dispatch_deadline_seconds=None,
+                    requested_by=None):
     """Builds the Cloud Tasks HTTP task that triggers ``/run-scan`` for one scan.
 
     ``audience`` sets the OIDC token audience; when omitted (the legacy task),
     Cloud Tasks uses the task URL. ``dispatch_deadline_seconds`` is new: the
     legacy task had none, so Cloud Tasks retried any scan still running after
-    10 minutes while the first attempt kept going.
+    10 minutes while the first attempt kept going. ``requested_by`` is the
+    signed-in person's email when the request came through Identity-Aware
+    Proxy (``app.identity``); the payload carries it only then, and the report
+    shows it as *Requested by*.
     """
     # NEW: Use a generic payload
-    return build_task(worker_url, "/run-scan", {"scope": scope, "scope_id": scope_id, "job_id": job_id},
+    body = {"scope": scope, "scope_id": scope_id, "job_id": job_id}
+    if requested_by:
+        body["requested_by"] = requested_by
+    return build_task(worker_url, "/run-scan", body,
                       service_account_email, audience=audience, dispatch_deadline_seconds=dispatch_deadline_seconds)
 
 
-def enqueue_scan(settings, worker_url, scope, scope_id, job_id, client=None):
+def enqueue_scan(settings, worker_url, scope, scope_id, job_id, client=None, requested_by=None):
     """Creates the scan task on the configured queue and returns the created task."""
     client = client or gcp.tasks_client()
     task = build_scan_task(worker_url, settings.service_account_email, scope, scope_id, job_id,
-                           audience=settings.worker_audience, dispatch_deadline_seconds=settings.task_dispatch_deadline_seconds)
+                           audience=settings.worker_audience, dispatch_deadline_seconds=settings.task_dispatch_deadline_seconds,
+                           requested_by=requested_by)
     parent = client.queue_path(settings.project_id, settings.location, settings.task_queue)
     return client.create_task(parent=parent, task=task)
 

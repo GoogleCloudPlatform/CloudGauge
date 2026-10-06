@@ -56,9 +56,14 @@ def create_app(settings=None, services=None):
     a clear log message. ``development`` and ``testing`` skip these steps.
     ``synthetic`` runs them too (it is production with a simulated data plane;
     see ``app.synthetic``) and marks every page and report with a banner.
+
+    ``CLOUDGAUGE_ROLE`` decides which blueprints the app has (``app.routes``) and
+    how the worker URL is found: a ``web`` service must be told it (``WORKER_URL``),
+    a ``worker`` or ``all`` service discovers its own. Both create the queue.
     """
     from flask import Flask
 
+    from app import identity
     from app.config import Settings
     from app.extensions import EXTENSION_KEY, build_services
     from app.routes import register_blueprints
@@ -72,6 +77,7 @@ def create_app(settings=None, services=None):
     app = Flask(__name__)
     app.config["TESTING"] = settings.is_testing
     app.config["CLOUDGAUGE_PROFILE"] = settings.profile
+    app.config["CLOUDGAUGE_ROLE"] = settings.role
 
     if settings.startup_checks_enabled:
         # Fail fast, before any GCP call, if the deployment is missing configuration.
@@ -90,6 +96,12 @@ def create_app(settings=None, services=None):
 
     if services.report_banner:
         app.context_processor(lambda: {"banner": services.report_banner})
+    if settings.serves_pages:
+        # Who is signed in (behind Identity-Aware Proxy), for the pages' header. None: nobody / not behind IAP.
+        app.context_processor(lambda: {"current_user": identity.current_user_email()})
 
-    register_blueprints(app)
+    register_blueprints(app, settings.role)
+    served = {'all': "the pages, the API and the Cloud Tasks endpoints", 'web': "the pages and the API (scans run on WORKER_URL)",
+              'worker': "the Cloud Tasks endpoints only"}[settings.role]
+    logging.info(f"CloudGauge role '{settings.role}': serving {served}.")
     return app

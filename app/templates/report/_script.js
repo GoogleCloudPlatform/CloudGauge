@@ -13,6 +13,18 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+// Behind Identity-Aware Proxy a session lasts about an hour. An expired one answers an XHR with 401 (a plain
+// fetch would get a sign-in redirect it cannot follow); the page reloads, which signs in again.
+async function apiFetch(url, options = {}) {
+    const headers = { 'X-Requested-With': 'XMLHttpRequest', ...(options.headers || {}) };
+    const response = await fetch(url, { ...options, headers });
+    if (response.status === 401) {
+        location.reload();
+        throw new Error("Your session expired; the page is reloading to sign in again.");
+    }
+    return response;
+}
+
 function showSection(sectionId, clickedLinkElement = null) {
     document.querySelectorAll('.content-section').forEach(section => {
         section.style.display = 'none';
@@ -304,7 +316,7 @@ async function generateAiSummary() {
     content.innerHTML = pendingHtml("Gemini is reading the report and writing the summary…");
 
     try {
-        const response = await fetch('/api/get-summary', {
+        const response = await apiFetch('/api/get-summary', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ scope: {{ scope|tojson }}, scope_id: {{ scope_id|tojson }}, job_id: {{ job_id|tojson }} })
@@ -390,7 +402,7 @@ async function fetchInsights(btn) {
     btn.textContent = "Loading insights…";
     placeholder.innerHTML = pendingHtml("Querying the Recommender API for every project in scope — this can take a minute…");
     try {
-        const response = await fetch('/api/get-insights', {
+        const response = await apiFetch('/api/get-insights', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ scope: {{ scope|tojson }}, scope_id: {{ scope_id|tojson }} })
@@ -569,7 +581,7 @@ async function getGeminiSuggestions(btn) {
         const batch = findingsToFix.slice(i, i + BATCH_SIZE);
         btn.textContent = `Drafting fixes (${Math.min(i + batch.length, findingsToFix.length)} of ${findingsToFix.length})…`;
         try {
-            const response = await fetch('/api/get-suggestions', {
+            const response = await apiFetch('/api/get-suggestions', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ findings: batch })

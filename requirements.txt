@@ -8,7 +8,7 @@ MarkupSafe==3.0.3  # imported directly by the report (also a Flask dependency)
 gunicorn==26.2.0
 
 # Google APIs: auth, discovery-based clients, and the best-practices CSV download
-google-auth==2.59.0
+google-auth==2.59.0  # also verifies IAP's ES256 identity assertions (app/identity.py); it brings cryptography
 google-api-python-client==2.200.0
 google-auth-httplib2==0.4.2  # auth transport for google-api-python-client
 requests==2.34.2

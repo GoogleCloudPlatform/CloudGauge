@@ -2,8 +2,9 @@
 """Record the README's demo GIF: one scan, from the landing page to the Scorecard's executive summary.
 
 The script drives a deployed CloudGauge with the Google Chrome installed on this machine (Playwright's ``chrome``
-channel), signing every request to the service with ``gcloud auth print-identity-token`` — the same credential a
-person uses to open it — and takes a still at each step of the flow:
+channel), signing every request to the service — with ``gcloud auth print-identity-token`` on a service without
+Identity-Aware Proxy, or with a token of the service account (``--iap-service-account``, see ``tools/iap_token.py``)
+on the v16 deployment, where IAP does not take Google-issued identity tokens — and takes a still at each step:
 
     landing page → the scope chosen → Scan in progress (one still per poll) → Scan complete →
     Overview → each category page → Scorecard → Generate executive summary → the summary.
@@ -21,7 +22,8 @@ Setup — none of this is a project dependency, so use a venv of its own::
 Record the README GIF from an organization scan on the deployed service (about five minutes)::
 
     /tmp/gifenv/bin/python tools/demo_gif.py --base https://cloudgauge-....run.app \\
-        --scope organization --scope-id 123456789012
+        --scope organization --scope-id 123456789012 \\
+        --iap-service-account cloudgauge-sa@my-project.iam.gserviceaccount.com
 
 Try the report half on an existing report first (no scan), or rebuild the GIF from the kept stills::
 
@@ -113,12 +115,28 @@ DETAIL_CHECK_JS = """
 
 
 def identity_token():
-    """The signed-in gcloud user's identity token, which Cloud Run accepts as a Bearer token."""
+    """The signed-in gcloud user's identity token, which a Cloud Run service without IAP accepts as a Bearer token."""
     try:
         result = subprocess.run(["gcloud", "auth", "print-identity-token"], capture_output=True, text=True, check=True)
     except (OSError, subprocess.CalledProcessError) as error:
         sys.exit(f"Could not get an identity token from gcloud ({error}); run `gcloud auth login` first.")
     return result.stdout.strip()
+
+
+def bearer_token(args):
+    """The token every request to the service carries.
+
+    Behind Identity-Aware Proxy (the v16 deployment) a Google-issued identity token is not accepted; IAP takes a
+    JWT signed by a service account that holds ``roles/iap.httpsResourceAccessor`` — ``tools/iap_token.py`` mints
+    one when ``--iap-service-account`` names it (``tools/deploy.sh PROGRAMMATIC_ACCESS=1`` sets up both grants).
+    The pages then read *Signed in as <that account>*, blurred like every other email.
+    """
+    if not args.iap_service_account:
+        return identity_token()
+    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+    from iap_token import mint_iap_token
+
+    return mint_iap_token(args.iap_service_account, args.base)
 
 
 class Recorder:
@@ -254,7 +272,7 @@ def record_report(rec, page, args, job_id):
 def record(args, work):
     from playwright.sync_api import sync_playwright
 
-    token = identity_token()
+    token = bearer_token(args)
     host = urlparse(args.base).netloc
     width, height = (int(n) for n in args.viewport.split("x"))
 
@@ -317,6 +335,9 @@ def main(argv=None):
     parser.add_argument("--timeout-minutes", type=int, default=20)
     parser.add_argument("--no-blur", action="store_true", help="leave member emails readable")
     parser.add_argument("--headed", action="store_true", help="watch the browser")
+    parser.add_argument("--iap-service-account", metavar="EMAIL",
+                        help="the service behind Identity-Aware Proxy: sign requests with a token of this service account "
+                             "(tools/iap_token.py) instead of the gcloud identity token")
     parser.add_argument("--assemble-only", action="store_true", help="rebuild the GIF from the work directory's frames.json")
     args = parser.parse_args(argv)
 

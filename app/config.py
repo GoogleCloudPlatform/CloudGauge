@@ -25,7 +25,7 @@ from dataclasses import dataclass
 # The release, as the image tag names it ("15.6" for v15.6; tests/test_packaging.py pins it to the newest entry
 # of RELEASE_NOTES.md). The report's footer shows it, and every scan summary records it so the next scan can tell
 # a check that is new to the release from one that merely had nothing to check last time (app.reporting.changes).
-VERSION = "15.6"
+VERSION = "16"
 # Best-practices CSV for the Organization Policies check (legacy name: GCS_PUBLIC_URL;
 # it points at GitHub, not GCS). The value is frozen byte-for-byte; override it
 # with the BEST_PRACTICES_CSV_URL environment variable.
@@ -35,6 +35,15 @@ SCOPES = ['https://www.googleapis.com/auth/cloud-platform']
 
 # These names are part of the deploy contract (README, Terraform); don't rename them.
 REQUIRED_ENV_VARS = ('PROJECT_ID', 'LOCATION', 'TASK_QUEUE', 'RESULTS_BUCKET', 'SERVICE_ACCOUNT_EMAIL')
+
+# CLOUDGAUGE_ROLE: which half of the tool a Cloud Run service is. The recommended deployment
+# (README, tools/deploy.sh) is two services from one image: 'web' serves the pages and the JSON
+# API behind Identity-Aware Proxy and only ever *enqueues* scans, to WORKER_URL; 'worker' serves
+# the Cloud Tasks endpoints (/run-scan, /scan-shard, /run-aggregation, /sweep), reachable by the
+# service account alone, and enqueues its own shards to its own URL. 'all' (the default) is the
+# single service of earlier releases: every route on one URL, WORKER_URL optional.
+ROLES = ('all', 'web', 'worker')
+DEFAULT_ROLE = 'all'
 
 # GEMINI_MODEL: "auto" (the default) uses the newest stable Gemini Flash model
 # available to the project, looked up at runtime (see app.services.gemini).
@@ -165,6 +174,11 @@ class Settings:
     # Needed when WORKER_URL is a revision tag URL (canary): Cloud Run rejects
     # tokens whose audience is a tag URL (401), so set this to the service's main URL.
     worker_audience: str | None = None
+    # Which half of the tool this service is (see ROLES). 'web' needs WORKER_URL.
+    role: str = DEFAULT_ROLE
+    # The project's number, which the IAP assertion's audience carries (app.identity). Unset: read from
+    # the metadata server on first use.
+    project_number: str | None = None
     gemini_model: str = DEFAULT_GEMINI_MODEL
     vertex_location: str = DEFAULT_VERTEX_LOCATION
     best_practices_csv_url: str = BEST_PRACTICES_CSV_URL
@@ -201,6 +215,9 @@ class Settings:
         profile = (env.get('CLOUDGAUGE_ENV') or DEFAULT_PROFILE).strip().lower()
         if profile not in PROFILES:
             raise ValueError(f"Invalid CLOUDGAUGE_ENV '{profile}'. Expected one of: {', '.join(PROFILES)}")
+        role = (env.get('CLOUDGAUGE_ROLE') or DEFAULT_ROLE).strip().lower()
+        if role not in ROLES:
+            raise ValueError(f"Invalid CLOUDGAUGE_ROLE '{role}'. Expected one of: {', '.join(ROLES)}")
         synthetic_projects = _number(env, 'SYNTHETIC_PROJECTS', 0, int, minimum=0)
         if profile == SYNTHETIC_PROFILE and synthetic_projects < 1:
             raise ValueError("CLOUDGAUGE_ENV=synthetic needs SYNTHETIC_PROJECTS (the number of generated projects, at least 1)")
@@ -213,6 +230,8 @@ class Settings:
             k_service=env.get('K_SERVICE'),
             worker_url=env.get('WORKER_URL') or None,
             worker_audience=env.get('WORKER_AUDIENCE') or None,
+            role=role,
+            project_number=(env.get('PROJECT_NUMBER') or '').strip() or None,
             gemini_model=_gemini_model(env.get('GEMINI_MODEL')),
             vertex_location=env.get('VERTEX_LOCATION') or DEFAULT_VERTEX_LOCATION,
             best_practices_csv_url=env.get('BEST_PRACTICES_CSV_URL') or BEST_PRACTICES_CSV_URL,
@@ -254,6 +273,20 @@ class Settings:
         """Whether ``create_app`` validates the env, resolves the worker URL and ensures the queue."""
         return self.profile in ('production', SYNTHETIC_PROFILE)
 
+    @property
+    def serves_pages(self):
+        """Whether this service registers the ``ui`` and ``api`` blueprints (roles ``all`` and ``web``)."""
+        return self.role in ('all', 'web')
+
+    @property
+    def serves_worker(self):
+        """Whether this service registers the ``worker`` blueprint (roles ``all`` and ``worker``)."""
+        return self.role in ('all', 'worker')
+
+    @property
+    def is_web_role(self):
+        return self.role == 'web'
+
     def missing_required(self):
         """Returns the names of required environment variables that are unset or empty."""
         values = {
@@ -274,8 +307,14 @@ class Settings:
             # In a production environment, you might want to raise an exception or exit
             # For Cloud Run, this will make the deployment fail with a clear log message
             raise RuntimeError(error_message)
-        else:
-            print("✅ All required environment variables are set.")
+        if self.is_web_role and not self.worker_url:
+            # Self-discovery would hand the web service its own URL, and every scan would be posted to a
+            # service that has no /run-scan. Fail here, where the log says what to set.
+            error_message = ("FATAL: CLOUDGAUGE_ROLE=web needs WORKER_URL, the URL of the worker service "
+                             "(the one deployed with CLOUDGAUGE_ROLE=worker); the web service never runs scans itself.")
+            logging.critical(error_message)
+            raise RuntimeError(error_message)
+        print("✅ All required environment variables are set.")
 
 
 def get_settings(environ=None):

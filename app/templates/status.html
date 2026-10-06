@@ -33,7 +33,8 @@
         body { min-height: 100vh; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px; padding: 24px; }
         .status-card { width: 100%; max-width: 448px; padding: 32px; }
         .notice { width: 100%; max-width: 448px; }
-        .brand { margin-bottom: 28px; font-size: 13px; font-weight: 600; letter-spacing: -0.01em; color: var(--ink); }
+        .brand { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; margin-bottom: 28px; font-size: 13px; font-weight: 600; letter-spacing: -0.01em; color: var(--ink); }
+        .signed-in { font-weight: 400; letter-spacing: 0; font-size: 12px; color: var(--muted); overflow-wrap: anywhere; text-align: right; }
         .status-card h1 { font-size: 22px; margin-bottom: 6px; }
         .scope-line { margin-bottom: 20px; font-family: var(--font-mono); font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
         .lede { margin-bottom: 20px; color: var(--muted); }
@@ -62,6 +63,7 @@
         const scope_id = "{{ scope_id }}";
         const scope = "{{ scope }}";
         const signed_csv_url = "{{ signed_csv_url | safe }}"; 
+        const signed_in_as = {{ (current_user or '')|tojson }};  // the verified IAP identity; '' when not behind IAP
         const card = document.getElementById('status-card');
         const CHECK_CIRCLE = '<svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="m9 12 2 2 4-4"/></svg>';
         const X_CIRCLE = '<svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="m15 9-6 6"/><path d="m9 9 6 6"/></svg>';
@@ -70,11 +72,16 @@
             return String(text).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
         }
 
+        function brandHtml() {
+            const who = signed_in_as ? `<span class="signed-in">Signed in as ${escapeHtml(signed_in_as)}</span>` : '';
+            return `<div class="brand">CloudGauge${who}</div>`;
+        }
+
         // --- UI Update Functions  ---
         function showInProgressUI() {
             document.title = "Scan in progress";
             card.innerHTML = `
-                <div class="brand">CloudGauge</div>
+                ${brandHtml()}
                 <h1>Scan in progress</h1>
                 <p class="scope-line">${escapeHtml(scope)} ${escapeHtml(scope_id)}</p>
                 <p class="lede">Every check runs across the scope. This may take several minutes; the report opens from this page when it is ready.</p>
@@ -126,7 +133,14 @@
         // --- Real-time API Polling ---
         async function checkStatus() {
             try {
-                const response = await fetch(`/api/status/${job_id}/${scope_id}`);
+                // Behind Identity-Aware Proxy an expired session answers an XHR with 401 (a plain fetch would
+                // get a sign-in redirect it cannot follow); reloading the page signs in again and comes back here.
+                const response = await fetch(`/api/status/${job_id}/${scope_id}`, { headers: { 'X-Requested-With': 'XMLHttpRequest' } });
+                if (response.status === 401) {
+                    clearInterval(statusInterval);
+                    location.reload();
+                    return;
+                }
                 if (!response.ok) {
                     // Handle server errors during polling
                     throw new Error(`API returned status ${response.status}`);
