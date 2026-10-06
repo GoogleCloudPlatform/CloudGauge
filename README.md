@@ -672,6 +672,8 @@ DOCKER_BUILDKIT=1 docker build -f Dockerfile.test --build-arg APP_IMAGE=cloudgau
 docker run --rm cloudgauge-test
 ```
 
+**Cut a release.** Bump `VERSION` in `app/config.py` and add the release's `## vX — …` entry at the top of `RELEASE_NOTES.md`; `tests/test_packaging.py` checks that the two agree, because the report's footer shows that version and every scan summary records it (it is how a scan tells a check new to the release from one that had nothing to check). Nothing at runtime reads the release notes — the app image leaves out every `.md` file — and a checkout without them skips that check rather than failing.
+
 `tests/legacy/` holds a frozen copy of the original single-file `cloudgauge.py`. The parity tests use it to check that the refactored routes, worker, and reports behave like the original.
 
 ## **Load Testing with a Synthetic Organization**

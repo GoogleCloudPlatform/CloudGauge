@@ -311,9 +311,15 @@ print("ok")
 def test_the_release_is_the_newest_entry_of_the_release_notes():
     """``app.config.VERSION`` is what the report's footer shows and what every scan summary records, so that the next
     scan can tell a check new to the release from one that had nothing to check (app.reporting.changes): it must be
-    bumped with each release, and the release notes are where a release is declared (``## v15.5 — …``, newest first)."""
+    bumped with each release, and the release notes are where a release is declared (``## v15.5 — …``, newest first).
+    Nothing at runtime reads the notes, so a checkout without them (a fork that keeps only the code) loses nothing
+    but this guard: the test skips rather than fails."""
     from app.config import VERSION
-    headings = re.findall(r'^## v(\S+) — ', (ROOT / 'RELEASE_NOTES.md').read_text(), re.M)
+    notes = ROOT / 'RELEASE_NOTES.md'
+    if not notes.exists():
+        pytest.skip('RELEASE_NOTES.md is not in this checkout; the release guard needs it (the app does not)')
+    text = notes.read_text()
+    headings = re.findall(r'^## v(\S+) — ', text, re.M)
     assert headings[0] == VERSION, f'app.config.VERSION is {VERSION!r}; the newest release note is v{headings[0]}'
     assert re.fullmatch(r'\d+(\.\d+)*', VERSION)  # as the image tag names it, without the "v"
-    assert f'`v5` … `v{VERSION}`' in (ROOT / 'RELEASE_NOTES.md').read_text()  # the intro's tag range
+    assert f'`v5` … `v{VERSION}`' in text  # the intro's tag range
