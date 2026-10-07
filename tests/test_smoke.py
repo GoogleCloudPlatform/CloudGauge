@@ -131,21 +131,19 @@ def test_cloud_tasks_failure_is_a_500_and_the_app_keeps_serving(client, gcp):
     assert client.get('/').status_code == 200
 
 
-def test_status_page_renders_with_a_signed_csv_link(client, gcp, rendered):
+def test_status_page_links_the_csv_route(client, gcp, rendered):
+    """v16.1: the Download CSV button is the web service's own route — behind the same sign-in as the pages — and
+    the page no longer carries a signed Cloud Storage URL (good for an hour for whoever held it)."""
+    startup_auth_calls = len(gcp.auth_scopes)
     response = client.get(f'/status/{JOB_ID}/{SCOPE}/{SCOPE_ID}')
     assert response.status_code == 200
     assert rendered == ['status.html']
-    assert 'X-Goog-Signature' in response.get_data(as_text=True)
-    ((blob_name, kwargs),) = gcp.bucket.signed_url_requests
-    assert blob_name == f'{JOB_ID}/{SCOPE_ID}_report.csv'
-    assert kwargs['service_account_email'] == fakes.TEST_ENV['SERVICE_ACCOUNT_EMAIL']
-
-
-def test_status_page_survives_a_signing_failure(client, gcp):
-    with mock.patch.object(gcp.bucket, 'signing_error', PermissionError('iam.serviceAccounts.signBlob denied')):
-        response = client.get(f'/status/{JOB_ID}/{SCOPE}/{SCOPE_ID}')
-    assert response.status_code == 200
-    assert 'const signed_csv_url = "#";' in response.get_data(as_text=True)
+    page = response.get_data(as_text=True)
+    assert 'const csv_url = `/report/${job_id}/${scope_id}/csv`;' in page
+    assert 'href="${csv_url}"' in page and 'Download CSV' in page
+    assert 'signed_csv_url' not in page and 'X-Goog-Signature' not in page
+    assert gcp.bucket.signed_url_requests == []
+    assert gcp.auth_scopes[startup_auth_calls:] == []  # nothing to sign, no credential fetched for the page
 
 
 # --- Worker round trip (GCS writes and reads) ---

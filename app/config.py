@@ -25,7 +25,7 @@ from dataclasses import dataclass
 # The release, as the image tag names it ("15.6" for v15.6; tests/test_packaging.py pins it to the newest entry
 # of RELEASE_NOTES.md). The report's footer shows it, and every scan summary records it so the next scan can tell
 # a check that is new to the release from one that merely had nothing to check last time (app.reporting.changes).
-VERSION = "16"
+VERSION = "16.1"
 # Best-practices CSV for the Organization Policies check (legacy name: GCS_PUBLIC_URL;
 # it points at GitHub, not GCS). The value is frozen byte-for-byte; override it
 # with the BEST_PRACTICES_CSV_URL environment variable.

@@ -147,10 +147,10 @@ if [[ "${SKIP_SETUP:-0}" != 1 ]]; then
   for role in roles/aiplatform.user roles/cloudtasks.admin roles/cloudbuild.builds.builder; do
     g projects add-iam-policy-binding "$PROJECT_ID" --member="serviceAccount:${SA_EMAIL}" --role="$role" --condition=None >/dev/null
   done
-  # On itself: signed CSV links (Token Creator) and Cloud Tasks OIDC tokens (Service Account User).
-  for role in roles/iam.serviceAccountTokenCreator roles/iam.serviceAccountUser; do
-    g iam service-accounts add-iam-policy-binding "$SA_EMAIL" --member="serviceAccount:${SA_EMAIL}" --role="$role" >/dev/null
-  done
+  # On itself: Service Account User, so the services can create Cloud Tasks that carry its OIDC token
+  # (iam.serviceAccounts.actAs). Token Creator on itself is no longer needed: until v16.1 it signed the
+  # status page's CSV link, which is now a route of the web service.
+  g iam service-accounts add-iam-policy-binding "$SA_EMAIL" --member="serviceAccount:${SA_EMAIL}" --role=roles/iam.serviceAccountUser >/dev/null
 
   step "Results bucket gs://${BUCKET}"
   if [[ "$DRY_RUN" == 1 ]] || ! gcloud --project "$PROJECT_ID" storage buckets describe "gs://${BUCKET}" >/dev/null 2>&1; then

@@ -203,6 +203,7 @@ class ProjectProfile:
     recent_changes: tuple = ()
     mig_zones: tuple = ()
     single_region_snapshots: int = 0
+    multi_region_snapshots: int = 0  # v16.1: snapshots in asia/us/eu, which the resilience check passes
     # v14: Service Health and Advisory Notifications
     servicehealth_disabled: bool = False  # the Service Health API is not enabled (no personalized incidents)
     incident_relevance: dict = field(default_factory=dict)  # incident id -> the project's relevance to it
@@ -401,6 +402,9 @@ class SyntheticOrg:
         advisory_types_disabled = ("NOTIFICATION_TYPE_THREAT_HORIZONS",) if _chance(rng, 0.05) else ()
         has_project_advisory = bool(gke_clusters) and _chance(rng, 0.5)
 
+        # v16.1 (drawn last, for the same reason): snapshots kept in a multi-region, which pass the resilience check
+        multi_region_snapshots = rng.randint(0, 2) if vms else 0
+
         return ProjectProfile(
             index=index, project_id=project_id, display_name=f"Synthetic Project {index}",
             folder_id=self.folder_of(index), denied=denied, osconfig_disabled=osconfig_disabled,
@@ -411,7 +415,7 @@ class SyntheticOrg:
             addresses_regions=addresses_regions, forwarding_rule_regions=forwarding,
             cost_recommendations=cost_recommendations, network_insights=network_insights,
             recent_changes=recent_changes, mig_zones=mig_zones,
-            single_region_snapshots=single_region_snapshots,
+            single_region_snapshots=single_region_snapshots, multi_region_snapshots=multi_region_snapshots,
             servicehealth_disabled=servicehealth_disabled, incident_relevance=incident_relevance,
             advisory_types_disabled=advisory_types_disabled, has_project_advisory=has_project_advisory,
         )

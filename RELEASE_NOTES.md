@@ -8,7 +8,119 @@ the test suite running inside the image, a zero-traffic canary revision scanned
 against a real organization, promotion, and a production scan compared fact for
 fact with the previous version's report.
 
-Versions are the image tags (`v5` … `v16`); the commit is the one that shipped.
+Versions are the image tags (`v5` … `v16.1`); the commit is the one that shipped.
+
+---
+
+## v16.1 — Multi-region snapshots pass, downloads behind the sign-in
+
+Two things the v15.6 and v16 rollouts left on the list. **Disk Snapshot
+Resilience** flagged every snapshot it saw: a Compute Engine snapshot has
+exactly one storage location, so "fewer than two locations" was true of all of
+them — every one of the 56 an organization scan found was kept in the `asia`
+multi-region, which is geo-redundant by construction. The check now reads the
+kind of the location: a multi-region (`asia`, `eu`, `us`) passes, a single
+region (`asia-south1`) is flagged with its name, as before. And the status
+page's **Download CSV**, the one link v16 left outside Identity-Aware Proxy — a
+Cloud Storage URL signed by the service account, good for an hour for whoever
+held it — is now the web service's own `/report/<job>/<scope>/csv` route, the
+one the report's toolbar already used: the CSV is streamed from the bucket by
+the service, behind the same sign-in as every page, and nothing in the results
+bucket is addressed by a browser any more. The service account signs nothing
+now, so it no longer needs Token Creator on itself.
+
+### Changed
+
+- **Disk Snapshot Resilience** (`app/checks/reliability.py`): `MULTI_REGIONS`
+  names the three Compute Engine multi-regions; `is_single_region(locations)`
+  is true when none of a snapshot's storage locations is one of them (compared
+  lower-cased; an empty or missing list still counts as single-region, with
+  Location *unknown* — the conservative reading). The row, `Project · Snapshot
+  · Location`, and the all-clear text (*No single-region disk snapshots
+  found.*) are unchanged, so a snapshot still flagged is the same finding it
+  was.
+- **The first scan after the upgrade says so** (`app/reporting/changes.py`).
+  Under the new rule a snapshot in `asia` leaves the table without anyone
+  touching it; compared row by row that would read as 56 resolved.
+  `RESHAPED_CHECKS` now carries the release that drew the line *and why* —
+  `("16.1", "rule changed")` for this check, in place of v15.6's *rows changed*
+  line — and against a previous scan by any older release (15.5, 15.6, 16) the
+  check's rows are *not compared (rule changed)*: no resolved list, no `−56` on
+  the card. Its status change still shows (*Action Required → Compliant*) and
+  the Reliability delta with it: that is the posture under the new rule, and
+  the chip beside it says it is a rule change, not work done. From the next
+  scan on, rows compare as usual. `SUMMARY_VERSION` unchanged.
+- **The status page's CSV link** (`app/routes/ui.py`, `status.html`,
+  `app/services/results_store.py`): `csv_url` is built next to `report_url`
+  and the button uses it; `get_status` renders the page and nothing else. The
+  route serves the object **streamed** — `open_report` returns the blob's
+  reader and size, read in 1 MiB chunks, with `Content-Length` and the
+  attachment `Content-Disposition` — so an organization-sized CSV never sits
+  whole in the web service's 1 GiB; 404 until the CSV exists, as before.
+  `generate_signed_csv_url` and its imports are gone. Behind IAP a click after
+  the session expired is a navigation, not a fetch: IAP signs in, returns to
+  the CSV URL, and the download proceeds.
+- **`tools/deploy.sh`** grants the service account one binding on itself,
+  `roles/iam.serviceAccountUser` — what a Cloud Tasks task carrying its
+  identity needs (`iam.serviceAccounts.actAs`), which the README's step 3 had
+  labelled "for signed URLs" — and no longer
+  `roles/iam.serviceAccountTokenCreator`. The grant `PROGRAMMATIC_ACCESS=1`
+  makes to a person (minting IAP tokens with `tools/iap_token.py`) is a
+  different binding and stays.
+- **Synthetic world** (`app/synthetic/world.py`, `provider.py`): a project
+  profile draws `multi_region_snapshots` (0–2, after every existing draw, so
+  every other synthetic fact is as it was) and the provider lists them in
+  `asia`, `us` and `eu` beside the `us-central1` ones, so a synthetic scan
+  exercises both sides of the rule.
+- The README: the catalogue line; the status-page and *Reports for Large
+  Organizations* passages (no link expires); the *Changes* paragraph (*rule
+  changed*); prerequisites step 3; `SERVICE_ACCOUNT_EMAIL`; Cleanup (the Token
+  Creator self-binding as a leftover of releases before v16.1, with its
+  removal line).
+
+### Tests
+
+- `tests/test_resilience.py`: the rule, parametrised — `['asia']`, `['us']`,
+  `['eu']`, `['ASIA']`, `['us', 'eu']` leave no row; `['asia-south1']`,
+  `['us-central1']`, `['europe-west1']` a row with that location, `[]` and a
+  missing key one with *unknown*; `MULTI_REGIONS` is exactly the three offers.
+- `tests/test_changes.py`: `rows_reshaped_since` returns the reason against
+  `None`, `''`, `15.5`, `15.6`, `16`, `16.0` and nothing against `16.1`,
+  `16.2`, `17`; a check whose rule changed reports its status change but
+  nothing resolved, with the chip title *Was Action Required in the previous
+  scan; Rows not compared: rule changed*; the gate applies across releases
+  only.
+- `tests/test_routes.py`: the CSV route streams — body (non-ASCII, so the
+  length is in bytes), `text/csv`, `Content-Disposition`, `Content-Length`,
+  the blob opened with the route's chunk size; an 800-byte object in 8-byte
+  chunks arrives whole in 100 reads and the file is closed; a bucket failure
+  is the same 500 as before. `tests/fakes.py`'s `FakeBlob` gains `size`,
+  `reload` and `open`.
+- `tests/test_smoke.py`: the status page links `/report/<job>/<scope>/csv` and
+  signs nothing. `tests/test_api_parity.py`: parity with the legacy page on
+  everything but the link it signs (`status_page_facts` in `tests/helpers.py`
+  leaves the CSV URL out), the new page's own facts asserted beside it;
+  `test_status_page_without_a_signed_url` retired with the signing.
+
+### Upgrade notes
+
+- The first scan of each scope after the upgrade shows **Disk Snapshot
+  Resilience** on the Changes card as a status change (*Action Required →
+  Compliant* where every snapshot was in a multi-region) with a *not compared
+  (rule changed)* chip, and lists nothing as resolved for it; Stability moves
+  accordingly (the first organization: 27 % → about 36 %). A snapshot in a
+  single region stays flagged and keeps its identity.
+- Reports stored by earlier releases are not affected: their toolbar link was
+  this route already. Status pages are rendered on request, so every job's
+  **Download CSV** is the route from the moment the new revision serves.
+- The `roles/iam.serviceAccountTokenCreator` binding the service account held
+  on itself signed the old link and nothing else; `tools/deploy.sh` no longer
+  grants it, and on an existing deployment it can go once no earlier revision
+  is a rollback target: `gcloud iam service-accounts remove-iam-policy-binding
+  $SA --member=serviceAccount:$SA --role=roles/iam.serviceAccountTokenCreator`.
+  The `roles/iam.serviceAccountUser` self-binding stays: Cloud Tasks needs it.
+- The public single service (`CLOUDGAUGE_ROLE=all`) behaves as before; its
+  CSV is as public as its pages are.
 
 ---
 
@@ -1186,8 +1298,7 @@ performance; modernization; enablement; roadmap and roadblocks).
 | **v15.5** | Release-aware comparison | *Shipped.* Every scan summary and the report's footer name the release; between two scans of one release a check with no earlier result is compared with nothing — its rows are new, counted and marked — instead of *not compared (new check)*, which stays for a previous scan by another release. |
 | **v15.6** | Resilience at every scope | *Shipped.* Resilience of Critical Assets (Cloud SQL HA, backups, retention and PITR; zonal MIGs; single-region snapshots, now named one by one) runs in folder and project scans under the scanned scope, and each of its six checks reaches a verdict so Stability counts it; the scope picker offers active folders and projects only and names folders by their path and ID. |
 | **v16** | Authenticated by default | *Shipped.* Deployed **without `--allow-unauthenticated`**: people sign in through Identity-Aware Proxy on the web service's own `run.app` URL — no load balancer, domain, certificate or OAuth client — and a separate worker service is reachable by Cloud Tasks alone (`--ingress internal`, IAM); the pages say who is signed in and the report who requested the scan; `tools/deploy.sh` is the deployment; the public single service becomes an explicit, discouraged option. |
-| **v16.1** | Multi-region snapshots are resilient | *Disk Snapshot Resilience* reads the kind of a snapshot's storage location, not just its count: a snapshot in a multi-region (`asia`, `us`, `eu`) is geo-redundant and compliant; only a single region is flagged. Found during the v15.6 rollout, where every one of an organization's 56 flagged snapshots lived in `asia`. |
-| **v16.2** | Every download through the sign-in | The status page's **Download CSV** is a signed Cloud Storage link, good for an hour for whoever holds it; it becomes the web service's own CSV route, so a report's downloads — like its pages — exist only for someone IAP let in. Nothing else in the bucket is reachable from outside. |
+| **v16.1** | Multi-region snapshots pass, downloads behind the sign-in | *Shipped.* *Disk Snapshot Resilience* reads the kind of a snapshot's storage location: a multi-region (`asia`, `eu`, `us`) is geo-redundant and compliant, a single region is flagged — the first scan after the upgrade says *rule changed* instead of listing the snapshots as resolved. The status page's **Download CSV** is the web service's own route, streamed, so a report's downloads — like its pages — exist only for someone IAP let in; the service account no longer needs Token Creator on itself. |
 | **v17** | History and analytics | **BigQuery export** of every scan's findings; **scheduled scans**; a history page (scores over time); a guide for Gemini Enterprise / Looker over the export ("talk to your infrastructure"). |
 | **v18** | Footprint and support | A **Platform Footprint** page (what runs where: services, regions, versions); **modernization indicators** (legacy runtimes, unmanaged VMs, missing release channels); a **Support cases** briefing. |
 | Later | | VM Manager vulnerability summary, Security Command Center findings summary, SLO coverage, PDF export. |

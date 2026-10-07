@@ -31,7 +31,7 @@ import pytest
 import samples
 from app.config import VERSION
 from app.reporting.changes import (INLINE_STATUS_CHANGES, MAX_LISTED_RESOLVED, MINUS, NO_LONGER_CHECKED, NO_RESULT, NO_RESULT_NOW,
-                                   NOT_COMPARED, ORG_POLICIES_CHECK, RESHAPED_CHECKS, ROWS_CHANGED, SUMMARY_VERSION, CheckChange,
+                                   NOT_COMPARED, ORG_POLICIES_CHECK, RESHAPED_CHECKS, ROWS_CHANGED, RULE_CHANGED, SUMMARY_VERSION, CheckChange,
                                    RowIdentities, RowMatcher, check_change, compare, count_delta, delta_class, first_result_change,
                                    identities_for, normalize_prose, release_tuple, reshaped_change, rows_reshaped_since, same_release,
                                    text_identities)
@@ -206,22 +206,26 @@ def test_summaries_of_the_same_release_are_told_by_the_release_they_name(then, n
     assert same_release(summary('job-1', {}, {}, release=then), summary('job-2', {}, {}, release=now)) is same
 
 
-# --- v15.6: a check whose rows changed shape ---
+# --- v15.6 / v16.1: a check whose rows cannot be compared across a release ---
 
-RESHAPED = 'Disk Snapshot Resilience'  # one count row until v15.5, one row per snapshot since v15.6
+RESHAPED = 'Disk Snapshot Resilience'  # one count row until v15.5, one row per snapshot since v15.6, a changed rule in v16.1
 
 
-@pytest.mark.parametrize('release, expected', [('15.6', (15, 6)), ('15.10', (15, 10)), ('16', (16,)), (None, ()), ('', ())])
+@pytest.mark.parametrize('release, expected', [('15.6', (15, 6)), ('15.10', (15, 10)), ('16', (16,)), ('16.1', (16, 1)), (None, ()), ('', ())])
 def test_releases_order_numerically(release, expected):
     assert release_tuple(release) == expected
-    assert release_tuple('15.10') > release_tuple('15.6') > release_tuple('15.5') > release_tuple(None)
+    assert release_tuple('16.1') > release_tuple('16') > release_tuple('15.10') > release_tuple('15.6') > release_tuple('15.5') > release_tuple(None)
 
 
-@pytest.mark.parametrize('previous_release, reshaped', [(None, True), ('', True), ('15.5', True), ('15.6', False), ('15.7', False), ('16.0', False)])
-def test_rows_are_reshaped_since_a_previous_scan_by_an_older_release(previous_release, reshaped):
-    assert rows_reshaped_since(RESHAPED, summary('job-1', {}, {}, release=previous_release)) is reshaped
-    assert rows_reshaped_since('Public GCS Buckets', summary('job-1', {}, {}, release=previous_release)) is False
-    assert RESHAPED_CHECKS == {RESHAPED: '15.6'}
+@pytest.mark.parametrize('previous_release, reason', [(None, RULE_CHANGED), ('', RULE_CHANGED), ('15.5', RULE_CHANGED), ('15.6', RULE_CHANGED),
+                                                      ('16', RULE_CHANGED), ('16.0', RULE_CHANGED), ('16.1', None), ('16.2', None), ('17', None)])
+def test_rows_are_not_comparable_with_a_previous_scan_by_an_older_release(previous_release, reason):
+    """v16.1 changed the rule (a multi-region snapshot passes): against any older scan the rows are not compared, for
+    that reason — the v15.6 reshape is behind the same line, so one entry per check is enough."""
+    assert rows_reshaped_since(RESHAPED, summary('job-1', {}, {}, release=previous_release)) == reason
+    assert rows_reshaped_since('Public GCS Buckets', summary('job-1', {}, {}, release=previous_release)) is None
+    assert RESHAPED_CHECKS == {RESHAPED: ('16.1', RULE_CHANGED)}
+    assert (ROWS_CHANGED, RULE_CHANGED) == ('rows changed', 'rule changed')
 
 
 def test_a_reshaped_check_compares_its_status_but_not_its_rows():
@@ -237,10 +241,24 @@ def test_a_reshaped_check_compares_its_status_but_not_its_rows():
     assert reshaped_change(entry('Informational', 'a'), entry('Action Required', 'b')) is None
 
 
-@pytest.mark.parametrize('previous_release, reason', [(None, ROWS_CHANGED), ('15.5', ROWS_CHANGED), (VERSION, None)])
+def test_a_check_whose_rule_changed_compares_its_status_but_not_its_rows():
+    """v16.1: the 56 snapshots an older scan flagged in ``asia`` are gone from this one because the rule changed, not
+    because anyone moved them — the check turns Compliant (its status under the new rule), nothing is "resolved"."""
+    previous = entry('Action Required', *(f'p1 · snap-{i} · asia' for i in range(56)))
+    change = reshaped_change(entry('Compliant'), previous, RULE_CHANGED)
+    assert change == CheckChange(previous_status='Action Required', note=NOT_COMPARED, note_reason=RULE_CHANGED)
+    assert (change.resolved, change.resolved_items, change.new) == (0, (), 0)
+    assert (change.chip, change.chip_title) == (NOT_COMPARED, 'Was Action Required in the previous scan; Rows not compared: rule changed')
+    # Still Action Required (a region remains): the status is unchanged, the rows still not compared.
+    remaining = reshaped_change(entry('Action Required', 'p1 · nightly · asia-south1'), previous, RULE_CHANGED)
+    assert remaining == CheckChange(note=NOT_COMPARED, note_reason=RULE_CHANGED)
+    assert remaining.chip_title == 'Rows not compared: rule changed'
+
+
+@pytest.mark.parametrize('previous_release, reason', [(None, RULE_CHANGED), ('15.5', RULE_CHANGED), ('15.6', RULE_CHANGED), ('16', RULE_CHANGED), (VERSION, None)])
 def test_compare_applies_the_reshape_rule_across_releases_only(previous_release, reason):
-    """Across the release that reshaped the rows: *not compared (rows changed)*; from the next scan on, the rows
-    compare as usual (here: one snapshot resolved)."""
+    """Across the release that drew the line: *not compared (rule changed)* and nothing resolved; from the next scan
+    on, the rows compare as usual (here: one snapshot resolved)."""
     previous = summary('job-1', {RESHAPED: entry('Action Required', 'row-a', 'row-b', category=RELIABILITY)}, {RELIABILITY: 0.0},
                        release=previous_release)
     current = summary('job-2', {RESHAPED: entry('Action Required', 'row-a', category=RELIABILITY)}, {RELIABILITY: 0.0}, release=VERSION)

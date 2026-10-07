@@ -43,10 +43,12 @@ The rules of ``compare``, per check:
   row as new; the reverse lists every previous row as resolved);
 - in both scans, one of them an Error: the status change only — the rows are
   *not compared* (an Error scan did not look, so nothing was resolved);
-- in both scans, but the check's rows changed shape in a release after the one
-  that wrote the previous summary (``RESHAPED_CHECKS``): the status change only —
-  the rows are *not compared (rows changed)*, since every row would read as new
-  and every old one as resolved; the next scan compares as usual;
+- in both scans, but the check's rows cannot be compared across a release
+  after the one that wrote the previous summary (``RESHAPED_CHECKS``: the rows
+  changed shape, or the rule changed): the status change only — the rows are
+  *not compared (rows changed)* or *not compared (rule changed)*, since every
+  row would read as new and every old one as resolved, or a snapshot nobody
+  touched would read as fixed; the next scan compares as usual;
 - only in this scan, both scans by the same release (v15.5): the previous scan
   had nothing to check — an empty folder that has its first project now — so
   every row is new (the card says ``no result → Action Required``);
@@ -94,12 +96,15 @@ ORG_POLICIES_CHECK = "Organization Policies"
 # Columns that never enter an identity: the fix is derived from the row, and a version is a measurement
 # of its component (GKE Supported Versions), not what the finding is about.
 EXCLUDED_COLUMNS = (FIX_COLUMN, "Version")
-# Checks whose rows changed shape (and with them every row's identity) → the release that did it. Against a
-# previous scan by an older release their rows are not compared (module docstring); the status still is.
+# Checks whose rows cannot be compared with a previous scan by an older release → (the release that drew the line,
+# why). Against such a scan the rows are not compared (module docstring); the status still is. The reasons:
+ROWS_CHANGED = "rows changed"  # the rows changed shape, and with them every row's identity
+RULE_CHANGED = "rule changed"  # the rule changed: a row that vanished was not fixed, one that appeared is not new
 RESHAPED_CHECKS = {
-    "Disk Snapshot Resilience": "15.6",  # one row counting the snapshots → one row per single-region snapshot
+    # v15.6: one row counting the snapshots → one row per single-region snapshot (rows changed);
+    # v16.1: a snapshot in a multi-region passes (rule changed). The newest line is the one that matters.
+    "Disk Snapshot Resilience": ("16.1", RULE_CHANGED),
 }
-ROWS_CHANGED = "rows changed"
 
 DIGITS = re.compile(r"\d[\d,]*(?:\.\d+)?")
 MINUS = "\u2212"  # a real minus sign, as wide as the plus
@@ -181,7 +186,7 @@ class CheckChange:
     resolved: int = 0
     previous_status: str | None = None  # set when it differs from the current status
     note: str | None = None  # NOT_COMPARED, with the reason in ``note_reason``
-    note_reason: str | None = None  # "new check", "could not be checked then", "could not be checked now", "rows changed"
+    note_reason: str | None = None  # "new check", "could not be checked then", "could not be checked now", "rows changed", "rule changed"
     new_identities: frozenset = frozenset()
     resolved_items: tuple = ()  # the resolved identities, in the previous scan's order, capped at MAX_LISTED_RESOLVED
     resolved_omitted: int = 0  # how many more than ``resolved_items`` lists
@@ -327,19 +332,22 @@ def release_tuple(release):
 
 
 def rows_reshaped_since(name, previous):
-    """Whether check ``name``'s rows changed shape (``RESHAPED_CHECKS``) in a release after the one that wrote ``previous``."""
-    reshaped_in = RESHAPED_CHECKS.get(name)
-    return bool(reshaped_in) and release_tuple(previous.get("release")) < release_tuple(reshaped_in)
+    """Why check ``name``'s rows cannot be compared with the scan ``previous`` (``RESHAPED_CHECKS``: the release that
+    drew the line is newer than the one that wrote ``previous``), or ``None`` when they compare as usual."""
+    line = RESHAPED_CHECKS.get(name)
+    if line and release_tuple(previous.get("release")) < release_tuple(line[0]):
+        return line[1]
+    return None
 
 
-def reshaped_change(current, previous):
-    """``CheckChange`` for a check whose rows changed shape since the previous scan's release: the status change if
-    there is one, the rows *not compared (rows changed)*. A briefing stays ``None`` and an Error on either side keeps
-    its own reason (its rows are not compared anyway)."""
+def reshaped_change(current, previous, reason=ROWS_CHANGED):
+    """``CheckChange`` for a check whose rows cannot be compared with the previous scan's (``reason``: why): the status
+    change if there is one, the rows *not compared*. A briefing stays ``None`` and an Error on either side keeps its
+    own reason (its rows are not compared anyway)."""
     change = check_change(current, previous)
     if change is None or change.note:
         return change
-    return CheckChange(previous_status=change.previous_status, note=NOT_COMPARED, note_reason=ROWS_CHANGED)
+    return CheckChange(previous_status=change.previous_status, note=NOT_COMPARED, note_reason=reason)
 
 
 def compare(previous, current, slugs, section_ids):
@@ -356,8 +364,9 @@ def compare(previous, current, slugs, section_ids):
     for name, entry in cur_checks.items():
         if entry["status"] == "Informational":
             continue
-        if name in prev_checks and rows_reshaped_since(name, previous):
-            change = reshaped_change(entry, prev_checks[name])
+        reason = rows_reshaped_since(name, previous) if name in prev_checks else None
+        if reason:
+            change = reshaped_change(entry, prev_checks[name], reason)
         elif name in prev_checks:
             change = check_change(entry, prev_checks[name])
         elif within_release:

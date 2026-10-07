@@ -62,7 +62,6 @@
         const job_id = "{{ job_id }}";
         const scope_id = "{{ scope_id }}";
         const scope = "{{ scope }}";
-        const signed_csv_url = "{{ signed_csv_url | safe }}"; 
         const signed_in_as = {{ (current_user or '')|tojson }};  // the verified IAP identity; '' when not behind IAP
         const card = document.getElementById('status-card');
         const CHECK_CIRCLE = '<svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="m9 12 2 2 4-4"/></svg>';
@@ -97,6 +96,7 @@
         function showReadyUI() {
             document.title = "Report ready";
             const report_url = `/report/${job_id}/${scope_id}`;
+            const csv_url = `/report/${job_id}/${scope_id}/csv`;  // v16.1: the service's own route, behind the same sign-in as the pages
             card.innerHTML = `
                 <div class="state-icon ok">${CHECK_CIRCLE}</div>
                 <h1>Scan complete</h1>
@@ -104,7 +104,7 @@
                 <p class="lede">The report is ready: open it to review the findings, or download every row as a CSV file.</p>
                 <div class="button-group">
                     <a href="${report_url}" target="_blank" class="btn btn-primary">View interactive report</a>
-                    <a href="${signed_csv_url}" class="btn btn-outline">Download CSV</a>
+                    <a href="${csv_url}" class="btn btn-outline">Download CSV</a>
                 </div>
                 <p class="job-line">Job ${escapeHtml(job_id)}</p>
             `;

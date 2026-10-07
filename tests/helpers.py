@@ -222,9 +222,17 @@ def page_facts(html):
                    for attrs in re.findall(r'<select([^>]*)>', markup)],
         'options': re.findall(r'<option value="([^"]*)"', markup),
         'submit_disabled': bool(re.search(r'<button[^>]*type="submit"[^>]*\bdisabled\b', markup)),
-        'constants': sorted(re.findall(r'const (job_id|scope_id|signed_csv_url) = (".*?");', script)),
+        # v16.1: the status page's CSV button is the web service's route, so legacy's ``signed_csv_url`` is no fact of it
+        'constants': sorted(re.findall(r'const (job_id|scope_id) = (".*?");', script)),
         'urls': sorted(set(re.findall(r'`(/(?:api|report)/[^`]*)`', script))),
     }
+
+
+def status_page_facts(html):
+    """``page_facts`` without what v16.1 added to the status page: the CSV route it links (legacy signed a URL)."""
+    facts = page_facts(html)
+    facts['urls'] = [url for url in facts['urls'] if not url.endswith('/csv')]
+    return facts
 
 
 def assert_same_response(legacy_response, response, *, html=False, facts=None):

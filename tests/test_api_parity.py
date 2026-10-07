@@ -23,7 +23,7 @@ everything else byte for byte. ``/run-scan`` is covered by test_worker.py.
 import json
 import time
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
 from urllib.parse import quote
 
 import pytest
@@ -33,7 +33,7 @@ from google.genai import errors as genai_errors
 import fakes
 from app import create_app
 from app.services import insights as insights_service
-from helpers import assert_same_response, normalized_lines, page_facts
+from helpers import assert_same_response, normalized_lines, page_facts, status_page_facts
 
 SA_EMAIL = fakes.TEST_ENV['SERVICE_ACCOUNT_EMAIL']
 XSS = '"><img src=x onerror=alert(1)>'  # no "/": a URL segment can't contain one
@@ -107,38 +107,30 @@ def test_scan_rejects_incomplete_forms(kwargs, legacy_client, client, gcp):
 
 
 def test_status_page(legacy_client, client, gcp):
+    """The status page keeps legacy's contract — the constants it embeds, where it polls, where the report is — with one
+    documented difference since v16.1: its Download CSV is the web service's route, where legacy embedded a one-hour
+    signed Cloud Storage URL (``signed_csv_url``), minted on every page load."""
     startup_auth_calls = len(gcp.auth_scopes)  # the new app's startup looked up its URL
-    response = assert_parity(legacy_client, client, 'GET', '/status/job-1/organization/123456789', facts=page_facts)
+    response = assert_parity(legacy_client, client, 'GET', '/status/job-1/organization/123456789', facts=status_page_facts)
     assert response.status_code == 200
     page = response.get_data(as_text=True)
-    signed_url = 'https://storage.example/test-bucket/job-1/123456789_report.csv?X-Goog-Signature=abc&X-Goog-Expires=3600'
     assert page_facts(page) == {
         'forms': [], 'fields': [], 'options': [], 'submit_disabled': False,
-        'constants': [('job_id', '"job-1"'), ('scope_id', '"123456789"'), ('signed_csv_url', f'"{signed_url}"')],
-        'urls': ['/api/status/${job_id}/${scope_id}', '/report/${job_id}/${scope_id}'],
+        'constants': [('job_id', '"job-1"'), ('scope_id', '"123456789"')],
+        'urls': ['/api/status/${job_id}/${scope_id}', '/report/${job_id}/${scope_id}', '/report/${job_id}/${scope_id}/csv'],
     }
     assert 'const scope = "organization";' in normalized_lines(page)  # new in v14.2: the card names the scope
+    assert 'signed_csv_url' not in page
 
-    (legacy_blob, legacy_kwargs), (blob, kwargs) = gcp.bucket.signed_url_requests
-    assert blob == legacy_blob == 'job-1/123456789_report.csv'
-    expirations = legacy_kwargs.pop('expiration'), kwargs.pop('expiration')
-    assert kwargs == legacy_kwargs == {'version': 'v4', 'method': 'GET', 'service_account_email': SA_EMAIL,
-                                       'access_token': fakes.FakeCredentials.token}
-    for expiration in expirations:  # one hour from now
-        assert abs(expiration - datetime.now(timezone.utc) - timedelta(hours=1)) < timedelta(minutes=1)
-    assert gcp.auth_scopes[startup_auth_calls:] == [['https://www.googleapis.com/auth/cloud-platform']] * 2
-
-
-def test_status_page_without_a_signed_url(legacy_client, client, gcp):
-    gcp.bucket.signing_error = RuntimeError('Permission iam.serviceAccounts.signBlob denied')
-    response = assert_parity(legacy_client, client, 'GET', '/status/job-1/project/my-project', facts=page_facts)
-    assert response.status_code == 200
-    assert 'const signed_csv_url = "#";' in normalized_lines(response.get_data(as_text=True))
+    ((legacy_blob, legacy_kwargs),) = gcp.bucket.signed_url_requests  # legacy signed; the new page asked for nothing
+    assert legacy_blob == 'job-1/123456789_report.csv'
+    assert legacy_kwargs['service_account_email'] == SA_EMAIL
+    assert gcp.auth_scopes[startup_auth_calls:] == [['https://www.googleapis.com/auth/cloud-platform']]  # legacy's only
 
 
 def test_status_page_escapes_url_values(legacy_client, client):
     path = f'/status/{quote(XSS, safe="")}/project/{quote(XSS, safe="")}'
-    response = assert_parity(legacy_client, client, 'GET', path, facts=page_facts)
+    response = assert_parity(legacy_client, client, 'GET', path, facts=status_page_facts)
     assert response.status_code == 200
     page = response.get_data(as_text=True)
     assert XSS not in page

@@ -199,6 +199,18 @@ RESILIENCE_NOTHING_FOUND = {
     "MIG Resilience (Zonal)": "No zonal managed instance groups found.",
     "Disk Snapshot Resilience": "No single-region disk snapshots found.",
 }
+# The multi-region storage locations Compute Engine offers for snapshots. A snapshot has one storage location,
+# a region ("asia-south1") or one of these; a multi-region is geo-redundant by construction (v16.1 — before, the
+# rule counted the locations, and one location is all a snapshot ever has, so every snapshot was flagged).
+MULTI_REGIONS = ("asia", "eu", "us")
+
+
+def is_single_region(storage_locations):
+    """Whether a snapshot's ``storageLocations`` keep it in a single region: none of them is a multi-region.
+
+    An empty or missing list counts as single-region (the conservative reading; it should not occur).
+    """
+    return not any(str(location).lower() in MULTI_REGIONS for location in storage_locations or ())
 
 
 def project_of_asset(asset_name):
@@ -211,7 +223,8 @@ def check_resilience_assets(scope, scope_id, job_id, *, sink):
     """
     Checks the Cloud SQL instances, managed instance groups and disk snapshots under the scanned
     scope for resilience best practices: Cloud SQL high availability, automated backups, backup
-    retention and point-in-time recovery; zonal (single-zone) MIGs; snapshots stored in one region.
+    retention and point-in-time recovery; zonal (single-zone) MIGs; snapshots kept in a single region
+    (a multi-region storage location — ``MULTI_REGIONS`` — passes).
 
     The three Asset Inventory listings run under ``organizations/``, ``folders/`` or
     ``projects/<scope_id>`` (v15.6; before, under the organization only, so the check was
@@ -282,12 +295,13 @@ def check_resilience_assets(scope, scope_id, job_id, *, sink):
     else:
         write(MIG_RESILIENCE_CHECK, zonal_migs)
 
-    # Disk snapshots: one row per snapshot kept in a single storage location (before v15.6, one row counting them).
+    # Disk snapshots: one row per snapshot kept in a single region (v15.6: one row per snapshot, a count row before;
+    # v16.1: a multi-region location passes — the rule read the number of locations until then).
     try:
         single_region = [{"Project": project_of_asset(a.name), "Snapshot": a.resource.data.get('name'),
                           "Location": ", ".join(a.resource.data.get("storageLocations", [])) or "unknown"}
                          for a in list_assets(asset_client, "compute.googleapis.com/Snapshot")
-                         if len(a.resource.data.get("storageLocations", [])) <= 1]
+                         if is_single_region(a.resource.data.get("storageLocations"))]
     except Exception as e:
         write_errors((SNAPSHOT_RESILIENCE_CHECK,), e)
     else:

@@ -14,7 +14,8 @@
 """Resilience of Critical Assets (v15.6): the three Asset Inventory listings run under the scanned scope,
 each of the six check names ends the scan with a verdict, and a failed listing is reported under the names
 it served. Before v15.6 the check was organization-only, wrote rows only when it found something, and
-reported any failure under a seventh name ("Resilience Asset Checks")."""
+reported any failure under a seventh name ("Resilience Asset Checks"). v16.1: Disk Snapshot Resilience
+reads the kind of a snapshot's storage location (a multi-region passes) instead of counting locations."""
 import pytest
 from google.api_core.exceptions import PermissionDenied
 from google.cloud import asset_v1
@@ -22,8 +23,8 @@ from google.cloud import asset_v1
 import fakes
 from app.checks.categories import CATEGORY_MAP
 from app.checks.reliability import (
-    MIG_RESILIENCE_CHECK, RESILIENCE_CHECKS, RESILIENCE_NOTHING_FOUND, SNAPSHOT_RESILIENCE_CHECK,
-    SQL_RESILIENCE_CHECKS, check_resilience_assets,
+    MIG_RESILIENCE_CHECK, MULTI_REGIONS, RESILIENCE_CHECKS, RESILIENCE_NOTHING_FOUND, SNAPSHOT_RESILIENCE_CHECK,
+    SQL_RESILIENCE_CHECKS, check_resilience_assets, is_single_region,
 )
 from app.services import gcp as gcp_clients
 
@@ -111,8 +112,38 @@ def test_findings_keep_their_rows_and_name_each_snapshot(gcp):
     assert checks['Cloud SQL PITR']['Finding'] == [{'Project': 'p1', 'Instance': 'db-b'}]
     assert checks[MIG_RESILIENCE_CHECK]['Finding'] == [{'Project': 'p1', 'MIG Name': 'web-mig'}]
     # v15.6: one row per single-region snapshot (a count row before), so the report and the action plan name it.
+    # v16.1: 'weekly' is absent because its location is a multi-region (until then: because it listed two).
     assert checks[SNAPSHOT_RESILIENCE_CHECK]['Finding'] == [{'Project': 'p1', 'Snapshot': 'nightly', 'Location': 'us-central1'},
                                                             {'Project': 'p2', 'Snapshot': 'orphan', 'Location': 'unknown'}]
+
+
+# --- v16.1: the kind of the storage location decides, not the count ---
+
+@pytest.mark.parametrize('locations', [['asia'], ['us'], ['eu'], ['ASIA'], ['us', 'eu'], ['europe-west1', 'eu']])
+def test_a_snapshot_in_a_multi_region_is_resilient(locations, gcp):
+    """A snapshot has one storage location — a region or a multi-region — so counting them flagged every snapshot
+    (an organization's 56 of 56, all in ``asia``, during the v15.6 rollout). A multi-region is geo-redundant."""
+    assert is_single_region(locations) is False
+    gcp.assets.add_asset(*snapshot('p1', 'nightly', locations))
+    finding = run().by_check[SNAPSHOT_RESILIENCE_CHECK]
+    assert (finding['Status'], finding['Finding']) == ('Compliant', [{'Status': 'No single-region disk snapshots found.'}])
+
+
+@pytest.mark.parametrize('locations, shown', [(['asia-south1'], 'asia-south1'), (['us-central1'], 'us-central1'),
+                                              (['europe-west1'], 'europe-west1'), ([], 'unknown'), (None, 'unknown')])
+def test_a_snapshot_in_a_single_region_is_flagged_with_its_location(locations, shown, gcp):
+    """A region is flagged as before; no location at all (it should not occur) is read conservatively, as before."""
+    assert is_single_region(locations) is True
+    asset_type, name, data = snapshot('p1', 'nightly', locations or [])
+    if locations is None:
+        del data['storageLocations']
+    gcp.assets.add_asset(asset_type, name, data)
+    finding = run().by_check[SNAPSHOT_RESILIENCE_CHECK]
+    assert (finding['Status'], finding['Finding']) == ('Action Required', [{'Project': 'p1', 'Snapshot': 'nightly', 'Location': shown}])
+
+
+def test_the_multi_regions_are_the_three_compute_engine_offers():
+    assert MULTI_REGIONS == ('asia', 'eu', 'us')
 
 
 def test_a_folder_or_project_scan_sees_only_its_own_assets(gcp):

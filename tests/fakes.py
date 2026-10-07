@@ -18,6 +18,7 @@ up at call time. The legacy module and the new package reach GCP through
 different import styles, and this way both talk to the same fakes.
 """
 import copy
+import io
 import json
 import threading
 from datetime import timedelta
@@ -64,7 +65,28 @@ class FakeBlob:
         self.bucket.check()
         return self.name in self.bucket.objects
 
+    def _bytes(self):
+        data, _ = self.bucket.objects[self.name]
+        return data if isinstance(data, bytes) else data.encode()
+
+    def reload(self):
+        self.bucket.check()
+        if self.name not in self.bucket.objects:
+            raise NotFound(f'404 object {self.name} not found')
+
+    @property
+    def size(self):
+        return len(self._bytes()) if self.name in self.bucket.objects else None
+
+    def open(self, mode='r', chunk_size=None, **kwargs):
+        """``blob.open('rb')``: a file over the object's bytes (v16.1: the CSV route streams through it)."""
+        assert mode == 'rb', mode
+        self.bucket.check()
+        self.bucket.opened.append((self.name, chunk_size))
+        return io.BytesIO(self._bytes())
+
     def generate_signed_url(self, **kwargs):
+        """Only the legacy app signs (the status page's CSV link until v16.1); the parity suite still renders it."""
         if self.bucket.signing_error:
             raise self.bucket.signing_error
         self.bucket.signed_url_requests.append((self.name, kwargs))
@@ -85,6 +107,7 @@ class FakeBucket:
         self.uploads = []
         self.deleted = []
         self.signed_url_requests = []
+        self.opened = []  # (object name, chunk size) of every blob.open() (v16.1: the CSV route)
         self.error = None  # raised by every read/write/list when set
         self.signing_error = None
 

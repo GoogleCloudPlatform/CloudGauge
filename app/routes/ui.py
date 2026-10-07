@@ -14,7 +14,7 @@
 """Pages: the landing form, scan submission, the status page, the report viewer, and the CSV download."""
 import uuid
 
-from flask import Blueprint, Response, redirect, render_template, request, url_for
+from flask import Blueprint, Response, redirect, render_template, request, stream_with_context, url_for
 from werkzeug.utils import secure_filename
 
 from app import identity
@@ -22,6 +22,9 @@ from app.extensions import get_services
 from app.services import tasks
 
 bp = Blueprint("ui", __name__)
+# How much of a CSV report the download route holds at a time (v16.1: the status page's Download CSV
+# goes through this route, so an organization-sized CSV must not sit whole in the web service's memory).
+CSV_CHUNK_BYTES = 1024 * 1024
 
 
 @bp.route('/', methods=['GET'])
@@ -57,22 +60,14 @@ def create_scan_task():
 def get_status(job_id, scope, scope_id):
     """
     Renders the status page that users see while a scan is running.
-    It simulates progress and polls the `/api/status` endpoint. Also generates
-    a signed URL for the CSV download.
+    It simulates progress and polls the `/api/status` endpoint; when the scan
+    completes it links to the report and to the CSV download route (v16.1 —
+    before, a signed Cloud Storage URL good for an hour, minted here).
     """
     if not scope_id:
         return "Error:  ID is missing from the status URL.", 400
 
-    services = get_services()
-    signed_csv_url = "#"
-    try:
-        signed_csv_url = services.results_store.generate_signed_csv_url(
-            job_id, scope_id, services.settings.service_account_email)
-    except Exception as e:
-        print(f"Could not generate signed URL for job {job_id}: {e}")
-
-    # Pass the signed URL into the template
-    return render_template("status.html", job_id=job_id, scope_id=scope_id, scope=scope, signed_csv_url=signed_csv_url)
+    return render_template("status.html", job_id=job_id, scope_id=scope_id, scope=scope)
 
 
 @bp.route('/report/<string:job_id>/<string:scope_id>')
@@ -91,20 +86,31 @@ def view_report(job_id, scope_id):
 
 @bp.route('/report/<string:job_id>/<string:scope_id>/csv')
 def download_report_csv(job_id, scope_id):
-    """Serves the complete CSV report as a download.
+    """Serves the complete CSV report as a download, streamed from the bucket.
 
-    The HTML report links here: its tables include at most
-    ``MAX_ROWS_PER_CHECK`` rows of a check, and the status page's signed CSV
-    URL expires after an hour.
+    The HTML report's toolbar and the status page link here (the status page
+    since v16.1; before, it carried a signed Cloud Storage URL that expired
+    after an hour). The report's tables include at most ``MAX_ROWS_PER_CHECK``
+    rows of a check; the CSV has every row, so it is read ``CSV_CHUNK_BYTES``
+    at a time and sent with the object's size as ``Content-Length``.
     """
     try:
-        csv_report = get_services().results_store.read_report(job_id, scope_id, extension="csv")
-        if csv_report is None:
+        opened = get_services().results_store.open_report(job_id, scope_id, extension="csv", chunk_size=CSV_CHUNK_BYTES)
+        if opened is None:
             return "CSV report not found or is still generating.", 404
-        filename = f"cloudgauge_{secure_filename(scope_id) or 'report'}_{secure_filename(job_id) or 'job'}.csv"
-        return Response(csv_report, mimetype="text/csv",
-                        headers={"Content-Disposition": f'attachment; filename="{filename}"'})
-
+        csv_file, size = opened
     except Exception as e:
         print(f"Error fetching CSV report {job_id} from GCS: {e}")
         return "Could not retrieve the CSV report.", 500
+
+    def chunks():
+        with csv_file:
+            while True:
+                chunk = csv_file.read(CSV_CHUNK_BYTES)
+                if not chunk:
+                    break
+                yield chunk
+
+    filename = f"cloudgauge_{secure_filename(scope_id) or 'report'}_{secure_filename(job_id) or 'job'}.csv"
+    return Response(stream_with_context(chunks()), mimetype="text/csv",
+                    headers={"Content-Disposition": f'attachment; filename="{filename}"', "Content-Length": str(size)})

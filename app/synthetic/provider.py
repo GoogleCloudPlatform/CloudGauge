@@ -566,7 +566,8 @@ class SyntheticGcp:
         return found
 
     def _resilience_assets(self, profile, asset_types):
-        """A project's Cloud SQL instances, managed instance groups and single-region snapshots, as Asset Inventory lists them."""
+        """A project's Cloud SQL instances, managed instance groups and snapshots (single-region and, since v16.1,
+        multi-region), as Asset Inventory lists them."""
         found = []
         if "sqladmin.googleapis.com/Instance" in asset_types:
             found += [self._sql_asset(profile, sql) for sql in profile.sql_instances]
@@ -574,9 +575,11 @@ class SyntheticGcp:
             found += [SimpleNamespace(name=f"//compute.googleapis.com/projects/{profile.project_id}/zones/{zone}/instanceGroupManagers/mig-{zone}",
                                       resource=SimpleNamespace(data={"name": f"mig-{zone}", "zone": zone})) for zone in profile.mig_zones]
         if "compute.googleapis.com/Snapshot" in asset_types:
-            found += [SimpleNamespace(name=f"//compute.googleapis.com/projects/{profile.project_id}/global/snapshots/snap-{i}",
-                                      resource=SimpleNamespace(data={"name": f"snap-{i}", "storageLocations": ["us-central1"]}))
-                      for i in range(profile.single_region_snapshots)]
+            snapshots = [(f"snap-{i}", "us-central1") for i in range(profile.single_region_snapshots)]
+            snapshots += [(f"snap-mr-{i}", ("asia", "us", "eu")[i % 3]) for i in range(profile.multi_region_snapshots)]
+            found += [SimpleNamespace(name=f"//compute.googleapis.com/projects/{profile.project_id}/global/snapshots/{name}",
+                                      resource=SimpleNamespace(data={"name": name, "storageLocations": [location]}))
+                      for name, location in snapshots]
         return found
 
     @staticmethod

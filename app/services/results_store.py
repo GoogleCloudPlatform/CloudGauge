@@ -44,9 +44,8 @@ import concurrent.futures
 import json
 import logging
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
-import google.auth.transport.requests
 from google.api_core.exceptions import PreconditionFailed
 
 from app.services import gcp
@@ -233,42 +232,21 @@ class GcsResultsStore:
             return None
         return blob.download_as_text()
 
-    def generate_signed_csv_url(self, job_id, scope_id, signer_email):
-        """Returns a V4 signed GET URL for the CSV report, valid for 1 hour.
+    def open_report(self, job_id, scope_id, extension="html", *, chunk_size=1024 * 1024):
+        """Opens a report for reading in chunks: ``(file, size)``, or ``None`` if it doesn't exist (yet).
 
-        Errors are raised; the status page falls back to ``"#"``.
+        ``file`` is a binary file object that fetches ``chunk_size`` bytes of the object at a time
+        (pinned to the generation whose ``size`` is returned), so a CSV with every row of a large
+        organization streams through the web service instead of sitting in its memory. The caller
+        closes it. Errors are raised. v16.1: before, the status page's CSV link was a signed Cloud
+        Storage URL, good for an hour for whoever held it, which needed the service account to sign
+        as itself (``roles/iam.serviceAccountTokenCreator`` on itself).
         """
-        # --- START SIGNED LOGIC ---
-
-        # 1. Get the default credentials from the metadata server
-        creds, _ = gcp.auth_default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
-
-        # 2. Manually refresh them to get a usable access token
-        auth_req = google.auth.transport.requests.Request()
-        creds.refresh(auth_req)
-        access_token = creds.token
-
-        # 3. The service account email (signer_email) is passed in by the caller
-        #    (legacy: read from the SERVICE_ACCOUNT_EMAIL environment variable here)
-
-        # 4. Generate the signed URL, providing BOTH the email and the access token
-        #    This tells the library: "Use this token to authorize a request for
-        #    'signer_email' to sign the following content."
-        bucket = self.bucket()
-        csv_blob_name = f"{job_id}/{scope_id}_report.csv"
-        blob = bucket.blob(csv_blob_name)
-
-        expiration_time = datetime.now(timezone.utc) + timedelta(hours=1)
-
-        signed_csv_url = blob.generate_signed_url(
-            version="v4",
-            expiration=expiration_time,
-            method="GET",
-            service_account_email=signer_email,
-            access_token=access_token  # <-- Pass the fetched token here
-        )
-        # --- END SIGNED LOGIC ---
-        return signed_csv_url
+        blob = self.bucket().blob(f"{job_id}/{scope_id}_report.{extension}")
+        if not blob.exists():
+            return None
+        blob.reload()
+        return blob.open("rb", chunk_size=chunk_size), blob.size
 
     def cleanup_intermediate(self, job_id, shard_id=None):
         """Deletes all intermediate files for the job (or one shard) and returns how many were deleted.
