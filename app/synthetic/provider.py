@@ -55,7 +55,8 @@ from googleapiclient.errors import HttpError
 from app.checks.cost import COST_RECOMMENDERS
 from app.checks.network import NETWORK_INSIGHT_TYPES
 from app.synthetic.world import (ADVISORY_TYPES, BEST_PRACTICES_CSV, GKE_CHANNEL_MINORS, GKE_MINORS, GKE_VERSIONS, HOST_PROJECT,
-                                 INCIDENTS, ORG_ADVISORIES, PROJECT_ADVISORY, QUOTA_METRICS, REGIONS, SyntheticOrg, gke_version)
+                                 INCIDENTS, ORG_ADVISORIES, ORG_IAM_RECOMMENDATION, PROJECT_ADVISORY, QUOTA_METRICS, REGIONS,
+                                 SyntheticOrg, gke_version)
 
 # Median latency of each API relative to ``latency_ms``.
 API_LATENCY_SCALE = {
@@ -70,6 +71,10 @@ COST_RECOMMENDER_IDS = {rec_id: check for check, (rec_id, _) in COST_RECOMMENDER
 NETWORK_INSIGHT_IDS = {insight_id: check for check, insight_id in NETWORK_INSIGHT_TYPES.items()}
 UNATTENDED_RECOMMENDER = "google.resourcemanager.projectUtilization.Recommender"
 RECENT_CHANGE_INSIGHT = "google.cloud.RecentChangeInsight"
+# v17
+IAM_RECOMMENDER = "google.iam.policy.Recommender"
+QUOTA_RECOMMENDER = "google.resourcemanager.serviceLimit.Recommender"
+MACHINE_TYPE_URL = "https://www.googleapis.com/compute/v1/projects/{project}/zones/{zone}/machineTypes/{machine_type}"
 
 
 class CallMetrics:
@@ -314,7 +319,7 @@ class SyntheticGcp:
         if profile is None:
             raise _http_error(404, f"Project {kw['projectId']} not found")
         return {"projectId": profile.project_id, "name": profile.display_name, "lifecycleState": "ACTIVE",
-                "projectNumber": profile.project_number}
+                "projectNumber": profile.project_number, "labels": dict(profile.labels)}
 
     def _h_cloudresourcemanager_projects_getIamPolicy(self, kw, project_id):
         self.call("cloudresourcemanager", "projects.getIamPolicy", project_id=project_id, style="http")
@@ -370,11 +375,66 @@ class SyntheticGcp:
             instance = {
                 "name": vm.name, "status": "RUNNING",
                 "zone": f"https://www.googleapis.com/compute/v1/projects/{project_id}/zones/{vm.zone}",
+                "machineType": MACHINE_TYPE_URL.format(project=project_id, zone=vm.zone, machine_type=vm.machine_type),
                 "networkInterfaces": [{"network": "vpc-main", **({"accessConfigs": [{"natIP": "203.0.113.10"}]} if vm.external_ip else {})}],
                 "labels": {}, "metadata": {"items": ([{"key": "created-by", "value": f"mig-{vm.zone}"}] if vm.in_mig else [])},
             }
             items.setdefault(f"zones/{vm.zone}", {"instances": []})["instances"].append(instance)
         return {"items": items}
+
+    # --- v17: reservations, commitments and the capacity log ---
+
+    def _h_compute_reservations_aggregatedList(self, kw, project_id):
+        self.call("compute", "reservations.aggregatedList", project_id=project_id, style="http")
+        profile, items = self.world.project(project_id), {}
+        for i, (zone, machine_type, count, in_use) in enumerate(profile.reservations):
+            items.setdefault(f"zones/{zone}", {"reservations": []})["reservations"].append({
+                "name": f"reservation-{i}", "zone": f"https://www.googleapis.com/compute/v1/projects/{project_id}/zones/{zone}", "status": "READY",
+                "specificReservation": {"count": str(count), "inUseCount": str(in_use),
+                                        "instanceProperties": {"machineType": machine_type}}})
+        return {"items": items}
+
+    def _h_compute_futureReservations_aggregatedList(self, kw, project_id):
+        self.call("compute", "futureReservations.aggregatedList", project_id=project_id, style="http")
+        profile = self.world.project(project_id)
+        if not profile.future_reservation:
+            return {"items": {}}
+        zone = profile.zones[0]
+        return {"items": {f"zones/{zone}": {"futureReservations": [{
+            "name": "future-0", "zone": zone, "status": {"procurementStatus": "APPROVED"},
+            "timeWindow": {"startTime": _iso(-30), "endTime": _iso(-395)},
+            "specificSkuProperties": {"totalCount": "8", "instanceProperties": {"machineType": "a2-highgpu-1g",
+                                                                                 "guestAccelerators": [{"acceleratorType": "nvidia-tesla-a100", "acceleratorCount": 1}]}}}]}}}
+
+    def _h_compute_regionCommitments_aggregatedList(self, kw, project_id):
+        self.call("compute", "regionCommitments.aggregatedList", project_id=project_id, style="http")
+        profile, items = self.world.project(project_id), {}
+        for i, (region, plan, vcpus, memory_gb, days_left, auto_renew) in enumerate(profile.commitments):
+            items.setdefault(f"regions/{region}", {"commitments": []})["commitments"].append({
+                "name": f"commitment-{i}", "region": region, "plan": plan, "status": "ACTIVE", "autoRenew": auto_renew,
+                "startTimestamp": _iso(365 - days_left), "endTimestamp": _iso(-days_left),
+                "resources": [{"type": "VCPU", "amount": str(vcpus)}, {"type": "MEMORY", "amount": str(memory_gb * 1024)}]})
+        return {"items": items}
+
+    def _h_logging_entries_list(self, kw, project_id):
+        """``entries.list`` over one project: the Compute Engine operations that failed for capacity or quota (v17)."""
+        body = kw.get("body") or {}
+        names = [name for name in body.get("resourceNames", []) if str(name).startswith("projects/")]
+        project_id = names[0].split("/", 1)[1] if names else None
+        self.call("logging", "entries.list", project_id=project_id, style="http")
+        profile = self.world.project(project_id) if project_id else None
+        entries = []
+        for zone, machine_type, kind, days_ago, count in (profile.capacity_events if profile else ()):
+            message = (f"ZONE_RESOURCE_POOL_EXHAUSTED: The zone '{zone}' does not have enough resources available to fulfill the request."
+                       if kind == "stockout" else f"QUOTA_EXCEEDED: Quota 'CPUS' exceeded in region {'-'.join(zone.split('-')[:-1])}.")
+            for n in range(count):
+                entries.append({
+                    "timestamp": _iso(days_ago + n / 24), "logName": f"projects/{project_id}/logs/cloudaudit.googleapis.com%2Factivity",
+                    "resource": {"type": "gce_instance", "labels": {"project_id": project_id, "zone": zone}},
+                    "protoPayload": {"methodName": "v1.compute.instances.insert", "status": {"code": 8, "message": message},
+                                     "resourceName": f"projects/{project_id}/zones/{zone}/instances/vm-new-{n}",
+                                     "request": {"machineType": MACHINE_TYPE_URL.format(project=project_id, zone=zone, machine_type=machine_type)}}})
+        return {"entries": entries}
 
     def _h_compute_addresses_aggregatedList(self, kw, project_id):
         self.call("compute", "addresses.aggregatedList", project_id=project_id, style="http")
@@ -406,8 +466,9 @@ class SyntheticGcp:
         self.call("compute", "regions.get", project_id=project_id, style="http")
         profile, region = self.world.project(project_id), kw["region"]
         hot = {metric: (usage, limit) for r, metric, usage, limit in profile.hot_quotas if r == region}
-        return {"name": region, "quotas": [{"metric": m, "usage": float(hot.get(m, (3, 100))[0]), "limit": float(hot.get(m, (3, 100))[1])}
-                                           for m in QUOTA_METRICS]}
+        quotas = [{"metric": m, "usage": float(hot.get(m, (3, 100))[0]), "limit": float(hot.get(m, (3, 100))[1])} for m in QUOTA_METRICS]
+        quotas += [{"metric": metric, "usage": float(usage), "limit": float(limit)} for r, metric, usage, limit in profile.gpu_quota if r == region]
+        return {"name": region, "quotas": quotas}
 
     def _h_compute_subnetworks_list(self, kw, project_id):
         self.call("compute", "subnetworks.list", project_id=project_id, style="http")
@@ -566,8 +627,8 @@ class SyntheticGcp:
         return found
 
     def _resilience_assets(self, profile, asset_types):
-        """A project's Cloud SQL instances, managed instance groups and snapshots (single-region and, since v16.1,
-        multi-region), as Asset Inventory lists them."""
+        """A project's Cloud SQL instances, managed instance groups, snapshots (single-region and, since v16.1,
+        multi-region; v17: old and orphaned ones too) and disks (v17), as Asset Inventory lists them."""
         found = []
         if "sqladmin.googleapis.com/Instance" in asset_types:
             found += [self._sql_asset(profile, sql) for sql in profile.sql_instances]
@@ -575,16 +636,31 @@ class SyntheticGcp:
             found += [SimpleNamespace(name=f"//compute.googleapis.com/projects/{profile.project_id}/zones/{zone}/instanceGroupManagers/mig-{zone}",
                                       resource=SimpleNamespace(data={"name": f"mig-{zone}", "zone": zone})) for zone in profile.mig_zones]
         if "compute.googleapis.com/Snapshot" in asset_types:
-            snapshots = [(f"snap-{i}", "us-central1") for i in range(profile.single_region_snapshots)]
-            snapshots += [(f"snap-mr-{i}", ("asia", "us", "eu")[i % 3]) for i in range(profile.multi_region_snapshots)]
+            # (name, storage location, age in days, source disk): the source is the project's first VM's boot disk,
+            # or a disk that no longer exists for an orphan.
+            disk = self._disk_url(profile, profile.vms[0]) if profile.vms else ""
+            snapshots = [(f"snap-{i}", "us-central1", 10 + i, disk) for i in range(profile.single_region_snapshots)]
+            snapshots += [(f"snap-mr-{i}", ("asia", "us", "eu")[i % 3], 20 + i, disk) for i in range(profile.multi_region_snapshots)]
+            snapshots += [(name, "us", age, disk) for name, age in profile.old_snapshots]
+            snapshots += [(name, "us", 30, f"https://www.googleapis.com/compute/v1/projects/{profile.project_id}/zones/{profile.zones[0]}/disks/deleted-disk")
+                          for name in profile.orphan_snapshots]
             found += [SimpleNamespace(name=f"//compute.googleapis.com/projects/{profile.project_id}/global/snapshots/{name}",
-                                      resource=SimpleNamespace(data={"name": name, "storageLocations": [location]}))
-                      for name, location in snapshots]
+                                      resource=SimpleNamespace(data={"name": name, "storageLocations": [location], "creationTimestamp": _iso(age),
+                                                                     "diskSizeGb": "50", "sourceDisk": source, "status": "READY"}))
+                      for name, location, age, source in snapshots]
+        if "compute.googleapis.com/Disk" in asset_types:
+            found += [SimpleNamespace(name=f"//compute.googleapis.com/projects/{profile.project_id}/zones/{vm.zone}/disks/{vm.name}",
+                                      resource=SimpleNamespace(data={"name": vm.name, "selfLink": self._disk_url(profile, vm), "sizeGb": "50"}))
+                      for vm in profile.vms]
         return found
 
     @staticmethod
+    def _disk_url(profile, vm):
+        return f"https://www.googleapis.com/compute/v1/projects/{profile.project_id}/zones/{vm.zone}/disks/{vm.name}"
+
+    @staticmethod
     def _sql_asset(profile, sql):
-        data = {"name": sql.name, "settings": {
+        data = {"name": sql.name, "databaseVersion": sql.database_version, "settings": {
             "availabilityType": "ZONAL" if sql.zonal else "REGIONAL",
             "backupConfiguration": {"enabled": sql.backups, "pointInTimeRecoveryEnabled": sql.pitr, "retainedBackupsCount": sql.retained_backups}}}
         return SimpleNamespace(name=f"//cloudsql.googleapis.com/projects/{profile.project_id}/instances/{sql.name}",
@@ -596,6 +672,8 @@ class SyntheticGcp:
         project_id = _project_of(parent)
         self.call("recommender", "recommendations.list", project_id=project_id)
         recommender_id = parent.rsplit("/recommenders/", 1)[-1]
+        if recommender_id == IAM_RECOMMENDER:
+            return self._iam_recommendations(parent, project_id)
         if project_id is None:
             if recommender_id != UNATTENDED_RECOMMENDER:
                 return []
@@ -604,9 +682,17 @@ class SyntheticGcp:
                 "description": f"Project `{pid}` has been unattended for 90 days. Consider cleaning it up.",
                 "content": {"operation_groups": [{"operations": [{"action": "remove", "resource": f"//cloudresourcemanager.googleapis.com/projects/{pid}"}]}]},
             }) for i, pid in enumerate(self.world.unattended_project_ids())]
+        profile = self.world.project(project_id)
+        if recommender_id == QUOTA_RECOMMENDER:
+            if not profile.quota_recommendation:
+                return []
+            return [recommender_v1.Recommendation({"name": f"{parent}/recommendations/0", "recommender_subtype": "REVIEW_HIGH_QUOTA_UTILIZATION",
+                                                   "description": f"Increase the CPUS quota in {REGIONS[0]} from 100 to 200: usage is approaching the limit.",
+                                                   "content": {"overview": {"serviceName": "compute.googleapis.com", "quotaName": "CPUS",
+                                                                            "metric": "compute.googleapis.com/cpus", "currentLimit": 100,
+                                                                            "dimensions": f"region:{REGIONS[0]}", "allowsQuotaIncreaseRequest": True}}})]
         check = COST_RECOMMENDER_IDS.get(recommender_id)
         location = parent.split("/locations/")[1].split("/")[0]
-        profile = self.world.project(project_id)
         recos = profile.cost_recommendations.get((check, location), []) if check else []
         return [recommender_v1.Recommendation({
             "name": f"{parent}/recommendations/{i}", "description": description, "recommender_subtype": subtype,
@@ -614,6 +700,30 @@ class SyntheticGcp:
             "content": {"overview": {"resourceName": resource},
                         "operation_groups": [{"operations": [{"action": "replace", "resource": f"//compute.googleapis.com/projects/{project_id}/zones/{location}/instances/{resource}"}]}]},
         }) for i, (resource, subtype, description, usd) in enumerate(recos)]
+
+    def _iam_recommendations(self, parent, project_id):
+        """The IAM recommender's recommendations (v17): the project's unused primitive roles; one at the organization; none for a folder."""
+        if project_id is not None:
+            resource, items = f"//cloudresourcemanager.googleapis.com/projects/{project_id}", self.world.project(project_id).iam_recommendations
+        elif parent.startswith("organizations/"):
+            resource, items = f"//cloudresourcemanager.googleapis.com/organizations/{self.world.org_id}", (ORG_IAM_RECOMMENDATION,)
+        else:
+            return []
+        recommendations = []
+        for i, (member, role, replacement) in enumerate(items):
+            operations = [{"action": "remove", "resource_type": "cloudresourcemanager.googleapis.com/Project", "resource": resource,
+                           "path": "/iamPolicy/bindings/*/members/*",
+                           "path_filters": {"/iamPolicy/bindings/*/role": role, "/iamPolicy/bindings/*/members/*": member}}]
+            if replacement:
+                operations.append({"action": "add", "resource_type": "cloudresourcemanager.googleapis.com/Project", "resource": resource,
+                                   "path": "/iamPolicy/bindings/*/members/-", "value": member,
+                                   "path_filters": {"/iamPolicy/bindings/*/role": replacement}})
+            description = (f"Replace the current role {role} with a smaller role {replacement} to cover the permissions needed by {member}."
+                           if replacement else f"Remove the role {role} from {member}: no permission of it was used in the last 90 days.")
+            recommendations.append(recommender_v1.Recommendation({
+                "name": f"{parent}/recommendations/{i}", "recommender_subtype": "REPLACE_ROLE" if replacement else "REMOVE_ROLE",
+                "description": description, "content": {"operation_groups": [{"operations": operations}]}}))
+        return recommendations
 
     def list_insights(self, parent):
         project_id = _project_of(parent)
@@ -759,6 +869,10 @@ class _BucketStub:
         self.name = bucket.name
         self.versioning_enabled = bucket.versioning
         self.iam_configuration = SimpleNamespace(uniform_bucket_level_access_enabled=bucket.ubla)
+        # v17: lifecycle rules and Autoclass, as google-cloud-storage exposes them
+        self.lifecycle_rules = [{"action": {"type": "SetStorageClass", "storageClass": "NEARLINE"}, "condition": {"age": 30}}] if bucket.lifecycle else []
+        self.autoclass_enabled = bucket.autoclass
+        self.storage_class = "STANDARD"
 
     def get_iam_policy(self, requested_policy_version=None):
         return self._p.bucket_iam_policy(self._project, self._bucket)

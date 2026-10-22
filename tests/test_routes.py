@@ -48,6 +48,9 @@ ROUTES = {
     '/sweep': ({'POST'}, None, 'worker.sweep_worker'),
     # New with the enterprise report layout (plan item 6b): the report links to the complete CSV.
     '/report/<string:job_id>/<string:scope_id>/csv': ({'GET'}, None, 'ui.download_report_csv'),
+    # v17: the scope's scans over time, and the endpoint Cloud Scheduler posts to (the worker's, like the task endpoints).
+    '/history/<string:scope>/<string:scope_id>': ({'GET'}, None, 'ui.view_history'),
+    '/scheduled-scan': ({'POST'}, None, 'worker.scheduled_scan'),
 }
 NEW_ENDPOINT = {legacy: new for _, legacy, new in ROUTES.values() if legacy}
 NEW_RULES = {rule for rule, (_, legacy, _) in ROUTES.items() if legacy is None}

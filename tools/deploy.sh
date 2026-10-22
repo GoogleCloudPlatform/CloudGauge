@@ -19,6 +19,11 @@
 #               service agent becomes its invoker.
 #   5. access   grant OPERATORS roles/iap.httpsResourceAccessor on SERVICE: that role is what
 #               lets a Google account sign in.
+#   6. export   with BIGQUERY_DATASET: create the dataset (in REGION) and let the service account load
+#               into it (WRITER on the dataset, roles/bigquery.jobUser on the project); every finished
+#               scan is then exported (README › History and analytics).
+#   7. schedule with SCHEDULES: create or update one Cloud Scheduler job per entry, posting to the
+#               worker's /scheduled-scan with the service account's OIDC token.
 #
 # Variables (only PROJECT_ID is required):
 #   PROJECT_ID        the project CloudGauge runs in
@@ -33,6 +38,12 @@
 #   OPERATORS         who may sign in, comma-separated: user:a@x.com, group:g@x.com, domain:x.com
 #   EXTRA_ENV         more variables for both services, comma-separated KEY=VALUE pairs
 #                     (README › Configuration Reference), e.g. GEMINI_MODEL=gemini-2.5-flash,SCAN_SHARD_SIZE=10
+#   BIGQUERY_DATASET  export every finished scan to this BigQuery dataset (created in REGION if missing)
+#   COST_ALLOCATION_LABELS
+#                     the label keys every project must carry, comma-separated (cost-center,environment,owner);
+#                     its own variable because EXTRA_ENV values cannot contain commas
+#   SCHEDULES         scheduled scans, semicolon-separated NAME=SCOPE/SCOPE_ID@CRON (cron in UTC), e.g.
+#                     "weekly-org=organization/123456789012@30 0 * * 1;nightly-prod=project/my-prod@0 2 * * *"
 #   SKIP_SETUP=1      skip step 1 (updating a deployment that works)
 #   SKIP_BUILD=1      skip step 2 and deploy IMAGE:TAG as it is (a tag an earlier build pushed)
 #   PROGRAMMATIC_ACCESS=1
@@ -63,7 +74,27 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TAG="${TAG:-$(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null || echo latest)}"
 OPERATORS="${OPERATORS:-}"
 EXTRA_ENV="${EXTRA_ENV:-}"
+BIGQUERY_DATASET="${BIGQUERY_DATASET:-}"
+COST_ALLOCATION_LABELS="${COST_ALLOCATION_LABELS:-}"
+SCHEDULES="${SCHEDULES:-}"
 DRY_RUN="${DRY_RUN:-0}"
+if [[ -n "$BIGQUERY_DATASET" && ! "$BIGQUERY_DATASET" =~ ^[A-Za-z0-9_]+$ ]]; then
+  echo "BIGQUERY_DATASET must be a dataset ID: letters, digits and underscores." >&2; exit 2
+fi
+
+# The schedules, parsed now so that a typo stops the script before it changes anything: NAME=SCOPE/SCOPE_ID@CRON.
+SCHEDULE_NAMES=(); SCHEDULE_SCOPES=(); SCHEDULE_IDS=(); SCHEDULE_CRONS=()
+if [[ -n "$SCHEDULES" ]]; then
+  IFS=';' read -r -a schedule_entries <<< "$SCHEDULES"
+  for entry in "${schedule_entries[@]+"${schedule_entries[@]}"}"; do
+    entry="$(printf '%s' "$entry" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+    [[ -z "$entry" ]] && continue
+    if [[ ! "$entry" =~ ^([A-Za-z0-9][A-Za-z0-9_-]{0,63})=(organization|folder|project)/([^@/[:space:]]+)@(.+)$ ]]; then
+      echo "SCHEDULES entry '${entry}' must be NAME=SCOPE/SCOPE_ID@CRON, e.g. weekly-org=organization/123456789012@30 0 * * 1" >&2; exit 2
+    fi
+    SCHEDULE_NAMES+=("${BASH_REMATCH[1]}"); SCHEDULE_SCOPES+=("${BASH_REMATCH[2]}"); SCHEDULE_IDS+=("${BASH_REMATCH[3]}"); SCHEDULE_CRONS+=("${BASH_REMATCH[4]}")
+  done
+fi
 
 # The operators as IAM principals, checked now so that a typo stops the script before it changes anything.
 MEMBERS=""
@@ -105,6 +136,9 @@ note "service account  ${SA_EMAIL}"
 note "image            ${IMAGE}:${TAG}"
 note "queue / bucket   ${QUEUE} / gs://${BUCKET}"
 note "operators        ${MEMBERS:-(none: grant access afterwards, see the end)}"
+note "BigQuery export  ${BIGQUERY_DATASET:-(off: set BIGQUERY_DATASET to export every scan)}"
+note "label keys       ${COST_ALLOCATION_LABELS:-(none: Cost Allocation Labels stays Informational)}"
+note "schedules        ${SCHEDULES:-(none)}"
 if [[ "$DRY_RUN" == 1 ]]; then note "DRY RUN: nothing is executed"; fi
 
 # --- project number and URLs ---------------------------------------------------------------------------------------
@@ -119,7 +153,10 @@ fi
 WORKER_URL="https://${WORKER_SERVICE}-${PROJECT_NUMBER}.${REGION}.run.app"
 WEB_URL="https://${SERVICE}-${PROJECT_NUMBER}.${REGION}.run.app"
 IAP_AGENT="service-${PROJECT_NUMBER}@gcp-sa-iap.iam.gserviceaccount.com"
-COMMON_ENV="PROJECT_ID=${PROJECT_ID},LOCATION=${REGION},TASK_QUEUE=${QUEUE},RESULTS_BUCKET=${BUCKET},SERVICE_ACCOUNT_EMAIL=${SA_EMAIL}${EXTRA_ENV:+,${EXTRA_ENV}}"
+# The services' variables, joined with "|" behind gcloud's "^|^" delimiter prefix so that a value may contain
+# commas (COST_ALLOCATION_LABELS). EXTRA_ENV is comma-separated pairs whose values have none, so its commas
+# become the separator.
+COMMON_ENV="^|^PROJECT_ID=${PROJECT_ID}|LOCATION=${REGION}|TASK_QUEUE=${QUEUE}|RESULTS_BUCKET=${BUCKET}|SERVICE_ACCOUNT_EMAIL=${SA_EMAIL}${EXTRA_ENV:+|${EXTRA_ENV//,/|}}${BIGQUERY_DATASET:+|BIGQUERY_DATASET=${BIGQUERY_DATASET}}${COST_ALLOCATION_LABELS:+|COST_ALLOCATION_LABELS=${COST_ALLOCATION_LABELS}}"
 
 # --- 1. setup -----------------------------------------------------------------------------------
 if [[ "${SKIP_SETUP:-0}" != 1 ]]; then
@@ -135,6 +172,8 @@ if [[ "${SKIP_SETUP:-0}" != 1 ]]; then
     advisorynotifications.googleapis.com essentialcontacts.googleapis.com compute.googleapis.com \
     container.googleapis.com sqladmin.googleapis.com osconfig.googleapis.com monitoring.googleapis.com \
     cloudasset.googleapis.com
+  # v17: scheduled scans, the BigQuery export.
+  g services enable cloudscheduler.googleapis.com bigquery.googleapis.com
 
   step "Service account ${SA_EMAIL}"
   if [[ "$DRY_RUN" == 1 ]] || ! gcloud --project "$PROJECT_ID" iam service-accounts describe "$SA_EMAIL" >/dev/null 2>&1; then
@@ -177,7 +216,7 @@ step "Deploying the worker ${WORKER_SERVICE} (Cloud Tasks only)"
 g run deploy "$WORKER_SERVICE" --region="$REGION" --platform=managed --image="${IMAGE}:${TAG}" \
   --service-account="$SA_EMAIL" --no-allow-unauthenticated --ingress=internal \
   --timeout=3600 --concurrency=4 --memory=2Gi \
-  --update-env-vars="${COMMON_ENV},CLOUDGAUGE_ROLE=worker,WORKER_URL=${WORKER_URL}" \
+  --update-env-vars="${COMMON_ENV}|CLOUDGAUGE_ROLE=worker|WORKER_URL=${WORKER_URL}" \
   --remove-env-vars=WORKER_AUDIENCE
 # The service account is the identity on every Cloud Tasks request; nobody else may invoke the worker.
 g run services add-iam-policy-binding "$WORKER_SERVICE" --region="$REGION" \
@@ -192,7 +231,7 @@ step "Deploying the web service ${SERVICE} behind Identity-Aware Proxy"
 g run deploy "$SERVICE" --region="$REGION" --platform=managed --image="${IMAGE}:${TAG}" \
   --service-account="$SA_EMAIL" --no-allow-unauthenticated --iap --invoker-iam-check --ingress=all \
   --timeout=600 --concurrency=80 --memory=1Gi \
-  --update-env-vars="${COMMON_ENV},CLOUDGAUGE_ROLE=web,WORKER_URL=${WORKER_URL},PROJECT_NUMBER=${PROJECT_NUMBER}" \
+  --update-env-vars="${COMMON_ENV}|CLOUDGAUGE_ROLE=web|WORKER_URL=${WORKER_URL}|PROJECT_NUMBER=${PROJECT_NUMBER}" \
   --remove-env-vars=WORKER_AUDIENCE
 # IAP forwards the signed-in person's request as its service agent; gcloud grants this with --iap,
 # making it explicit keeps the deployment complete if that step ever fails.
@@ -226,6 +265,60 @@ if [[ "${PROGRAMMATIC_ACCESS:-0}" == 1 ]]; then
   note "${ME} can now mint tokens:  python tools/iap_token.py ${SA_EMAIL} ${WEB_URL}"
 fi
 
+# --- 6. export (v17) ----------------------------------------------------------------------------
+if [[ -n "$BIGQUERY_DATASET" && "${SKIP_SETUP:-0}" != 1 ]]; then
+  CURRENT_STEP="export"
+  step "BigQuery dataset ${PROJECT_ID}:${BIGQUERY_DATASET} for the scan export"
+  if ! command -v bq >/dev/null 2>&1; then echo "bq (part of the Cloud SDK) is needed to create the dataset: gcloud components install bq" >&2; exit 2; fi
+  DATASET="${PROJECT_ID}:${BIGQUERY_DATASET}"
+  if [[ "$DRY_RUN" == 1 ]]; then
+    note "+ bq mk --dataset --location=${REGION} ${DATASET}; grant WRITER to ${SA_EMAIL}; roles/bigquery.jobUser on ${PROJECT_ID}"
+  else
+    if ! bq --project_id="$PROJECT_ID" show --dataset "$DATASET" >/dev/null 2>&1; then
+      bq --project_id="$PROJECT_ID" --location="$REGION" mk --dataset --description="CloudGauge scan history: one row per scan (scans) and per finding (findings)" "$DATASET"
+    fi
+    # WRITER on the dataset (what roles/bigquery.dataEditor grants, on this dataset alone): bq has no
+    # add-iam-policy-binding for datasets, so the access list is read, extended and written back.
+    if ! command -v python3 >/dev/null 2>&1; then
+      echo "python3 is needed to edit the dataset's access list; grant ${SA_EMAIL} WRITER on ${DATASET} in the console instead." >&2; exit 2
+    fi
+    ACCESS_FILE="$(mktemp)"
+    bq --project_id="$PROJECT_ID" show --format=prettyjson "$DATASET" > "$ACCESS_FILE"
+    python3 - "$ACCESS_FILE" "$SA_EMAIL" <<'PY'
+import json, sys
+path, email = sys.argv[1], sys.argv[2]
+dataset = json.load(open(path))
+access = dataset.setdefault("access", [])
+if not any(entry.get("userByEmail") == email and entry.get("role") == "WRITER" for entry in access):
+    access.append({"role": "WRITER", "userByEmail": email})
+json.dump({"access": access}, open(path, "w"))
+PY
+    bq --project_id="$PROJECT_ID" update --source "$ACCESS_FILE" "$DATASET" >/dev/null
+    rm -f "$ACCESS_FILE"
+  fi
+  # Load jobs run as the service account, in the project: Job User, nothing wider.
+  g projects add-iam-policy-binding "$PROJECT_ID" --member="serviceAccount:${SA_EMAIL}" --role=roles/bigquery.jobUser --condition=None >/dev/null
+  note "Every finished scan loads into ${BIGQUERY_DATASET}.scans and ${BIGQUERY_DATASET}.findings (README › History and analytics)."
+  note "Earlier scans: python tools/backfill_export.py --project ${PROJECT_ID} --location ${REGION} --bucket ${BUCKET} --dataset ${BIGQUERY_DATASET}"
+fi
+
+# --- 7. schedules (v17) -------------------------------------------------------------------------
+if [[ ${#SCHEDULE_NAMES[@]} -gt 0 ]]; then
+  CURRENT_STEP="schedules"
+  step "Scheduled scans (Cloud Scheduler → ${WORKER_URL}/scheduled-scan)"
+  for i in "${!SCHEDULE_NAMES[@]}"; do
+    name="${SCHEDULE_NAMES[$i]}"; scope="${SCHEDULE_SCOPES[$i]}"; scope_id="${SCHEDULE_IDS[$i]}"; cron="${SCHEDULE_CRONS[$i]}"
+    note "${name}: ${scope} ${scope_id} at '${cron}' UTC"
+    verb="create"
+    if [[ "$DRY_RUN" != 1 ]] && gcloud --project "$PROJECT_ID" scheduler jobs describe "$name" --location="$REGION" >/dev/null 2>&1; then verb="update"; fi
+    # The job calls the worker as the service account (its OIDC token, audience the worker's URL), like Cloud Tasks does.
+    g scheduler jobs "$verb" http "$name" --location="$REGION" --schedule="$cron" --time-zone="Etc/UTC" \
+      --uri="${WORKER_URL}/scheduled-scan" --http-method=POST --headers="Content-Type=application/json" \
+      --message-body="{\"scope\":\"${scope}\",\"scope_id\":\"${scope_id}\",\"name\":\"${name}\"}" \
+      --oidc-service-account-email="$SA_EMAIL" --oidc-token-audience="$WORKER_URL" --attempt-deadline=120s --max-retry-attempts=0 >/dev/null
+  done
+fi
+
 # --- done ---------------------------------------------------------------------------------------
 CURRENT_STEP="done"
 step "Deployed ${IMAGE}:${TAG}"
@@ -240,3 +333,6 @@ else
 fi
 note "IAM changes take up to a minute: a 403 right after a grant goes away on reload."
 note "Scans need the organization-level roles of README › Common Prerequisites, granted once to ${SA_EMAIL}."
+if [[ ${#SCHEDULE_NAMES[@]} -gt 0 ]]; then
+  note "Scheduled scans   ${SCHEDULE_NAMES[*]} (gcloud scheduler jobs run NAME --location=${REGION} starts one now)"
+fi

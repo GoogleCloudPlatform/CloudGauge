@@ -37,6 +37,11 @@ with one listing and nothing is ever rewritten:
 
 - ``scopes/{scope}/{scope_id}/{generated_ts}_{job_id}.json``: the scan's summary
 
+Scheduled scans (v17, ``app.services.schedules``) note the last job each schedule started,
+and the history page (v17) lists a scope's summaries:
+
+- ``schedules/{scope}/{scope_id}.json``: the job the scope's schedule last started
+
 Checks receive a ``GcsResultsStore`` (or a ``ShardSink`` bound to a shard) as
 their keyword-only ``sink`` argument.
 """
@@ -54,6 +59,7 @@ MANIFEST_FILE = "manifest.json"
 MARKERS_DIR = "markers"
 SHARDS_DIR = "shards"
 SCOPES_DIR = "scopes"
+SCHEDULES_DIR = "schedules"
 ORG_POLICY_FILES = ("best_practices.json", "current_policies.json")
 READ_WORKERS = 16  # parallel downloads when reading a job's findings back
 DELETE_WORKERS = 16  # parallel deletions when cleaning a job's intermediate files up
@@ -353,6 +359,47 @@ class GcsResultsStore:
         except Exception as e:
             logging.error(f"[{job_id}] Could not read the previous scan summary under {prefix}: {e}")
         return None
+
+    def list_summaries(self, scope, scope_id, limit=None):
+        """The scope's scan summaries, newest first (the history page, v17); at most ``limit`` of them.
+
+        A summary that cannot be read is skipped (logged); a listing that fails raises.
+        """
+        prefix = self.summaries_prefix(scope, scope_id)
+        bucket = self.bucket()
+        names = sorted((blob.name for blob in bucket.list_blobs(prefix=prefix) if blob.name.endswith(".json")), reverse=True)
+        summaries = []
+        for name in names[:limit] if limit else names:
+            try:
+                summaries.append(json.loads(bucket.blob(name).download_as_text()))
+            except Exception as e:
+                logging.error(f"Could not read the scan summary {name}: {e}")
+        return summaries
+
+    def list_scopes(self):
+        """Every ``(scope, scope_id)`` that has at least one scan summary, in listing order (``tools/backfill_export.py``)."""
+        seen = {}
+        for blob in self.bucket().list_blobs(prefix=f"{SCOPES_DIR}/"):
+            parts = blob.name.split("/")
+            if len(parts) == 4 and parts[3].endswith(".json"):
+                seen.setdefault((parts[1], parts[2]), None)
+        return list(seen)
+
+    # --- Scheduled scans: the job a scope's schedule last started ---
+    @staticmethod
+    def schedule_lock_name(scope, scope_id):
+        return f"{SCHEDULES_DIR}/{scope}/{scope_id}.json"
+
+    def read_schedule_lock(self, scope, scope_id):
+        """The note of the scope's last scheduled job (``app.services.schedules``), or ``None``. Errors are raised."""
+        blob = self.bucket().blob(self.schedule_lock_name(scope, scope_id))
+        if not blob.exists():
+            return None
+        return json.loads(blob.download_as_text())
+
+    def write_schedule_lock(self, scope, scope_id, lock):
+        """Notes the job a schedule just started for the scope. Errors are raised: the 409 rule depends on it."""
+        self.bucket().blob(self.schedule_lock_name(scope, scope_id)).upload_from_string(json.dumps(lock), content_type='application/json')
 
 
 class ShardSink:

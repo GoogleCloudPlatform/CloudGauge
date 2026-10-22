@@ -19,13 +19,14 @@ touches the network or creates clients.
 """
 import logging
 import os
+import re
 from dataclasses import dataclass
 
 # --- Environment Variables & Constants ---
 # The release, as the image tag names it ("15.6" for v15.6; tests/test_packaging.py pins it to the newest entry
 # of RELEASE_NOTES.md). The report's footer shows it, and every scan summary records it so the next scan can tell
 # a check that is new to the release from one that merely had nothing to check last time (app.reporting.changes).
-VERSION = "16.1"
+VERSION = "17"
 # Best-practices CSV for the Organization Policies check (legacy name: GCS_PUBLIC_URL;
 # it points at GitHub, not GCS). The value is frozen byte-for-byte; override it
 # with the BEST_PRACTICES_CSV_URL environment variable.
@@ -105,6 +106,25 @@ DEFAULT_SERVICE_HEALTH_RELEVANCE = ("IMPACTED", "RELATED")
 SERVICE_HEALTH_RELEVANCE_VALUES = ("IMPACTED", "RELATED", "PARTIALLY_RELATED", "NOT_IMPACTED", "UNKNOWN")
 DEFAULT_ADVISORY_WINDOW_DAYS = 365
 
+# --- FinOps and capacity (v17) ---
+# COST_ALLOCATION_LABELS: the label keys every project must carry for cost allocation
+# ("cost-center,environment,owner"). Unset: the check reports *Not configured* and stays out of the score.
+# SNAPSHOT_MAX_AGE_DAYS: a disk snapshot older than this is listed by Snapshot Sprawl.
+# RESERVATION_COVERAGE_MIN_VCPUS: Reservation Coverage speaks up from this many running vCPUs in one
+# zone of a project without a reservation there.
+DEFAULT_SNAPSHOT_MAX_AGE_DAYS = 90
+DEFAULT_RESERVATION_COVERAGE_MIN_VCPUS = 32
+
+# --- History and analytics (v17) ---
+# BIGQUERY_DATASET: the dataset (in PROJECT_ID) every finished scan is loaded into, as two tables,
+# ``scans`` and ``findings`` (app.services.bigquery_export). Unset: nothing is exported.
+# BIGQUERY_EXPORT_WAIT_SECONDS: how long the report build waits for the load jobs before it reports
+# the export as still running (the jobs finish on their own either way).
+BIGQUERY_EXPORT_TABLES = ("scans", "findings")
+DEFAULT_BIGQUERY_EXPORT_WAIT_SECONDS = 60
+# How many scans the history page shows (the newest first).
+HISTORY_PAGE_SCANS = 52
+
 # Configures logging to display INFO level messages with a timestamp.
 LOG_FORMAT = '%(levelname)s: [%(asctime)s] %(message)s'
 LOG_DATEFMT = '%Y-%m-%d %H:%M:%S'
@@ -142,6 +162,26 @@ def _number(env, name, default, cast, minimum=None, maximum=None):
     if (minimum is not None and value < minimum) or (maximum is not None and value > maximum):
         raise ValueError(f"{name} must be between {minimum} and {maximum}, got {value}")
     return value
+
+
+def _label_keys(value):
+    """``COST_ALLOCATION_LABELS`` as a tuple of label keys (comma-separated, lower-cased, de-duplicated); empty when unset."""
+    keys = tuple(dict.fromkeys(key.strip().lower() for key in (value or '').split(',') if key.strip()))
+    for key in keys:
+        if not re.fullmatch(r'[a-z][a-z0-9_-]{0,62}', key):
+            raise ValueError(f"COST_ALLOCATION_LABELS has an invalid label key '{key}': a key is 1-63 lowercase letters, digits, "
+                             f"underscores or dashes and starts with a letter")
+    return keys
+
+
+def _dataset(value):
+    """``BIGQUERY_DATASET`` as a dataset ID (letters, digits and underscores), or ``None`` when unset."""
+    dataset = (value or '').strip()
+    if not dataset:
+        return None
+    if not re.fullmatch(r'[A-Za-z0-9_]{1,1024}', dataset):
+        raise ValueError(f"BIGQUERY_DATASET must be a dataset ID (letters, digits and underscores), got '{dataset}'")
+    return dataset
 
 
 def _relevance(value):
@@ -195,6 +235,13 @@ class Settings:
     service_health_window_days: int = DEFAULT_SERVICE_HEALTH_WINDOW_DAYS
     service_health_relevance: tuple = DEFAULT_SERVICE_HEALTH_RELEVANCE
     advisory_window_days: int = DEFAULT_ADVISORY_WINDOW_DAYS
+    # FinOps and capacity (v17; see the constants above)
+    cost_allocation_labels: tuple = ()
+    snapshot_max_age_days: int = DEFAULT_SNAPSHOT_MAX_AGE_DAYS
+    reservation_coverage_min_vcpus: int = DEFAULT_RESERVATION_COVERAGE_MIN_VCPUS
+    # History and analytics (v17): the BigQuery dataset scans are exported to, in PROJECT_ID. None: no export.
+    bigquery_dataset: str | None = None
+    bigquery_export_wait_seconds: int = DEFAULT_BIGQUERY_EXPORT_WAIT_SECONDS
     # Synthetic load mode (profile 'synthetic' only; see app.synthetic)
     synthetic_projects: int = 0
     synthetic_seed: int = DEFAULT_SYNTHETIC_SEED
@@ -248,6 +295,11 @@ class Settings:
             service_health_window_days=_number(env, 'SERVICE_HEALTH_WINDOW_DAYS', DEFAULT_SERVICE_HEALTH_WINDOW_DAYS, int, minimum=1, maximum=366),
             service_health_relevance=_relevance(env.get('SERVICE_HEALTH_RELEVANCE')),
             advisory_window_days=_number(env, 'ADVISORY_WINDOW_DAYS', DEFAULT_ADVISORY_WINDOW_DAYS, int, minimum=1, maximum=3660),
+            cost_allocation_labels=_label_keys(env.get('COST_ALLOCATION_LABELS')),
+            snapshot_max_age_days=_number(env, 'SNAPSHOT_MAX_AGE_DAYS', DEFAULT_SNAPSHOT_MAX_AGE_DAYS, int, minimum=1, maximum=3660),
+            reservation_coverage_min_vcpus=_number(env, 'RESERVATION_COVERAGE_MIN_VCPUS', DEFAULT_RESERVATION_COVERAGE_MIN_VCPUS, int, minimum=1),
+            bigquery_dataset=_dataset(env.get('BIGQUERY_DATASET')),
+            bigquery_export_wait_seconds=_number(env, 'BIGQUERY_EXPORT_WAIT_SECONDS', DEFAULT_BIGQUERY_EXPORT_WAIT_SECONDS, int, minimum=0, maximum=600),
             synthetic_projects=synthetic_projects,
             synthetic_seed=_number(env, 'SYNTHETIC_SEED', DEFAULT_SYNTHETIC_SEED, int),
             synthetic_latency_ms=_number(env, 'SYNTHETIC_LATENCY_MS', DEFAULT_SYNTHETIC_LATENCY_MS, float, minimum=0),

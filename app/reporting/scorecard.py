@@ -36,6 +36,7 @@ category. Velocity & Innovation has no checks yet, so it has no stoplight.
 """
 import csv
 import io
+import re
 from dataclasses import dataclass
 
 from app.checks.categories import INCIDENT_STATE
@@ -55,6 +56,9 @@ TOP_ACTIONS = 10
 INLINE_STATUS_CHANGES = 3
 # The Stability line adds this check's tally: incidents that affected the scope in the last 90 days.
 INCIDENTS_CHECK = "Service Health Incidents"
+# The Efficiency line adds the cost rows' estimated monthly savings (v17), summed per currency from this column.
+SAVING_COLUMN = "Est. Monthly Saving"
+SAVING_VALUE = re.compile(r"^\s*(-?[\d,]*\.?\d+)\s*([A-Z]{3})\s*$")
 # The action-plan CSV: the ranked actions, then two blank columns for the owner to fill in.
 ACTION_PLAN_COLUMNS = ("Priority", "Check", "Category", "Status", "Projects affected", "Findings", "Fix in report", "Owner", "Target date")
 FIX_IN_REPORT = "yes"
@@ -173,6 +177,24 @@ def incidents_text(section):
     return f"{plural(total, 'incident')} impacted you in 90 days, {active} active"
 
 
+def savings_text(section):
+    """The Efficiency line's savings tally: the estimated monthly savings of the failing cost checks' rows, per currency
+    (``"1,234.56 USD/month in identified savings"``); None when no row carries an amount."""
+    totals = {}
+    for item in section.checks:
+        details = item.details
+        if item.status not in ACTIONABLE_STATUSES or details is None or details.kind != "table" or SAVING_COLUMN not in details.headers:
+            continue
+        column = list(details.headers).index(SAVING_COLUMN)
+        for row in details.rows:
+            match = SAVING_VALUE.match(str(row[column])) if column < len(row) else None
+            if match:
+                totals[match.group(2)] = totals.get(match.group(2), 0.0) + float(match.group(1).replace(",", ""))
+    if not totals:
+        return None
+    return " + ".join(f"{amount:,.2f} {currency}" for currency, amount in sorted(totals.items())) + "/month in identified savings"
+
+
 def build_stoplights(context):
     sections = {section.title: section for section in context.sections}
     score_rows = {row.category_name: row for row in context.score_summary}
@@ -188,6 +210,9 @@ def build_stoplights(context):
         incidents = incidents_text(section) if category == "Reliability & Resilience" else None
         if incidents:
             evidence.append(incidents)
+        savings = savings_text(section) if category == "Cost Optimization" else None
+        if savings:
+            evidence.append(savings)
         change = category_changes.get(category)
         compared = change is not None and section.assessed
         stoplights.append(Stoplight(

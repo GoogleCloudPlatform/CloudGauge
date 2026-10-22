@@ -43,6 +43,7 @@ DESIGN = (TEMPLATES / '_design.css').read_text(encoding='utf-8')
 REPORT_STYLES = (TEMPLATES / 'report' / '_styles.css').read_text(encoding='utf-8')
 STATUS_PAGE = (TEMPLATES / 'status.html').read_text(encoding='utf-8')
 INDEX_PAGE = (TEMPLATES / 'index.html').read_text(encoding='utf-8')
+HISTORY_PAGE = (TEMPLATES / 'history.html').read_text(encoding='utf-8')
 
 # Tailwind's palette, by the names the brief uses.
 ZINC_50, ZINC_200, ZINC_900, WHITE = '#fafafa', '#e4e4e7', '#18181b', '#ffffff'
@@ -101,12 +102,17 @@ def sentence_case(text):
 
 
 @pytest.fixture
-def pages(client):
-    """The three pages as a browser gets them."""
+def pages(client, gcp):
+    """The pages as a browser gets them (v17: the history page too, with one scan on record)."""
+    from app.reporting.html_report import generate_reports
+
+    summary = generate_reports('organization', '123456789', 'job-1', samples.FINDINGS, total_projects=4)[2]
+    gcp.bucket.put(f"scopes/organization/123456789/{summary['generated_ts']}_job-1.json", __import__('json').dumps(summary), 'application/json')
     return {
         'report': render(samples.FINDINGS),
         'index': client.get('/').get_data(as_text=True),
         'status': client.get('/status/job-1/project/web-prod').get_data(as_text=True),
+        'history': client.get('/history/organization/123456789').get_data(as_text=True),
     }
 
 
@@ -159,6 +165,7 @@ def test_the_primary_button_is_ink_on_white(pages):
     assert re.findall(r'class="btn btn-primary[^"]*"[^>]*>([^<]+)<', pages['index']) == ['Start scan']
     assert re.findall(r'class="btn btn-primary[^"]*"[^>]*>([^<]+)<', pages['report']) == ['Generate executive summary']
     assert re.findall(r'class="btn btn-primary[^"]*"[^>]*>([^<]+)<', pages['status']) == ['View interactive report']
+    assert re.findall(r'class="btn btn-primary[^"]*"[^>]*>([^<]+)<', pages['history']) == []  # a page to read: outline actions only
 
 
 def test_status_is_a_dot_and_a_soft_pill_in_its_semantic_colour(pages):
@@ -223,6 +230,9 @@ def test_tables_have_no_vertical_rules_quiet_headers_and_a_row_hover(pages):
                 assert not {'border', 'border-left', 'border-right'} & set(declarations), selectors
     for name, page in pages.items():  # every table, the one the cost insights script builds included
         assert all('data-table' in attributes for attributes in re.findall(r'<table\b([^>]*)>', page)), name
+    # v17: the history page's chart is monochrome ink on hairlines, its table the same quiet table.
+    assert rule(HISTORY_PAGE, '.chart .line')['stroke'] == 'var(--ink)' and rule(HISTORY_PAGE, '.chart .grid')['stroke'] == 'var(--hairline)'
+    assert rule(HISTORY_PAGE, '.score')['font-family'] == 'var(--font-mono)' and rule(HISTORY_PAGE, '.page')['max-width'] == '1040px'
 
 
 def test_findings_are_accordions_that_open_what_needs_a_human():
@@ -251,7 +261,8 @@ def test_headings_are_sentence_case_and_status_names_keep_theirs(pages):
         for text in copy:
             assert sentence_case(text), (name, text)
     assert 'Review your cloud environment' in ui_copy(pages['index'])
-    assert {'Scan in progress', 'Scan complete', 'Scan failed', 'View interactive report', 'Download CSV'} <= set(ui_copy(pages['status']))
+    assert {'Scan in progress', 'Scan complete', 'Scan failed', 'View interactive report', 'Download CSV', 'View history'} <= set(ui_copy(pages['status']))
+    assert {'Scan history', 'Scores over time', 'Scans', 'Start a scan'} <= set(ui_copy(pages['history']))
     assert {'CloudGauge report', 'Overview', 'Review scores', 'Suggested fixes', 'Powered by Gemini', 'Draft fixes', 'Download CSV',
             'Expand all', 'Collapse all', 'Copy', 'Scorecard', 'Top actions', 'Executive summary', 'Generate executive summary',
             'Print', 'Download action plan (CSV)', 'Copy as Markdown'} <= set(ui_copy(pages['report']))

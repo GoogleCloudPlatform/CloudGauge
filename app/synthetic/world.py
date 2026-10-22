@@ -29,7 +29,7 @@ profiles into API responses.
 """
 import functools
 import random
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 ORG_ID = "100000000001"
 FOLDER_COUNT = 6
@@ -121,6 +121,13 @@ Storage and Data,,,
 ,storage.uniformBucketLevelAccess,Enforce uniform bucket-level access,Should have
 ,sql.restrictPublicIp,Restrict Public IP access on Cloud SQL instances,Should have
 """
+# v17: the FinOps and capacity facts. Label keys every synthetic project may carry (COST_ALLOCATION_LABELS names
+# them in a synthetic deployment); the machine types the VMs run; the Cloud SQL versions (some in extended
+# support); the organization-level IAM recommendation.
+LABEL_KEYS = ("cost-center", "environment", "owner")
+MACHINE_TYPES = ("e2-medium", "e2-standard-4", "n2-standard-8", "n2-standard-16", "a2-highgpu-1g")
+SQL_VERSIONS = ("POSTGRES_17", "POSTGRES_15", "MYSQL_8_0", "MYSQL_5_7", "POSTGRES_12", "SQLSERVER_2019_STANDARD")
+ORG_IAM_RECOMMENDATION = ("user:cto@example.com", "roles/owner", None)  # (member, role held, replacement or None to remove)
 
 
 def _rng(seed, *parts):
@@ -140,6 +147,7 @@ class Vm:
     in_mig: bool
     gke: bool
     os_reporting: bool
+    machine_type: str = "e2-medium"  # v17
 
 
 @dataclass(frozen=True)
@@ -148,6 +156,8 @@ class Bucket:
     public: bool
     ubla: bool
     versioning: bool
+    lifecycle: bool = False  # v17: has lifecycle rules
+    autoclass: bool = False  # v17
 
 
 @dataclass(frozen=True)
@@ -165,6 +175,7 @@ class SqlInstance:
     backups: bool
     pitr: bool
     retained_backups: int
+    database_version: str = "POSTGRES_17"  # v17
 
 
 @dataclass(frozen=True)
@@ -209,6 +220,17 @@ class ProjectProfile:
     incident_relevance: dict = field(default_factory=dict)  # incident id -> the project's relevance to it
     advisory_types_disabled: tuple = ()  # notification types turned off in the project's Advisory Notifications settings
     has_project_advisory: bool = False  # the project-level security advisory applies to it
+    # v17: FinOps and capacity
+    labels: dict = field(default_factory=dict)  # the project's labels (a subset of LABEL_KEYS, with values)
+    old_snapshots: tuple = ()  # (name, age in days): snapshots older than the default SNAPSHOT_MAX_AGE_DAYS
+    orphan_snapshots: tuple = ()  # names of snapshots whose source disk is gone
+    reservations: tuple = ()  # (zone, machine type, count, in use)
+    commitments: tuple = ()  # (region, plan, vCPUs, memory GB, days until it ends, auto-renew)
+    capacity_events: tuple = ()  # (zone, machine type, kind: "stockout" | "quota", days ago, count)
+    iam_recommendations: tuple = ()  # (member, role held, replacement role or None to remove)
+    gpu_quota: tuple = ()  # (region, metric, usage, limit): an accelerator quota near its limit
+    quota_recommendation: bool = False  # the quota recommender suggests an increase
+    future_reservation: bool = False  # a future reservation in the project's first zone
 
     @property
     def project_number(self):
@@ -405,6 +427,58 @@ class SyntheticOrg:
         # v16.1 (drawn last, for the same reason): snapshots kept in a multi-region, which pass the resilience check
         multi_region_snapshots = rng.randint(0, 2) if vms else 0
 
+        # v17 (drawn last, for the same reason): the FinOps and capacity facts. Fields of the VMs, buckets and SQL
+        # instances built above are added with ``replace`` so the earlier draws stay where they were.
+        labels = {key: value for key, value in (("cost-center", f"cc-{rng.randint(100, 999)}"), ("environment", rng.choice(["prod", "dev", "test"])),
+                                                ("owner", rng.choice(["platform", "data", "web"]))) if _chance(rng, 0.8)}
+        vms = [replace(vm, machine_type="e2-medium" if vm.gke else rng.choices(MACHINE_TYPES, weights=[4, 3, 3, 2, 1])[0]) for vm in vms]
+        buckets = tuple(replace(bucket, lifecycle=_chance(rng, 0.5), autoclass=_chance(rng, 0.2)) for bucket in buckets)
+        sql_instances = tuple(replace(sql, database_version=rng.choices(SQL_VERSIONS, weights=[3, 3, 2, 1, 1, 1])[0]) for sql in sql_instances)
+        old_snapshots = tuple((f"snap-old-{i}", rng.randint(120, 400)) for i in range(rng.randint(0, 2) if vms else 0))
+        orphan_snapshots = ("snap-orphan-0",) if vms and _chance(rng, 0.15) else ()
+        reservations = ()
+        if vms and size in ("medium", "large") and _chance(rng, 0.3):
+            count = rng.randint(2, 4)
+            reservations = ((rng.choice(zones), "e2-standard-4", count, rng.randint(1, count)),)
+        commitments = ()
+        if size in ("medium", "large") and _chance(rng, 0.25):
+            commitments = (("-".join(zones[0].split("-")[:-1]), rng.choice(["TWELVE_MONTH", "THIRTY_SIX_MONTH"]), rng.choice([8, 16, 32]),
+                            rng.choice([32, 64, 128]), rng.randint(30, 400), _chance(rng, 0.3)),)
+        capacity_events = ()
+        if vms and _chance(rng, 0.12):
+            capacity_events = ((rng.choice(zones), rng.choice(["n2-standard-8", "a2-highgpu-1g"]), rng.choice(["stockout", "stockout", "quota"]),
+                                rng.randint(1, 25), rng.randint(1, 6)),)
+        iam_recommendations = ()
+        if primitive and _chance(rng, 0.5):
+            role, member = primitive[0]
+            iam_recommendations = ((member, role, "roles/viewer" if role == "roles/editor" else None),)
+        gpu_quota = ((rng.choice(REGIONS), "NVIDIA_T4_GPUS", 96 + rng.randint(0, 4), 100),) if _chance(rng, 0.06) else ()
+        quota_recommendation = _chance(rng, 0.08)
+        future_reservation = bool(vms) and size == "large" and _chance(rng, 0.2)
+
+        # Cost recommendations of the v17 recommenders (merged after the draws, so the dict above is as it was).
+        extra_recommendations = {}
+        if vms and _chance(rng, 0.1):
+            extra_recommendations[("Idle Images", "global")] = [(f"{project_id}-image-0", "DELETE_IMAGE", "Delete the idle custom image.", rng.randint(1, 15))]
+        if buckets and _chance(rng, 0.1):
+            extra_recommendations[("Cloud Storage Soft Delete", "global")] = [
+                (buckets[0].name, "DISABLE_SOFT_DELETE", f"Disable soft delete on bucket '{buckets[0].name}': its objects are rarely deleted.", rng.randint(2, 30))]
+        if size == "large" and _chance(rng, 0.3):
+            extra_recommendations[("BigQuery Slot Commitments", "US")] = [(f"{project_id}-slots", "PURCHASE_COMMITMENT", "Purchase a 100-slot annual commitment in US.", rng.randint(200, 900))]
+        if size in ("medium", "large") and _chance(rng, 0.2):
+            region = "-".join(zones[0].split("-")[:-1])
+            extra_recommendations[("Cloud Run Cost", region)] = [(f"svc-{project_id}", "CPU_ALLOCATION", "Allocate CPU only during request processing for the service.", rng.randint(5, 60))]
+        if size in ("medium", "large") and _chance(rng, 0.25):
+            region = "-".join(zones[0].split("-")[:-1])
+            extra_recommendations[("Resource-Based Commitment Recommendations", region)] = [
+                (f"{region}-cud", "PURCHASE_COMMITMENT", f"Purchase a 1 year new standard CUD for 16 vCPUs and 64 GB in {region}.", rng.randint(100, 600))]
+        for sql in sql_instances:
+            if _chance(rng, 0.3):
+                region = subnets[0][1] if subnets else REGIONS[0]
+                extra_recommendations.setdefault(("Overprovisioned Cloud SQL Instances", region), []).append(
+                    (sql.name, "CHANGE_MACHINE_TYPE", f"Cloud SQL instance '{sql.name}' is overprovisioned: move to a smaller tier.", rng.randint(40, 400)))
+        cost_recommendations = {**cost_recommendations, **extra_recommendations}
+
         return ProjectProfile(
             index=index, project_id=project_id, display_name=f"Synthetic Project {index}",
             folder_id=self.folder_of(index), denied=denied, osconfig_disabled=osconfig_disabled,
@@ -418,6 +492,9 @@ class SyntheticOrg:
             single_region_snapshots=single_region_snapshots, multi_region_snapshots=multi_region_snapshots,
             servicehealth_disabled=servicehealth_disabled, incident_relevance=incident_relevance,
             advisory_types_disabled=advisory_types_disabled, has_project_advisory=has_project_advisory,
+            labels=labels, old_snapshots=old_snapshots, orphan_snapshots=orphan_snapshots, reservations=reservations,
+            commitments=commitments, capacity_events=capacity_events, iam_recommendations=iam_recommendations,
+            gpu_quota=gpu_quota, quota_recommendation=quota_recommendation, future_reservation=future_reservation,
         )
 
     # --- organization-level data ---

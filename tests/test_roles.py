@@ -33,8 +33,8 @@ from app.services.worker_url import resolve_worker_url
 from helpers import make_settings
 
 WORKER_URL = 'https://cloudgauge-worker-123.us-central1.run.app'
-WORKER_PATHS = ('/run-scan', '/scan-shard', '/run-aggregation', '/sweep')
-PAGE_PATHS = ('/', '/status/job-1/project/p1', '/report/job-1/p1', '/api/status/job-1/p1')
+WORKER_PATHS = ('/run-scan', '/scan-shard', '/run-aggregation', '/sweep', '/scheduled-scan')
+PAGE_PATHS = ('/', '/status/job-1/project/p1', '/report/job-1/p1', '/api/status/job-1/p1', '/history/project/p1')
 BLUEPRINTS = {'all': {'ui', 'api', 'worker'}, 'web': {'ui', 'api'}, 'worker': {'worker'}}
 WEB_NEEDS_WORKER_URL = ("FATAL: CLOUDGAUGE_ROLE=web needs WORKER_URL, the URL of the worker service "
                         "(the one deployed with CLOUDGAUGE_ROLE=worker); the web service never runs scans itself.")

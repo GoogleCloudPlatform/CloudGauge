@@ -239,8 +239,9 @@ def test_scan_completes_against_the_synthetic_organization(gcp, scope):
         assert check in html, check
     metrics = provider.metrics.snapshot()
     by_method = metrics['by_method']
-    assert by_method.get('asset.listAssets(org)', 0) == (3 if scope == 'organization' else 0)
-    assert by_method.get('asset.listAssets(folder)', 0) == (3 if scope == 'folder' else 0)
+    # Three resilience listings, two for Snapshot Sprawl and one for Cloud SQL Extended Support (v17), all under the scope.
+    assert by_method.get('asset.listAssets(org)', 0) == (6 if scope == 'organization' else 0)
+    assert by_method.get('asset.listAssets(folder)', 0) == (6 if scope == 'folder' else 0)
     metrics = provider.metrics.snapshot()
     assert metrics['total_calls'] > 50 and metrics['errors'] == {}
     # v15.4: a folder scan compares Asset Inventory's projects with Resource Manager's direct children (one call);
@@ -268,8 +269,11 @@ def test_an_empty_folder_is_still_checked_as_a_folder(gcp):
     assert '0 of 0 projects · folder-level checks completed' in html
     assert 'Organization Policies' in html and 'policies as recommended' in html
     assert 'status-badge">Error<' not in html
-    assert html.count('Not assessed — no ') == 2 and 'Not assessed — no Security' not in html
+    # v17: Snapshot Sprawl is scope-level too, so Efficiency has a verdict as well; Operations alone stays not assessed.
+    assert html.count('Not assessed — no ') == 1 and 'Not assessed — no Operational Excellence' in html
+    assert 'Not assessed — no Security' not in html and 'Not assessed — no Cost' not in html
     assert 'Not assessed — no Reliability' not in html and 'No single-region disk snapshots found.' in html
+    assert 'No snapshots older than 90 days or without a source disk found.' in html
     assert 'Organization Policies' in store.read_report('syn-job', folder, 'csv')
     assert provider.metrics.snapshot()['errors'] == {}
 
@@ -286,9 +290,18 @@ def test_organization_scan_covers_every_section_and_org_check(gcp):
                   'Service Health Incidents', 'Personalized Service Health API Coverage',
                   'Advisory Notifications', 'Advisory Notifications Settings',
                   # v15
-                  'GKE Supported Versions'):
+                  'GKE Supported Versions',
+                  # v17: FinOps, capacity, quota and IAM
+                  'Cost Allocation Labels', 'Cloud Storage Lifecycle', 'Snapshot Sprawl',
+                  'Resource-Based Commitment Recommendations', 'Idle Images', 'Cloud SQL Extended Support', 'Capacity Commitments',
+                  'Reservation Coverage', 'Commitments Expiring', 'Capacity Signals', 'Quota Increase Recommendations', 'IAM Least Privilege'):
         assert check in html, check
     assert 'Action Required' in html and 'Compliant' in html and 'Informational' in html
+    # The v17 facts the synthetic world draws reach the report: a saving total on the Scorecard, an unconfigured
+    # label check that stays Informational, the accelerator family in the quota table.
+    assert 'USD/month in identified savings' in html
+    assert 'Not configured: set COST_ALLOCATION_LABELS' in html
+    assert 'Accelerator' in html and 'Headroom' in html
 
 
 def test_denied_projects_and_quota_errors_do_not_break_the_scan(gcp):
@@ -308,7 +321,13 @@ def test_denied_projects_and_quota_errors_do_not_break_the_scan(gcp):
     # recommenders are never queried: the project is reported with the discovery error rather
     # than passing as compliant. Network Insights always queries 'global', so its queries fail.
     assert {'Open Firewall Rules', 'GKE Hygiene', 'Network Insights (all 8 insight types)', 'Quota Utilization (>80%)',
-            'Cost-Saving Recommendations (all 8 recommenders: no zones or regions were discovered to query)'} <= {row[3] for row in rows}
+            # v17: the global and BigQuery recommenders are asked regardless of discovered locations, and fail on their own
+            'Cost-Saving Recommendations (11 of 14 recommenders: Idle Cloud SQL Instances, Low Utilization VMs, VM Rightsizing, Unassociated IPs, '
+            'Idle Load Balancers, Idle Persistent Disks, Underutilized Reservations, Idle Reservations, Resource-Based Commitment Recommendations, '
+            'Overprovisioned Cloud SQL Instances, Cloud Run Cost: no zones or regions were discovered to query)',
+            'Cost-Saving Recommendations (3 of 14 recommenders: BigQuery Slot Commitments, Idle Images, Cloud Storage Soft Delete)',
+            'Reservation Coverage', 'Commitments Expiring', 'Capacity Signals', 'Cloud Storage Lifecycle', 'IAM Least Privilege',
+            'Quota Increase Recommendations'} <= {row[3] for row in rows}
     assert all('(synthetic)' in row[4] for row in rows)  # the reason is the API's message
 
 

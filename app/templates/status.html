@@ -97,6 +97,7 @@
             document.title = "Report ready";
             const report_url = `/report/${job_id}/${scope_id}`;
             const csv_url = `/report/${job_id}/${scope_id}/csv`;  // v16.1: the service's own route, behind the same sign-in as the pages
+            const history_url = `/history/${scope}/${scope_id}`;  // v17: the scope's scans over time
             card.innerHTML = `
                 <div class="state-icon ok">${CHECK_CIRCLE}</div>
                 <h1>Scan complete</h1>
@@ -105,6 +106,7 @@
                 <div class="button-group">
                     <a href="${report_url}" target="_blank" class="btn btn-primary">View interactive report</a>
                     <a href="${csv_url}" class="btn btn-outline">Download CSV</a>
+                    <a href="${history_url}" class="btn btn-outline">View history</a>
                 </div>
                 <p class="job-line">Job ${escapeHtml(job_id)}</p>
             `;

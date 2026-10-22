@@ -25,6 +25,7 @@
   ``|tojson``, since HTML escaping doesn't protect a JavaScript string.
 """
 import functools
+from dataclasses import replace
 from urllib.parse import quote
 
 from jinja2 import Environment, PackageLoader, StrictUndefined
@@ -91,7 +92,7 @@ def generate_html_report(scope, scope_id, job_id, banner=None, coverage=None, to
 
 
 def generate_reports(scope, scope_id, job_id, all_results, *, banner=None, coverage=None, total_projects=None, previous=None,
-                     membership=None, requested_by=None):
+                     membership=None, requested_by=None, export=None):
     """Everything a finished scan uploads: ``(html, csv, summary)``.
 
     The HTML and the CSV come from one context, so a row the page marks *New*
@@ -101,11 +102,19 @@ def generate_reports(scope, scope_id, job_id, all_results, *, banner=None, cover
     ``membership`` is what a folder scan reconciled between Asset Inventory and
     Resource Manager (``app.services.resource_manager.folder_membership``), None
     when they agreed. ``requested_by`` is the signed-in person who asked for the
-    scan (behind Identity-Aware Proxy), None when unknown.
+    scan (behind Identity-Aware Proxy), None when unknown. ``export`` (v17) is
+    called as ``export(summary, all_results, changes)`` before the page is
+    rendered and returns an ``app.services.bigquery_export.ExportResult`` the
+    header states, or None; None skips the export.
     """
     print(f"[{job_id}] 📊 Generating final report for {scope}: {scope_id}...")
     context = build_report_context(scope, scope_id, job_id, all_results, banner=banner, coverage=coverage,
                                    total_projects=total_projects, previous=previous, membership=membership,
                                    requested_by=requested_by)
+    summary = summarize(context)
+    if export is not None:
+        result = export(summary, all_results, context.changes)
+        if result is not None:
+            context = replace(context, export=result)
     csv_report = generate_csv_data(all_results, row_matchers=context.row_matchers if context.changes else None)
-    return render_report(context), csv_report, summarize(context)
+    return render_report(context), csv_report, summary

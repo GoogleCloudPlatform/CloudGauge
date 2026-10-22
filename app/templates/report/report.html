@@ -77,6 +77,10 @@
                     <dt>Previous scan</dt><dd class="previous-scan">
                     {%- if changes %}{{ changes.previous_generated_at }} <a href="/report/{{ changes.previous_job_id|pathsegment }}/{{ scope_id|pathsegment }}">view</a>
                     {%- else %}none — first scan of this {{ scope }}{% endif %}</dd>
+                    <dt>History</dt><dd class="history-link"><a href="/history/{{ scope|pathsegment }}/{{ scope_id|pathsegment }}">every scan of this {{ scope }}</a></dd>
+{% if export %}
+                    <dt>BigQuery export</dt><dd class="coverage{% if export.state != 'exported' %} coverage-incomplete{% endif %}"><span class="dot dot-{{ export.dot_class }}"></span>{{ export.header_text }}</dd>
+{% endif %}
                 </dl>
             </div>
             <a class="btn btn-outline btn-sm" href="{{ csv_href }}">Download CSV</a>

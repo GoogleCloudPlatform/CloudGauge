@@ -48,7 +48,7 @@ def already_completed(store, job_id, scope_id):
     return bool(status) and status.get("status") == "completed"
 
 
-def execute_scan_job(data, *, store, banner=None, fanout=None):
+def execute_scan_job(data, *, store, banner=None, fanout=None, exporter=None):
     """
     Executes the main `run_all_checks` function and uploads the generated reports
     to Google Cloud Storage.
@@ -60,6 +60,9 @@ def execute_scan_job(data, *, store, banner=None, fanout=None):
             (the synthetic load mode marks its reports with one).
         fanout (FanOut, optional): Runs scopes with more projects than one shard
             holds as a sharded scan. ``None``: every scope runs inline.
+        exporter (BigQueryExporter, optional): Loads the finished scan into BigQuery
+            (v17, ``app.services.bigquery_export``). ``None``: no export. Synthetic
+            scans are never exported.
 
     Returns:
         bool: True if the reports were uploaded (or the job was dispatched to
@@ -120,10 +123,13 @@ def execute_scan_job(data, *, store, banner=None, fanout=None):
         total_projects = 1 if scope == 'project' else (len(projects) if projects is not None else None)
         # Synthetic scans (the ones with a banner) neither compare with real scans nor enter the history.
         previous = None if banner else store.read_previous_summary(scope, scope_id, job_id)
+        export = None
+        if exporter is not None and not banner:
+            export = lambda summary, all_results, changes: exporter.export(summary, all_results, changes, projects_scanned=total_projects)
         html_report, csv_report, summary = generate_reports(scope, scope_id, job_id, all_results, banner=banner,
                                                             total_projects=total_projects, previous=previous,
                                                             membership=folder_membership(projects or []),
-                                                            requested_by=requested_by)
+                                                            requested_by=requested_by, export=export)
 
         store.upload_reports(job_id, scope_id, html_report, csv_report)
         if not banner:

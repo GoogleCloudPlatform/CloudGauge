@@ -1,0 +1,141 @@
+{#
+  Copyright 2025 Google LLC
+
+  Licensed under the Apache License, Version 2.0 (the "License");
+  you may not use this file except in compliance with the License.
+  You may obtain a copy of the License at
+
+      https://www.apache.org/licenses/LICENSE-2.0
+
+  Unless required by applicable law or agreed to in writing, software
+  distributed under the License is distributed on an "AS IS" BASIS,
+  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+  See the License for the specific language governing permissions and
+  limitations under the License.
+#}
+{#
+  The history page (v17): a scope's scans over time, on the dot-grid canvas. A header
+  card (scope, how many scans over which span), the pillar scores as monochrome lines
+  (inline SVG built by app.reporting.history: no script), and one row per scan with its
+  scores, counts, who asked, and the checks whose status changed since the scan before.
+  Variables come from app.reporting.history.History; logic belongs there.
+#}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Scan history: {{ history.scope_title }} {{ history.scope_id }}</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+    <style>
+{% include "_design.css" %}
+        body { min-height: 100vh; padding: 32px 24px 48px; }
+        .page { width: 100%; max-width: 1040px; margin: 0 auto; display: flex; flex-direction: column; gap: 16px; }
+        .notice { width: 100%; }
+        .brand { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; font-size: 13px; font-weight: 600; letter-spacing: -0.01em; color: var(--ink); }
+        .signed-in { font-weight: 400; letter-spacing: 0; font-size: 12px; color: var(--muted); overflow-wrap: anywhere; text-align: right; }
+        .page-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; flex-wrap: wrap; }
+        .page-head h1 { font-size: 22px; margin-bottom: 6px; }
+        .scope-line { font-family: var(--font-mono); font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
+        .span-line { margin-top: 4px; font-size: 13px; color: var(--muted); }
+        .card h2 { margin-bottom: 12px; }
+        .chart { width: 100%; height: auto; display: block; }
+        .chart .grid { stroke: var(--hairline); stroke-width: 1; }
+        .chart .axis { font: 11px var(--font-mono); fill: var(--muted); }
+        .chart .line { fill: none; stroke: var(--ink); stroke-width: 1.5; stroke-linejoin: round; stroke-linecap: round; }
+        .chart .value { font: 500 11px var(--font-mono); fill: var(--ink); }
+        .legend { display: flex; flex-wrap: wrap; gap: 8px 20px; margin-top: 10px; font-size: 13px; color: var(--body); }
+        .legend-item { display: inline-flex; align-items: center; gap: 8px; }
+        .legend-item svg { display: block; }
+        .legend-item .sample { stroke: var(--ink); stroke-width: 1.5; fill: none; }
+        .legend-item .mono { color: var(--muted); font-size: 12px; }
+        .table-wrap { overflow-x: auto; }
+        .scans-table td.scan-when { white-space: nowrap; }
+        .scans-table td.counts { white-space: nowrap; font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+        .scans-table .who { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+        .score { font-family: var(--font-mono); font-variant-numeric: tabular-nums; font-weight: 500; }
+        .score-none { color: var(--faint); font-size: 12px; }
+        .flips { margin: 0; padding: 0; list-style: none; font-size: 12.5px; color: var(--body); }
+        .flips li { line-height: 1.5; }
+        .flips li.first { color: var(--muted); }
+        .cell-more { margin-top: 2px; font-size: 12px; }
+        .cell-more summary { cursor: pointer; color: var(--ink); text-decoration: underline; text-underline-offset: 3px; text-decoration-color: var(--zinc-300); }
+        .empty { padding: 32px 0; text-align: center; color: var(--muted); }
+        .foot { font-size: 12px; color: var(--muted); }
+    </style>
+</head>
+<body class="dotgrid">
+    <div class="page">
+        {% if banner %}<div role="note" class="notice notice-amber">{{ banner }}</div>{% endif %}
+        <div class="brand">CloudGauge{% if current_user %}<span class="signed-in">Signed in as {{ current_user }}</span>{% endif %}</div>
+        <header class="page-head">
+            <div>
+                <h1>Scan history</h1>
+                <p class="scope-line">{{ history.scope }} {{ history.scope_id }}</p>
+                {% if history.span_text %}<p class="span-line">{{ history.span_text }}</p>{% endif %}
+            </div>
+            <a class="btn btn-outline" href="/">Start a scan</a>
+        </header>
+{% if not history.entries %}
+        <section class="card">
+            <p class="empty">No completed scan of this {{ history.scope }} is on record yet. Scans made from this page's deployment onwards appear here once they finish.</p>
+        </section>
+{% else %}
+        <section class="card">
+            <h2>Scores over time</h2>
+            <svg class="chart" viewBox="{{ history.chart.view_box }}" role="img" aria-label="The four pillar scores over {{ history.chart.scans }} scans">
+            {% for y, label in history.chart.ticks %}
+                <line class="grid" x1="36" x2="{{ history.chart.width - 90 }}" y1="{{ y }}" y2="{{ y }}"></line>
+                <text class="axis" x="28" y="{{ y + 4 }}" text-anchor="end">{{ label }}</text>
+            {% endfor %}
+            {% for x, label in history.chart.labels %}
+                <text class="axis" x="{{ x }}" y="{{ history.chart.height - 8 }}" text-anchor="{{ 'start' if loop.first else 'end' }}">{{ label }}</text>
+            {% endfor %}
+            {% for line in history.chart.lines %}
+                {% if line.points %}
+                <polyline class="line" points="{{ line.points }}"{% if line.dash %} stroke-dasharray="{{ line.dash }}"{% endif %}></polyline>
+                <text class="value" x="{{ line.last_x + 8 }}" y="{{ line.label_y + 4 }}">{{ line.pillar }} {{ line.last_text }}</text>
+                {% endif %}
+            {% endfor %}
+            </svg>
+            <div class="legend">
+            {% for line in history.chart.lines %}
+                <span class="legend-item"><svg width="28" height="8" viewBox="0 0 28 8" aria-hidden="true"><line class="sample" x1="1" y1="4" x2="27" y2="4"{% if line.dash %} stroke-dasharray="{{ line.dash }}"{% endif %}></line></svg>{{ line.pillar }} <span class="mono">{{ line.last_text }}</span></span>
+            {% endfor %}
+            </div>
+        </section>
+        <section class="card">
+            <h2>Scans</h2>
+            <div class="table-wrap">
+            <table class="data-table scans-table">
+                <thead><tr><th>Scan</th>{% for pillar in history.pillars %}<th class="num">{{ pillar }}</th>{% endfor %}<th class="num" title="Action Required · Investigation Recommended · Compliant · Errors">Checks</th><th>Changes since the scan before</th><th>Report</th></tr></thead>
+                <tbody>
+                {% for entry in history.entries %}
+                    <tr>
+                        <td class="scan-when"><time>{{ entry.generated_at }}</time><br><span class="who">{{ entry.requested_by or "requester unknown" }} · v{{ entry.release or "?" }}{% if entry.total_projects is not none %} · {{ "{:,}".format(entry.total_projects) }} project{{ '' if entry.total_projects == 1 else 's' }}{% endif %}</span></td>
+                    {% for pillar in history.pillars %}
+                        <td class="num">{% if entry.scores[pillar] is not none %}<span class="score">{{ entry.score_text(pillar) }}</span>{% else %}<span class="score-none">{{ entry.score_text(pillar) }}</span>{% endif %}</td>
+                    {% endfor %}
+                        <td class="num counts"><span class="dot dot-action-required"></span> {{ entry.action_count }} <span class="dot dot-investigation"></span> {{ entry.investigation_count }} <span class="dot dot-compliant"></span> {{ entry.compliant_count }} <span class="dot dot-error"></span> {{ entry.error_count }}</td>
+                        <td class="prose">
+                        {% if entry.first %}<ul class="flips"><li class="first">First scan on record</li></ul>
+                        {% elif not entry.flips %}<ul class="flips"><li class="first">No status changes</li></ul>
+                        {% else %}
+                            <ul class="flips">{% for flip in entry.inline_flips %}<li>{{ flip }}</li>{% endfor %}</ul>
+                            {% if entry.more_flips %}<details class="cell-more"><summary>{{ entry.more_flips }} more</summary><ul class="flips">{% for flip in entry.flips[3:] %}<li>{{ flip }}</li>{% endfor %}</ul></details>{% endif %}
+                        {% endif %}
+                        </td>
+                        <td class="nowrap"><a href="/report/{{ entry.job_id|urlencode }}/{{ history.scope_id|urlencode }}">Open report</a></td>
+                    </tr>
+                {% endfor %}
+                </tbody>
+            </table>
+            </div>
+            <p class="foot">Scores are recomputed from each scan's check statuses under the current rule, so a change of rule between releases never shows as a change of posture. The newest {{ history.count }} scans are listed; every scan is in the BigQuery export when it is configured.</p>
+        </section>
+{% endif %}
+    </div>
+</body>
+</html>

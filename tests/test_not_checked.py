@@ -169,30 +169,39 @@ DISCOVERY_ERRORS = {"p-denied": http_error(403, DENIED, "forbidden"), "p-flaky":
                     "p-no-compute": http_error(403, ENABLE_COMPUTE)}
 
 
+# v17: the recommenders asked at ``global`` or the BigQuery multi-regions, whatever locations were discovered, and the
+# eleven asked at discovered zones and regions only.
+ALWAYS_ASKED = ("BigQuery Slot Commitments", "Idle Images", "Cloud Storage Soft Delete")
+LOCATION_BOUND = tuple(name for name in COST_RECOMMENDERS if name not in ALWAYS_ASKED)
+NO_LOCATIONS = (f"Cost-Saving Recommendations (11 of 14 recommenders: {', '.join(LOCATION_BOUND)}: "
+                f"no zones or regions were discovered to query)")
+
+
 def test_cost_check_reports_a_project_whose_locations_could_not_be_discovered(gcp):
-    """Without discovered zones or regions the cost recommenders are never queried, so a project
-    whose discovery failed would pass silently; it is reported with the discovery error instead."""
+    """Without discovered zones or regions the location-bound cost recommenders are never queried, so a project
+    whose discovery failed would pass silently; it is reported with the discovery error instead. The global and
+    BigQuery recommenders (v17) are asked regardless, and reach their verdict."""
     sink = FakeSink()
     run_cost_recommendations("org", PROJECTS, [], ["global"], "job-1", DISCOVERY_ERRORS, sink=sink)
-    assert gcp.recommender.parents == []  # nothing was queried ('global' is not a zone or region)
+    # 'global' is not a zone or region: only the always-asked recommenders were queried, in every project.
+    assert {parent.split("/")[1] for parent in gcp.recommender.parents} == {p["projectId"] for p in PROJECTS}
+    assert {parent.split("/locations/")[1].split("/")[0] for parent in gcp.recommender.parents} == {"global", "US", "EU"}
     assert not_checked_rows(sink) == [
-        {"Project": "p-denied", "Reason": f"403 {DENIED}",
-         "Skipped check": "Cost-Saving Recommendations (all 8 recommenders: no zones or regions were discovered to query)"},
-        {"Project": "p-flaky", "Reason": "503 Backend Error",
-         "Skipped check": "Cost-Saving Recommendations (all 8 recommenders: no zones or regions were discovered to query)"},
+        {"Project": "p-denied", "Reason": f"403 {DENIED}", "Skipped check": NO_LOCATIONS},
+        {"Project": "p-flaky", "Reason": "503 Backend Error", "Skipped check": NO_LOCATIONS},
     ]  # p-ok was not in error; p-no-compute has no Compute Engine API, hence no compute locations
-    assert cost_records(sink) == {}  # no recommender was asked, so none reached a verdict (v15.2)
+    assert cost_records(sink) == {check: ("Compliant", [{"Status": NOTHING_FOUND[check]}]) for check in ALWAYS_ASKED}  # the rest reached no verdict (v15.2)
 
 
 def test_cost_check_does_not_repeat_a_project_whose_every_query_failed(gcp):
     """With locations from other projects the project is queried there: a denied project already has
-    its "all 8 recommenders" row, a project whose queries succeed is reported as partially covered."""
+    its "all 14 recommenders" row, a project whose queries succeed is reported as partially covered."""
     gcp.recommender.project_errors["p-denied"] = core_exceptions.PermissionDenied(DENIED)
     sink = FakeSink()
     run_cost_recommendations("org", PROJECTS, ["us-central1-a"], ["us-central1", "global"], "job-1", DISCOVERY_ERRORS, sink=sink)
     assert {parent.split("/")[1] for parent in gcp.recommender.parents} == {p["projectId"] for p in PROJECTS}
     assert not_checked_rows(sink) == [
-        {"Project": "p-denied", "Skipped check": "Cost-Saving Recommendations (all 8 recommenders)", "Reason": f"403 {DENIED}"},
+        {"Project": "p-denied", "Skipped check": "Cost-Saving Recommendations (all 14 recommenders)", "Reason": f"403 {DENIED}"},
         {"Project": "p-flaky", "Reason": "503 Backend Error",
          "Skipped check": "Cost-Saving Recommendations (location discovery; queried only in zones and regions found in other projects)"},
     ]
@@ -221,11 +230,12 @@ def test_a_recommender_that_answered_with_nothing_is_compliant(gcp):
     run_cost_recommendations("org", [{"projectId": "p-ok"}], ["us-central1-a"], ["us-central1", "global"], "job-1", sink=sink)
     assert cost_records(sink) == {check: ("Compliant", [{"Status": NOTHING_FOUND[check]}]) for check in COST_RECOMMENDERS}
     assert [record["Check"] for record in sink.records] == list(COST_RECOMMENDERS) and not_checked_rows(sink) == []  # in the report's order
-    assert NOTHING_FOUND == {
+    assert {check: NOTHING_FOUND[check] for check in list(COST_RECOMMENDERS)[:8]} == {
         "Idle Cloud SQL Instances": "No idle Cloud SQL instances found.", "Low Utilization VMs": "No low-utilization VMs found.",
         "VM Rightsizing": "No VM rightsizing recommendations found.", "Unassociated IPs": "No unassociated IP addresses found.",
         "Idle Load Balancers": "No idle load balancers found.", "Idle Persistent Disks": "No idle persistent disks found.",
         "Underutilized Reservations": "No underutilized reservations found.", "Idle Reservations": "No idle reservations found."}
+    assert set(NOTHING_FOUND) == set(COST_RECOMMENDERS) and len(COST_RECOMMENDERS) == 14  # v17: six more, each with its all-clear text
 
 
 def test_a_recommendation_anywhere_outweighs_the_all_clear_and_a_denied_project_is_still_reported(gcp):
@@ -241,19 +251,20 @@ def test_a_recommendation_anywhere_outweighs_the_all_clear_and_a_denied_project_
         {"Project": "p-ok", "Resource Name": "old-boot-disk", "Recommendation": "Delete the idle disk.", "Est. Monthly Saving": "12.00 USD"}])
     assert {check: status for check, (status, _) in records.items()} == {
         check: "Action Required" if check == "Idle Persistent Disks" else "Compliant" for check in COST_RECOMMENDERS}
-    assert not_checked_rows(sink) == [{"Project": "p-denied", "Skipped check": "Cost-Saving Recommendations (all 8 recommenders)", "Reason": f"403 {DENIED}"}]
+    assert not_checked_rows(sink) == [{"Project": "p-denied", "Skipped check": "Cost-Saving Recommendations (all 14 recommenders)", "Reason": f"403 {DENIED}"}]
 
 
 def test_a_recommender_nobody_could_ask_reaches_no_verdict(gcp):
     """Every call failed: no Compliant row is written, so the category reads *Not assessed* rather than 100%, and the
-    failure is on the not-checked rows. Nothing to query (no zone or region) writes nothing at all."""
+    failure is on the not-checked rows. Nothing to query (no zone or region) writes nothing for the location-bound
+    recommenders; the global and BigQuery ones (v17) are asked anyway and reach a verdict."""
     gcp.recommender.project_errors["p-denied"] = core_exceptions.PermissionDenied(DENIED)
     sink = FakeSink()
     run_cost_recommendations("org", [{"projectId": "p-denied"}], ["us-central1-a"], ["us-central1"], "job-1", sink=sink)
     assert cost_records(sink) == {} and [row["Project"] for row in not_checked_rows(sink)] == ["p-denied"]
     sink = FakeSink()
     run_cost_recommendations("org", [{"projectId": "p-ok"}], [], ["global"], "job-1", sink=sink)
-    assert sink.records == []
+    assert [record["Check"] for record in sink.records] == list(ALWAYS_ASKED)
 
 
 def test_a_recommender_not_offered_where_it_was_asked_is_neither_a_failure_nor_an_answer(gcp):
@@ -263,7 +274,7 @@ def test_a_recommender_not_offered_where_it_was_asked_is_neither_a_failure_nor_a
     sink = FakeSink()
     run_cost_recommendations("org", [{"projectId": "p-ok"}], ["asia-south1-a"], ["asia-south1"], "job-1", sink=sink)
     records = cost_records(sink)
-    assert "Idle Load Balancers" not in records and len(records) == 7 and not_checked_rows(sink) == []
+    assert "Idle Load Balancers" not in records and len(records) == 13 and not_checked_rows(sink) == []
 
 
 def test_network_check_reports_a_project_whose_locations_could_not_be_discovered(gcp):

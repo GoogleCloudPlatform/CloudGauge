@@ -24,7 +24,7 @@ import re
 from google.api_core import exceptions as core_exceptions
 
 from app.config import SCOPES
-from app.checks.not_checked import NotChecked
+from app.checks.not_checked import NotChecked, is_request_error
 from app.services import gcp
 from app.utils import call_api_with_backoff
 
@@ -358,7 +358,14 @@ def run_miscellaneous_checks_refactored(scope, scope_id, all_projects, job_id, *
 
 def run_service_limit_checks_refactored(scope_id, all_projects, job_id, *, sink):
     """
-    Checks regional compute quotas for all projects to identify any approaching their limit (>80%).
+    Checks regional compute quotas for all projects to identify any approaching their limit.
+
+    v17: two thresholds instead of one — a quota at ``QUOTA_CRITICAL_RATIO`` (95 %) or more is
+    *Action Required*, one at ``QUOTA_WARN_RATIO`` (80 %) *Investigation Recommended* — and
+    every row says which ``Family`` the metric belongs to (*Accelerator* for GPU and TPU
+    quotas, *Compute* otherwise) and how much ``Headroom`` is left, so the accelerator
+    quotas a capacity plan depends on can be read off the table. The check's name keeps
+    the 80 % it has always had; the rows changed shape (app.reporting.changes.RESHAPED_CHECKS).
 
     Args:
         org_id (str): The organization ID.
@@ -382,17 +389,9 @@ def run_service_limit_checks_refactored(scope_id, all_projects, job_id, *, sink)
             for region in regions:
                 quotas = compute_service.regions().get(project=project_id, region=region).execute().get('quotas', [])
                 for quota in quotas:
-                    usage = quota.get('usage', 0.0)
-                    limit = quota.get('limit', 0.0)
-                    if limit > 0 and (usage / limit) > 0.8: # Check if usage > 80%
-                        # Add the structured data to our list
-                        exceeded_quotas.append({
-                            "Project": project_id,
-                            "Region": region,
-                            "Metric": quota['metric'],
-                            "Usage": f"{usage/limit:.1%}",
-                            "Details": f"{int(usage)}/{int(limit)}"
-                        })
+                    row = quota_row(project_id, region, quota)
+                    if row:
+                        exceeded_quotas.append(row)
         except Exception as e:
             skipped.add(project_id, e)
         return exceeded_quotas # Return the list of findings (will be empty if none)
@@ -408,9 +407,94 @@ def run_service_limit_checks_refactored(scope_id, all_projects, job_id, *, sink)
     print("✅ Service Limit checks complete.")
     
     # Wrap the final list in our standard check group format
+    severities = {row.pop("_status") for row in all_findings}
     if not all_findings:
         result = {"Check": CHECK_NAME, "Finding": [{"Status": "No quotas found over 80% utilization."}], "Status": "Compliant"}
     else:
-        result = {"Check": CHECK_NAME, "Finding": all_findings, "Status": "Action Required"}
+        result = {"Check": CHECK_NAME, "Finding": all_findings, "Status": "Action Required" if "Action Required" in severities else "Investigation Recommended"}
     sink.write_finding(job_id, "Quota_Utilization", result)
+    skipped.write(sink, job_id)
+
+
+# --- Quotas (v17) -------------------------------------------------------------------------------------------------
+# A quota at QUOTA_WARN_RATIO of its limit is listed (Investigation Recommended); at QUOTA_CRITICAL_RATIO it is
+# Action Required: the next scale-out fails.
+QUOTA_WARN_RATIO = 0.80
+QUOTA_CRITICAL_RATIO = 0.95
+ACCELERATOR, COMPUTE_FAMILY = "Accelerator", "Compute"
+ACCELERATOR_METRIC = re.compile(r"GPU|TPU|NVIDIA|AMD_|_VWS_", re.I)
+QUOTA_RECOMMENDATIONS_CHECK = "Quota Increase Recommendations"
+QUOTA_RECOMMENDER = "google.resourcemanager.serviceLimit.Recommender"
+
+
+def quota_family(metric):
+    """``Accelerator`` for a GPU or TPU quota metric (``NVIDIA_T4_GPUS``, ``PREEMPTIBLE_NVIDIA_L4_GPUS``, ``TPUS``), else ``Compute``."""
+    return ACCELERATOR if ACCELERATOR_METRIC.search(str(metric or "")) else COMPUTE_FAMILY
+
+
+def quota_row(project_id, region, quota):
+    """The row of a regional quota at or over ``QUOTA_WARN_RATIO`` (with its ``_status``), or ``None`` below it."""
+    usage, limit = float(quota.get('usage', 0.0) or 0), float(quota.get('limit', 0.0) or 0)
+    if limit <= 0 or usage / limit <= QUOTA_WARN_RATIO:  # over 80 %, as the check's name says
+        return None
+    ratio = usage / limit
+    return {
+        "Project": project_id,
+        "Region": region,
+        "Metric": quota['metric'],
+        "Family": quota_family(quota['metric']),
+        "Usage": f"{ratio:.1%}",
+        "Details": f"{int(usage)}/{int(limit)}",
+        "Headroom": int(limit - usage),
+        "_status": "Action Required" if ratio >= QUOTA_CRITICAL_RATIO else "Investigation Recommended",
+    }
+
+
+def quota_recommendation_row(project_id, reco):
+    """The quota a recommendation is about: the recommender's ``content.overview`` names the service, the quota and
+    its current limit (``serviceName``, ``quotaName`` or ``metric``, ``currentLimit``); the description says why."""
+    overview = getattr(reco.content, "overview", None) or {}
+
+    def field(key):
+        try:
+            return overview[key] if key in overview else ""
+        except (KeyError, TypeError, ValueError):
+            return ""
+
+    limit = field("currentLimit")
+    try:
+        limit_text = f"{int(limit):,}" if float(limit) == int(float(limit)) else f"{float(limit):g}"
+    except (TypeError, ValueError):
+        limit_text = str(limit) if limit not in ("", None) else "unknown"
+    return {"Project": project_id, "Service": str(field("serviceName") or "unknown"),
+            "Quota": str(field("quotaName") or field("metric") or "unknown"), "Current Limit": limit_text,
+            "Recommendation": reco.description}
+
+
+def check_quota_recommendations(scope_id, all_projects, job_id, *, sink):
+    """The quota increases Active Assist recommends (v17): one row per recommendation of the quota recommender,
+    asked at ``global`` for every project, naming the service, the quota and its current limit. *Investigation
+    Recommended*: a quota that is about to run out is a plan, not an incident; Compliant with an all-clear row
+    when there is none."""
+    print(f"📈 [{job_id}] Checking {QUOTA_RECOMMENDATIONS_CHECK}...")
+    skipped = NotChecked(QUOTA_RECOMMENDATIONS_CHECK)
+    rows = []
+    client = gcp.recommender_client()
+    for project in all_projects:
+        project_id = project['projectId']
+        parent = f"projects/{project_id}/locations/global/recommenders/{QUOTA_RECOMMENDER}"
+        errors = []
+        recommendations = call_api_with_backoff(lambda: client.list_recommendations(parent=parent),
+                                                context_message=f"'{QUOTA_RECOMMENDATIONS_CHECK}' in {project_id}", on_error=errors.append)
+        if errors:
+            if not is_request_error(errors[0]):  # a recommender not offered here is not a skipped project
+                skipped.add(project_id, errors[0])
+            continue
+        for reco in recommendations:
+            rows.append(quota_recommendation_row(project_id, reco))
+    if rows:
+        result = {"Check": QUOTA_RECOMMENDATIONS_CHECK, "Finding": rows, "Status": "Investigation Recommended"}
+    else:
+        result = {"Check": QUOTA_RECOMMENDATIONS_CHECK, "Finding": [{"Status": "No quota increase recommendations."}], "Status": "Compliant"}
+    sink.write_finding(job_id, QUOTA_RECOMMENDATIONS_CHECK.replace(" ", "_"), result)
     skipped.write(sink, job_id)

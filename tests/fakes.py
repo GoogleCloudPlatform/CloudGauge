@@ -65,6 +65,14 @@ class FakeBlob:
         self.bucket.check()
         return self.name in self.bucket.objects
 
+    def delete(self):
+        """``blob.delete()`` (v17: the export's staging files once loaded)."""
+        self.bucket.check()
+        if self.name not in self.bucket.objects:
+            raise NotFound(f'404 object {self.name} not found')
+        del self.bucket.objects[self.name]
+        self.bucket.deleted.append(self.name)
+
     def _bytes(self):
         data, _ = self.bucket.objects[self.name]
         return data if isinstance(data, bytes) else data.encode()

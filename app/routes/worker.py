@@ -23,12 +23,19 @@ Sharded scans (``app.fanout``) add three endpoints with the same body plus a
 ``X-CloudTasks-TaskRetryCount`` header tells a task whether this is its last
 attempt, so that a shard that keeps failing ends as error rows in the report
 rather than as a missing one.
+
+Scheduled scans (v17, ``app.services.schedules``) add ``/scheduled-scan``, which
+Cloud Scheduler posts ``{"scope", "scope_id", "name"}`` to: it enqueues a scan
+(202), or answers 409 while the scope's previous scheduled scan is still running.
+It lives on the worker because the worker is what the service account alone can
+call; nothing that passes Identity-Aware Proxy reaches it.
 """
-from flask import Blueprint, request
+from flask import Blueprint, jsonify, request
 
 from app import scan_job
 from app.extensions import get_services
 from app.fanout import RETRY_COUNT_HEADER
+from app.services import schedules
 
 bp = Blueprint("worker", __name__)
 
@@ -50,7 +57,8 @@ def run_scan_worker():
     """
     data = request.get_json(force=True)
     services = get_services()
-    if scan_job.execute_scan_job(data, store=services.results_store, banner=services.report_banner, fanout=services.get_fanout()):
+    if scan_job.execute_scan_job(data, store=services.results_store, banner=services.report_banner, fanout=services.get_fanout(),
+                                 exporter=services.get_exporter()):
         return "Scan completed and reports uploaded.", 200
     return "Internal Server Error", 500
 
@@ -79,3 +87,12 @@ def sweep_worker():
     data = request.get_json(force=True)
     get_services().get_fanout().sweep(data)
     return "Sweep done.", 200
+
+
+@bp.route('/scheduled-scan', methods=['POST'])
+def scheduled_scan():
+    """Starts the scan a Cloud Scheduler job asks for (v17): 202 with the job ID, 400 for a malformed body, 409 while
+    the scope's previous scheduled scan is still running."""
+    data = request.get_json(force=True, silent=True)
+    body, status = schedules.start_scheduled_scan(get_services(), data)
+    return jsonify(body), status

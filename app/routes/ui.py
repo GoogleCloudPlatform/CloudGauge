@@ -11,17 +11,20 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Pages: the landing form, scan submission, the status page, the report viewer, and the CSV download."""
+"""Pages: the landing form, scan submission, the status page, the report viewer, the CSV download, and the history page (v17)."""
 import uuid
 
 from flask import Blueprint, Response, redirect, render_template, request, stream_with_context, url_for
 from werkzeug.utils import secure_filename
 
 from app import identity
+from app.config import HISTORY_PAGE_SCANS
 from app.extensions import get_services
+from app.reporting.history import build_history
 from app.services import tasks
 
 bp = Blueprint("ui", __name__)
+SCOPES = ("organization", "folder", "project")
 # How much of a CSV report the download route holds at a time (v16.1: the status page's Download CSV
 # goes through this route, so an organization-sized CSV must not sit whole in the web service's memory).
 CSV_CHUNK_BYTES = 1024 * 1024
@@ -114,3 +117,17 @@ def download_report_csv(job_id, scope_id):
     filename = f"cloudgauge_{secure_filename(scope_id) or 'report'}_{secure_filename(job_id) or 'job'}.csv"
     return Response(stream_with_context(chunks()), mimetype="text/csv",
                     headers={"Content-Disposition": f'attachment; filename="{filename}"', "Content-Length": str(size)})
+
+
+@bp.route('/history/<string:scope>/<string:scope_id>')
+def view_history(scope, scope_id):
+    """The scope's scans over time (v17): scores, counts, who asked, and the status changes between consecutive scans,
+    from the summaries the finished scans filed under ``scopes/`` (``app.reporting.history``)."""
+    if scope not in SCOPES:
+        return "Scope must be organization, folder or project.", 404
+    try:
+        summaries = get_services().results_store.list_summaries(scope, scope_id, limit=HISTORY_PAGE_SCANS)
+    except Exception as e:
+        print(f"Error listing the scan history of {scope} {scope_id}: {e}")
+        return "Could not read the scan history.", 500
+    return render_template("history.html", history=build_history(scope, scope_id, summaries))

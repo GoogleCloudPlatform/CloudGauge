@@ -39,6 +39,14 @@ CATEGORY_MAP = {
     "VM Rightsizing": "Cost Optimization", "Unassociated IPs": "Cost Optimization",
     "Idle Load Balancers": "Cost Optimization", "Idle Persistent Disks": "Cost Optimization",
     "Underutilized Reservations": "Cost Optimization", "Idle Reservations": "Cost Optimization",
+    # v17 (FinOps): six more recommenders, labels, lifecycle,
+    # snapshots, and the commitments about to end (written by the capacity check, app.checks.capacity).
+    "Resource-Based Commitment Recommendations": "Cost Optimization", "Overprovisioned Cloud SQL Instances": "Cost Optimization",
+    "Cloud Run Cost": "Cost Optimization", "BigQuery Slot Commitments": "Cost Optimization",
+    "Idle Images": "Cost Optimization", "Cloud Storage Soft Delete": "Cost Optimization",
+    "Cost Allocation Labels": "Cost Optimization",
+    "Cloud Storage Lifecycle": "Cost Optimization", "Snapshot Sprawl": "Cost Optimization",
+    "Commitments Expiring": "Cost Optimization",
 
     # Reliability & Resilience
     "Cloud Storage Versioning": "Reliability & Resilience", "GKE Hygiene": "Reliability & Resilience",
@@ -46,6 +54,10 @@ CATEGORY_MAP = {
     "Cloud SQL High Availability": "Reliability & Resilience", "Cloud SQL Automated Backups": "Reliability & Resilience",
     "Cloud SQL Backup Retention": "Reliability & Resilience", "Cloud SQL PITR": "Reliability & Resilience",
     "MIG Resilience (Zonal)": "Reliability & Resilience", "Disk Snapshot Resilience": "Reliability & Resilience",
+    # v17: Cloud SQL versions in extended support; the capacity briefing and its two scored companions.
+    "Cloud SQL Extended Support": "Reliability & Resilience",
+    "Capacity Commitments": "Reliability & Resilience", "Reservation Coverage": "Reliability & Resilience",
+    "Capacity Signals": "Reliability & Resilience",
 
     # Operational Excellence & Observability
     "Organization Log Sink": "Operational Excellence & Observability",
@@ -58,6 +70,7 @@ CATEGORY_MAP = {
     "VPC Firewall Complexity (>150 Rules)": "Operational Excellence & Observability",
     "Recent Changes (Org & Project)": "Operational Excellence & Observability", "Unattended Projects": "Operational Excellence & Observability",
     "Quota Utilization (>80%)": "Operational Excellence & Observability",
+    "Quota Increase Recommendations": "Operational Excellence & Observability",  # v17
 
     # B2: error results. These names are only written when a check fails; the
     # legacy map left them out, so failures silently disappeared from the report.
@@ -86,6 +99,8 @@ CATEGORY_MAP = {
     "Advisory Notifications Settings": "Security & Identity",
     # v15: clusters and node pools on GKE minors that are no longer offered.
     "GKE Supported Versions": "Reliability & Resilience",
+    # v17: the IAM recommender's unused roles.
+    "IAM Least Privilege": "Security & Identity",
 }
 
 
@@ -264,4 +279,13 @@ def fold_advisory_rows(rows):
     return folded if folded else notes[:1]
 
 
-ROW_FOLDS = {"Service Health Incidents": fold_incident_rows, "Advisory Notifications": fold_advisory_rows}
+def fold_note_rows(rows):
+    """Keeps the rows that describe something and drops the shards' notes (``{"Summary": ...}``): a shard with nothing
+    to list writes one note, and in the merged briefing it would sit among the other shards' rows. One note when there
+    is nothing else (v17: the Capacity Commitments briefing)."""
+    real = [dict(row) for row in rows if "Summary" not in row]
+    return real if real else [dict(row) for row in rows[:1]]
+
+
+ROW_FOLDS = {"Service Health Incidents": fold_incident_rows, "Advisory Notifications": fold_advisory_rows,
+             "Capacity Commitments": fold_note_rows}

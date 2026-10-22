@@ -24,9 +24,10 @@ from datetime import datetime, timezone
 from googleapiclient.errors import HttpError
 
 from app.config import SCOPES
-from app.checks.not_checked import NotChecked
+from app.checks.not_checked import NotChecked, is_request_error
 from app.services import gcp
 from app.services.org_policies import fetch_best_practices, get_effective_org_policies
+from app.utils import call_api_with_backoff
 
 
 # --- Security & Identity Checks ---
@@ -535,4 +536,112 @@ def check_vm_external_ips(scope_id, all_projects, job_id, *, sink):
     else:
         result = {"Check": CHECK_NAME, "Finding": [{"Status": "No VMs with external IP addresses found."}], "Status": "Compliant"}
     sink.write_finding(job_id, CHECK_NAME.replace(" ", "_"), result)
+    skipped.write(sink, job_id)
+
+
+# --- IAM Least Privilege (v17) ------------------------------------------------------------------------------------
+IAM_CHECK = "IAM Least Privilege"
+IAM_RECOMMENDER = "google.iam.policy.Recommender"
+ROLE_FILTER, MEMBER_FILTER = "/iamPolicy/bindings/*/role", "/iamPolicy/bindings/*/members/*"
+
+
+def recommendation_dict(reco):
+    """A recommendation as a plain dict (``Recommendation.to_dict`` for the proto the client returns; a dict as it is)."""
+    if isinstance(reco, dict):
+        return reco
+    try:
+        return type(reco).to_dict(reco)
+    except Exception:
+        return {"name": getattr(reco, "name", ""), "description": getattr(reco, "description", ""),
+                "recommender_subtype": getattr(reco, "recommender_subtype", ""), "content": {}}
+
+
+def iam_operations(reco):
+    """``(removed, added)`` of an IAM recommendation: ``[(role, member)]`` bindings to remove, ``[(role, member)]`` to add.
+
+    The recommender's operation groups carry a ``remove`` of a member from a binding (the role and
+    the member in ``path_filters``) and, for a replacement, an ``add`` of that member to another
+    role (the role in ``path_filters``, the member as ``value``).
+    """
+    removed, added = [], []
+    for group in (reco.get("content") or {}).get("operation_groups") or []:
+        for operation in group.get("operations") or []:
+            filters = operation.get("path_filters") or {}
+            role, member = filters.get(ROLE_FILTER, ""), filters.get(MEMBER_FILTER) or operation.get("value") or ""
+            if operation.get("action") == "remove" and role:
+                removed.append((role, member))
+            elif operation.get("action") == "add" and role:
+                added.append((role, member))
+    return removed, added
+
+
+def iam_fix(resource, removed, added):
+    """The ``gcloud`` lines that apply an IAM recommendation on ``resource`` (``projects/p``, ``folders/f``, ``organizations/o``)."""
+    kind, name = resource.split("/", 1)
+    verb = {"projects": "projects", "folders": "resource-manager folders", "organizations": "organizations"}.get(kind, kind)
+    lines = [f"gcloud {verb} add-iam-policy-binding {name} --member={member} --role={role}" for role, member in added if member]
+    lines += [f"gcloud {verb} remove-iam-policy-binding {name} --member={member} --role={role}" for role, member in removed if member]
+    return " && ".join(lines)
+
+
+def iam_rows(resource, recommendations):
+    """The rows of the IAM recommendations of one resource: the project (or the organization or folder itself), the
+    principal, the role it holds, what to do, and the fix."""
+    project = resource.split("/", 1)[1] if resource.startswith("projects/") else resource
+    rows = []
+    for reco in recommendations:
+        reco = recommendation_dict(reco)
+        removed, added = iam_operations(reco)
+        members = sorted({member for _, member in removed if member} or {member for _, member in added if member})
+        subtype = str(reco.get("recommender_subtype") or "").replace("_", " ").capitalize()
+        for member in members or [""]:
+            rows.append({"Project": project, "Principal": member,
+                         "Current Role": ", ".join(sorted({role for role, m in removed if m in (member, "")})),
+                         "Recommended Role": ", ".join(sorted({role for role, m in added if m in (member, "")})) or "none (remove)",
+                         "Recommendation": reco.get("description") or subtype,
+                         "Fix": iam_fix(resource, [(r, m) for r, m in removed if m in (member, "")], [(r, m) for r, m in added if m in (member, "")])})
+    return rows
+
+
+def check_iam_recommendations(scope, scope_id, all_projects, job_id, *, sink, scope_level=True, project_level=True):
+    """Principals whose roles grant permissions they have not used (v17): the IAM recommender's recommendations.
+
+    Asked at ``global`` for the scanned organization or folder itself and for every project in
+    scope. One row per principal and recommendation — the project (or the organization or folder,
+    by its resource name), the role held, the role recommended (or *none (remove)*), the
+    recommender's own words, and the ``gcloud`` lines that apply it;
+    *Action Required*: an unused ``roles/editor`` is the standing risk IAM audits look for.
+    Compliant with an all-clear row when nobody holds an unused role; a project whose
+    recommendations could not be read is under *Projects not checked*.
+
+    Sharded scans split the work like the miscellaneous checks (``app.checks.registry``):
+    the scope shard runs it with ``project_level=False``, the project shards with
+    ``scope_level=False``; the all-clear rows are identical so the merge keeps one.
+    """
+    print(f"🔐 [{job_id}] Checking {IAM_CHECK} for {scope} {scope_id} and {len(all_projects)} projects...")
+    skipped = NotChecked(IAM_CHECK)
+    client = gcp.recommender_client()
+    resources = [f"{scope}s/{scope_id}"] if scope_level and scope in ("organization", "folder") else []
+    if project_level:
+        resources += [f"projects/{p['projectId']}" for p in all_projects]
+    rows, answered, first_error = [], 0, None
+    for resource in resources:
+        parent = f"{resource}/locations/global/recommenders/{IAM_RECOMMENDER}"
+        errors = []
+        recommendations = call_api_with_backoff(lambda: client.list_recommendations(parent=parent),
+                                                context_message=f"'{IAM_CHECK}' for {resource}", on_error=errors.append)
+        if errors:
+            first_error = first_error or errors[0]
+            if not is_request_error(errors[0]):  # the scanned organization or folder is listed by its resource name
+                skipped.add(resource.split("/", 1)[1] if resource.startswith("projects/") else resource, errors[0])
+            continue
+        answered += 1
+        rows.extend(iam_rows(resource, recommendations))
+    if resources and not answered:
+        result = {"Check": IAM_CHECK, "Finding": [{"Error": f"Could not read the IAM recommendations of any resource in scope: {first_error}"}], "Status": "Error"}
+    elif rows:
+        result = {"Check": IAM_CHECK, "Finding": rows, "Status": "Action Required"}
+    else:
+        result = {"Check": IAM_CHECK, "Finding": [{"Status": "No principal holds a role the IAM recommender would remove or replace."}], "Status": "Compliant"}
+    sink.write_finding(job_id, IAM_CHECK.replace(" ", "_"), result)
     skipped.write(sink, job_id)

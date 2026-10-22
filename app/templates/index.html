@@ -65,6 +65,7 @@
                 </select>
                 <p id="loader" class="help" hidden><span class="spinner"></span>Loading resources…</p>
                 <p id="resource-help" class="help" aria-live="polite"></p>
+                <p id="history-help" class="help" hidden><a id="history-link" href="/">Scan history</a><span>of this resource</span></p>
             </div>
             <button id="submit-btn" type="submit" class="btn btn-primary btn-block" disabled>Start scan</button>
         </form>
@@ -77,6 +78,8 @@
             const loader = document.getElementById('loader');
             const help = document.getElementById('resource-help');
             const submitBtn = document.getElementById('submit-btn');
+            const historyHelp = document.getElementById('history-help');
+            const historyLink = document.getElementById('history-link');
             const SCOPE_NOUNS = { organization: 'organizations', folder: 'folders', project: 'projects' };
 
             function setHelp(text, isError = false) {
@@ -93,6 +96,7 @@
                 resourceSelect.innerHTML = '<option value="" disabled selected>Loading…</option>';
                 resourceSelect.disabled = true;
                 submitBtn.disabled = true;
+                historyHelp.hidden = true;
                 setHelp('');
                 loader.hidden = false;
 
@@ -128,8 +132,12 @@
             resourceSelect.addEventListener('change', function() {
                 if (this.value) {
                     submitBtn.disabled = false;
+                    // v17: the scope's scans over time, one click away once a resource is chosen.
+                    historyLink.href = `/history/${encodeURIComponent(scopeSelect.value)}/${encodeURIComponent(this.value)}`;
+                    historyHelp.hidden = false;
                 } else {
                     submitBtn.disabled = true;
+                    historyHelp.hidden = true;
                 }
             });
         });

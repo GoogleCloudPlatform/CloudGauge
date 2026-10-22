@@ -29,6 +29,7 @@ from googleapiclient.errors import HttpError
 from app.config import SCOPES
 from app.checks.not_checked import NotChecked
 from app.services import gcp
+from app.utils import parse_timestamp, utcnow
 
 # The Essential Contacts categories every organization should have someone subscribed to:
 # security incidents, technical issues and outages, legal notices, and account suspension warnings.
@@ -306,3 +307,119 @@ def check_resilience_assets(scope, scope_id, job_id, *, sink):
         write_errors((SNAPSHOT_RESILIENCE_CHECK,), e)
     else:
         write(SNAPSHOT_RESILIENCE_CHECK, single_region)
+
+
+# --- Cloud SQL Extended Support (v17) ---------------------------------------------------------------------------
+SQL_VERSIONS_CHECK = "Cloud SQL Extended Support"
+# Major version -> (extended support from, end of extended support), per the Cloud SQL version policies published at
+# release time; the API does not carry the dates, so the table is static and revised with each release. MySQL and
+# PostgreSQL instances pay the extended-support fee from the first date and are deprecated on the second; SQL Server
+# follows Microsoft's lifecycle (end of mainstream support -> end of extended support) without a Cloud SQL fee.
+EXTENDED_SUPPORT = {
+    "MYSQL_5_6": ("2025-02-01", "2028-02-01"),
+    "MYSQL_5_7": ("2025-02-01", "2028-02-01"),
+    "MYSQL_8_0": ("2027-01-01", "2029-07-01"),
+    "POSTGRES_9_6": ("2025-02-01", "2028-02-01"),
+    "POSTGRES_10": ("2025-02-01", "2028-02-01"),
+    "POSTGRES_11": ("2025-02-01", "2028-02-01"),
+    "POSTGRES_12": ("2025-02-01", "2028-02-01"),
+    "POSTGRES_13": ("2026-02-01", "2029-02-01"),
+    "POSTGRES_14": ("2027-02-01", "2030-02-01"),
+    "POSTGRES_15": ("2028-02-01", "2031-02-01"),
+    "SQLSERVER_2014": ("2019-07-09", "2024-07-09"),
+    "SQLSERVER_2016": ("2021-07-13", "2026-07-14"),
+    "SQLSERVER_2017": ("2022-10-11", "2027-10-12"),
+    "SQLSERVER_2019": ("2025-02-28", "2030-01-08"),
+    "SQLSERVER_2022": ("2028-01-11", "2033-01-11"),
+}
+# Where an upgrade should go, per engine: the newest major Cloud SQL offers (SQL Server keeps its edition).
+UPGRADE_TARGET = {"MYSQL": "MYSQL_8_4", "POSTGRES": "POSTGRES_17", "SQLSERVER": "SQLSERVER_2022"}
+# A version that enters extended support within this many days is Investigation Recommended.
+EXTENDED_SUPPORT_WARNING_DAYS = 180
+
+
+def major_version(database_version):
+    """``"MYSQL_8_0"`` of ``"MYSQL_8_0_31"``, ``"POSTGRES_15"`` of ``"POSTGRES_15"`` (``"POSTGRES_9_6"`` keeps its minor: the last 9.x),
+    ``"SQLSERVER_2019"`` of ``"SQLSERVER_2019_STANDARD"``."""
+    parts = str(database_version or "").upper().split("_")
+    if not parts or not parts[0]:
+        return ""
+    three_parts = parts[0] == "MYSQL" or (parts[0] == "POSTGRES" and len(parts) > 1 and parts[1] == "9")
+    return "_".join(parts[:3] if three_parts else parts[:2])
+
+
+def upgrade_target(database_version):
+    """The database version an instance should move to, or ``""`` when the engine is unknown."""
+    parts = str(database_version or "").upper().split("_")
+    target = UPGRADE_TARGET.get(parts[0] if parts else "")
+    if not target:
+        return ""
+    if parts[0] == "SQLSERVER" and len(parts) > 2:
+        target += "_" + "_".join(parts[2:])  # the edition: STANDARD, ENTERPRISE, EXPRESS, WEB
+    return target
+
+
+def assess_sql_version(database_version, today):
+    """``(status, issue, extended support from, until)`` for an instance on ``database_version`` on ``today`` (a date), or ``None`` when it is fine.
+
+    *Action Required* once the version is in extended support (or past its end), *Investigation
+    Recommended* within ``EXTENDED_SUPPORT_WARNING_DAYS`` of entering it; a version not in the table
+    (a current major) is never flagged.
+    """
+    dates = EXTENDED_SUPPORT.get(major_version(database_version))
+    if not dates:
+        return None
+    start, end = (parse_timestamp(d).date() for d in dates)
+    if today >= end:
+        return "Action Required", f"Past the end of extended support ({end.isoformat()}): no further fixes or security patches.", start.isoformat(), end.isoformat()
+    if today >= start:
+        fee = "" if major_version(database_version).startswith("SQLSERVER") else " and pays the extended-support fee"
+        return "Action Required", f"In extended support since {start.isoformat()}{fee}; deprecated on {end.isoformat()}.", start.isoformat(), end.isoformat()
+    days = (start - today).days
+    if days <= EXTENDED_SUPPORT_WARNING_DAYS:
+        return "Investigation Recommended", f"Enters extended support on {start.isoformat()}, in {days} days.", start.isoformat(), end.isoformat()
+    return None
+
+
+def check_cloud_sql_versions(scope, scope_id, job_id, *, sink):
+    """Cloud SQL instances on a database version in, or about to enter, extended support (v17).
+
+    One Asset Inventory listing of the Cloud SQL instances under the scanned organization,
+    folder or project (a scope-level check, like Resilience of Critical Assets), judged
+    against ``EXTENDED_SUPPORT``. One row per instance with the dates and the ``gcloud sql
+    instances patch --database-version`` line (an in-place major version upgrade; take a
+    backup first). Compliant with an all-clear row when no instance is close; an Error row
+    when the listing fails.
+    """
+    print(f"🐘 [{job_id}] Checking {SQL_VERSIONS_CHECK} under {scope} {scope_id}...")
+    parent = f"{scope}s/{scope_id}"
+    try:
+        credentials, _ = gcp.auth_default(scopes=SCOPES)
+        asset_client = gcp.asset_client(credentials)
+        request = {"parent": parent, "asset_types": ["sqladmin.googleapis.com/Instance"], "content_type": asset_v1.ContentType.RESOURCE}
+        instances = list(asset_client.list_assets(request=request))
+    except Exception as e:
+        sink.write_finding(job_id, SQL_VERSIONS_CHECK.replace(" ", "_"), {"Check": SQL_VERSIONS_CHECK, "Finding": [{"Error": str(e)}], "Status": "Error"})
+        return
+    today, rows = utcnow().date(), []
+    for asset in instances:
+        data = asset.resource.data
+        version = data.get("databaseVersion", "")
+        verdict = assess_sql_version(version, today)
+        if verdict is None:
+            continue
+        status, issue, start, end = verdict
+        project_id, name = project_of_asset(asset.name), data.get("name")
+        target = upgrade_target(version)
+        rows.append({"Project": project_id, "Instance": name, "Version": version, "Extended Support From": start, "Until": end,
+                     "Issue": issue, "Fix": f"gcloud sql instances patch {name} --project={project_id} --database-version={target}" if target else "",
+                     "_status": status})
+    statuses = {row.pop("_status") for row in rows}
+    if "Action Required" in statuses:
+        result = {"Check": SQL_VERSIONS_CHECK, "Finding": rows, "Status": "Action Required"}
+    elif rows:
+        result = {"Check": SQL_VERSIONS_CHECK, "Finding": rows, "Status": "Investigation Recommended"}
+    else:
+        result = {"Check": SQL_VERSIONS_CHECK, "Finding": [{"Status": f"No Cloud SQL instance runs a version in or within "
+                                                                    f"{EXTENDED_SUPPORT_WARNING_DAYS} days of extended support."}], "Status": "Compliant"}
+    sink.write_finding(job_id, SQL_VERSIONS_CHECK.replace(" ", "_"), result)

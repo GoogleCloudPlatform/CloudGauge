@@ -42,7 +42,7 @@ from app.reporting.html_report import report_environment
 from helpers import make_settings
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-TEMPLATES = ['_design.css', 'index.html', 'report/_macros.html', 'report/_scorecard.html', 'report/_script.js', 'report/_styles.css',
+TEMPLATES = ['_design.css', 'history.html', 'index.html', 'report/_macros.html', 'report/_scorecard.html', 'report/_script.js', 'report/_styles.css',
              'report/report.html', 'status.html']
 WEB_MODULES = ['app.extensions', 'app.identity', 'app.routes', 'app.routes.api', 'app.routes.ui', 'app.routes.worker']
 
@@ -99,7 +99,7 @@ def test_shim_builds_the_app_in_the_testing_profile():
     rules = json.loads(run_python(code, CLOUDGAUGE_ENV='testing'))
     expected = sorted([rule.rule, sorted(rule.methods), rule.endpoint] for rule in create_app(make_settings()).url_map.iter_rules())
     assert rules == expected
-    assert len(rules) == 15  # 14 routes and static
+    assert len(rules) == 17  # 16 routes and static (v17: + /history/<scope>/<scope_id> and /scheduled-scan)
 
 
 def test_shim_fails_fast_without_configuration():

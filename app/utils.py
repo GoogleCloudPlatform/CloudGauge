@@ -17,6 +17,7 @@
 - ``call_api_with_backoff``: exponential backoff on HTTP 429 (legacy ``_call_api_with_backoff``)
 - ``find_col_index``: CSV header lookup
 - ``ThrottledProgressReporter``: the legacy ``run_scan_worker`` progress closure
+- ``utcnow`` / ``parse_timestamp`` / ``days_between``: the clock the v17 checks judge ages and deadlines by
 
 Moved from ``cloudgauge.py`` (Phase 1). Nothing here does I/O at import time.
 """
@@ -24,10 +25,35 @@ import logging
 import random
 import threading
 import time
+from datetime import datetime, timezone
 
 from google.api_core import exceptions as core_exceptions
 
 from app.config import LOG_DATEFMT, LOG_FORMAT, STATUS_UPDATE_INTERVAL_SECONDS
+
+
+def utcnow():
+    """The current time, timezone-aware UTC. The checks call it through their module so a test can pin the clock."""
+    return datetime.now(timezone.utc)
+
+
+def parse_timestamp(value):
+    """An API timestamp (RFC 3339: ``2026-01-02T03:04:05.678Z``, ``...+05:30``, or a date) as an aware UTC datetime; ``None`` if unparsable."""
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def days_between(earlier, later):
+    """Whole days from ``earlier`` to ``later`` (negative when ``earlier`` is after ``later``)."""
+    return int((later - earlier).total_seconds() // 86400)
 
 
 def configure_logging(level=logging.INFO):

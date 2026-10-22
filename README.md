@@ -28,6 +28,7 @@ Final results are delivered as an interactive **HTML report** (an Overview, a on
 * [Configuration Reference](#configuration-reference)
 * [Updating an Existing Deployment (Zero-Downtime)](#updating-an-existing-deployment-zero-downtime)
 * [How to Use](#how-to-use)
+* [History and analytics](#history-and-analytics)
 * [Local Development & Testing](#local-development--testing)
 * [Load Testing with a Synthetic Organization](#load-testing-with-a-synthetic-organization)
 * [Troubleshooting](#troubleshooting)
@@ -54,12 +55,18 @@ CloudGauge scans an organization, a folder or a project across several key domai
 * **VM External IPs**: Finds VM instances with external IP addresses.
 * **Advisory Notifications** *(briefing)*: Lists Google's Mandatory Service Announcements, Security & Privacy Advisories, Threat Horizons reports and sensitive-action digests for the scanned scope (the organization, or each project of a folder/project scan) from the last 365 days, one table with a `Type` column, affected resources and (for digests) the actions and actors. Always *Informational*: these are Google's messages, not the customer's posture.
 * **Advisory Notifications Settings**: Flags a scope in which a notification type is turned off (*Action Required*), and reports when the scanner cannot read the notifications or the settings (*Error*; see the [prerequisites](#common-prerequisites-required-for-all-methods)).
+* **IAM Least Privilege** *(v17)*: The IAM recommender's recommendations for the scanned organization or folder itself and for every project in scope — principals holding a role whose permissions they have not used in 90 days, with the role to replace it with (or *none (remove)*) and the `gcloud … remove-iam-policy-binding` / `add-iam-policy-binding` lines that apply it.
 
 ### **Cost Optimization**
 
-* **Idle Resources**: Finds idle Cloud SQL instances, VMs, persistent disks, and unassociated IP addresses.
-* **Rightsizing**: Identifies overprovisioned VMs and underutilized reservations.
+* **Idle Resources**: Finds idle Cloud SQL instances, VMs, persistent disks, unassociated IP addresses and, since v17, idle custom images.
+* **Rightsizing**: Identifies overprovisioned VMs and underutilized reservations and, since v17, overprovisioned Cloud SQL instances and Cloud Run services whose CPU allocation could change.
+* **Commitments** *(v17)*: **Resource-Based Commitment Recommendations** (Compute Engine committed use discounts, per project and region); **BigQuery Slot Commitments**; **Commitments Expiring** — active commitments that end within 90 days without renewing, with the `--auto-renew` line. Spend-based commitments live on billing accounts, whose access is centralised in most organizations: CloudGauge never asks for a billing-account role — v17.1 reads them from the organization's Recommender export to BigQuery instead.
+* **Cost Allocation Labels** *(v17)*: The projects missing one of the label keys named in `COST_ALLOCATION_LABELS` (`cost-center,environment,owner`, say), with the `gcloud projects update --update-labels` line. Unset, the check is *Informational* and says how to configure it — it never moves the Efficiency score until it is.
+* **Cloud Storage Lifecycle** *(v17)*: Buckets with neither lifecycle rules nor Autoclass, whose objects never move to a colder class or expire (*Investigation Recommended*), plus the **Cloud Storage Soft Delete** recommender.
+* **Snapshot Sprawl** *(v17)*: Disk snapshots older than `SNAPSHOT_MAX_AGE_DAYS` (90) or whose source disk no longer exists, under the scanned scope, with their age and size.
 * **Detailed insights** *(on demand)*: The Cost Optimization page's **Get detailed insights** button asks the Recommender's insight types for every project in scope — CPU and memory usage, idle images, and more — and renders them in the page without re-running the scan.
+* The Scorecard's **Efficiency** line sums the estimated monthly savings of every failing cost check, per currency ("1,234.56 USD/month in identified savings").
 
 ### **Reliability & Resilience**
 
@@ -71,6 +78,10 @@ CloudGauge scans an organization, a folder or a project across several key domai
 * **GKE Hygiene**: Checks for clusters not on a release channel and node pools with auto-upgrade disabled.
 * **GKE Supported Versions**: Finds control planes and node pools on a GKE minor that is no longer offered (*Action Required*) or on the oldest minor still offered — the next to leave support (*Investigation Recommended*). The reference is GKE's own `getServerConfig` for the cluster's location: a cluster on a release channel is judged against its channel's versions, one without against the static lists. Every row carries the `gcloud container clusters upgrade` command to the right target (a node pool never beyond its control plane).
 * **Resilience Assets**: Identifies zonal MIGs (recommends regional) and disk snapshots stored in a single region (a snapshot kept in a multi-region — `asia`, `eu` or `us` — passes), named one by one with their location, under the scanned scope; an all-clear row when there are none.
+* **Cloud SQL Extended Support** *(v17)*: Instances on a database version in extended support (*Action Required*: MySQL and PostgreSQL pay the fee, SQL Server follows Microsoft's lifecycle) or within 180 days of entering it (*Investigation Recommended*), from a static table of the published dates, with the in-place `gcloud sql instances patch --database-version` upgrade line.
+* **Capacity Commitments** *(v17, briefing)*: Every reservation, future reservation and committed use discount of the scanned projects — what, where, how much, in use, status, when it ends. Always *Informational*.
+* **Reservation Coverage** *(v17)*: A project running `RESERVATION_COVERAGE_MIN_VCPUS` (32) or more vCPUs in one zone with fewer reserved there — steady compute a zonal stockout or a maintenance event has nowhere to put — with the `gcloud compute reservations create` line for the zone's most common machine type.
+* **Capacity Signals** *(v17)*: The Compute Engine operations of the last 30 days that failed for want of capacity (`ZONE_RESOURCE_POOL_EXHAUSTED`) or of quota (`QUOTA_EXCEEDED`), from Cloud Logging, grouped by project, zone, machine type or accelerator and kind; *Action Required* when a signal is younger than 7 days.
 
 ### **Operational Excellence & Observability**
 
@@ -79,7 +90,8 @@ CloudGauge scans an organization, a folder or a project across several key domai
 * **Monitoring Coverage**: Scans for projects missing key alert policies (e.g., Quota, Cloud SQL, GKE).
 * **Network Analyzer**: Ingests and normalizes insights for VPC, GKE, and PSA IP address utilization.
 * **Standalone VMs**: Finds VMs not managed by a Managed Instance Group (MIG).
-* **Quota Utilization**: Identifies any regional compute quotas exceeding 80% utilization.
+* **Quota Utilization**: Identifies any regional compute quotas over 80% utilization — *Investigation Recommended* from 80 %, *Action Required* from 95 % (v17) — each row naming the quota's family (*Accelerator* for GPU and TPU quotas, *Compute* otherwise) and the headroom left.
+* **Quota Increase Recommendations** *(v17)*: The quota increases Active Assist's quota recommender suggests, per project: the service, the quota and its current limit, with the recommender's reason.
 * **Firewall Complexity**: Flags projects whose VPC firewall rule count suggests a review (*Investigation Recommended*).
 * **Recent Changes** *(briefing)*: The Recommender's recent-change insights for each project, and for the organization in an organization scan. *Informational*.
 * **Unattended Projects** *(organization scans)*: Flags projects the Recommender reports as unattended (low utilization).
@@ -94,13 +106,13 @@ CloudGauge scans an organization, a folder or a project across several key domai
 The application follows a robust, scalable, and asynchronous "fire-and-forget" pattern. This ensures the user gets an immediate response while the heavy work (which can take many minutes) is done in the background. The same flow serves a single project and an organization with thousands of projects; the difference is only in how the work is split behind the scenes. Three Flask blueprints make up the application: the **pages** (`app/routes/ui.py`), the **API** the pages call (`app/routes/api.py`), and the **worker** endpoints that only Cloud Tasks invokes (`app/routes/worker.py`). The recommended deployment runs them as **two Cloud Run services from one image**, told apart by `CLOUDGAUGE_ROLE`: the **web service** (`web`: the pages and the API) sits behind **Identity-Aware Proxy**, so opening it means signing in with a Google account that was granted access, and the **worker service** (`worker`) is reachable by Cloud Tasks alone (see [Deployment Instructions](#deployment-instructions)). `CLOUDGAUGE_ROLE=all` runs everything on one service, as every release before v16 did.
 
 1.  **Signing in and choosing the scope**: Identity-Aware Proxy asks for a Google sign-in and lets through the accounts that were granted access; the landing page's header says who is signed in. The page offers three scopes — **organization**, **folder** or **project**. Choosing one calls `/api/list-resources`, which lists the *active* folders or projects of the organization the service runs in (one Cloud Asset Inventory search); folders are named by their path and ID (`Engineering / Platform (4711)`), since folder names are unique only among siblings, projects by `Display name (project-id)`. The user picks one from the list.
-2.  **Task creation**: The `/scan` endpoint creates a **Cloud Task** with the scope, its ID, a fresh job ID and who asked for the scan (the identity IAP attached to the request, verified by `app/identity.py`; the report shows it as *Requested by*), and redirects the user to the status page.
+2.  **Task creation**: The `/scan` endpoint creates a **Cloud Task** with the scope, its ID, a fresh job ID and who asked for the scan (the identity IAP attached to the request, verified by `app/identity.py`; the report shows it as *Requested by*), and redirects the user to the status page. A **Cloud Scheduler** job (v17, `SCHEDULES` on `tools/deploy.sh`) does the same through the worker's `/scheduled-scan`, as the service account, with *Requested by* `schedule: <name>`.
 3.  **Background worker**: Cloud Tasks invokes the `/run-scan` endpoint of the worker service in the background, with an OIDC token of the service account — the only identity allowed to invoke it; `--ingress internal` keeps the internet out even with a token. The worker lists the active projects in scope (Cloud Asset Inventory's recursive search; a folder scan also asks Resource Manager for the folder's direct children and reconciles the two lists, so a project moved in minutes ago is scanned too) and decides:
     * **Up to `SCAN_SHARD_SIZE` projects (default 20)**: it runs the whole scan in this one request.
     * **More projects**: it becomes a **dispatcher**. It writes the job's *manifest* (which projects belong to which shard), enqueues one `/scan-shard` task per shard of `SCAN_SHARD_SIZE` projects plus one **scope shard** for the checks that look at the scope itself (Organization Policies, Resilience of Critical Assets over the scope's Asset Inventory and, in an organization scan, org IAM, SCC, audit logging, Essential Contacts, the organization's Advisory Notifications), schedules a *sweeper*, and returns within seconds.
 4.  **Parallel processing**: Each shard executes its checks concurrently using a thread pool (`app/checks/runner.py`) under a time budget (`SHARD_TIME_BUDGET_SECONDS`). Every finding is written to an intermediate file in GCS as soon as it is found. Cloud Tasks runs up to `SCAN_MAX_CONCURRENT_SHARDS` shards at a time and retries a failed shard; a shard that fails on its last attempt records its checks as error rows so one bad shard never costs the whole report.
 5.  **Automatic fan-in**: When a shard finishes it writes a *marker* file. The shard that sees a marker for every shard enqueues the `/run-aggregation` task. The task name is deterministic (`<job>-aggregate`), so when two shards finish together Cloud Tasks accepts only one; nothing is counted, nothing needs a database. The `/sweep` task runs every `SWEEP_INTERVAL_SECONDS` as a safety net: it gives shards whose task has vanished error rows and finishes the job, so a scan always terminates.
-6.  **Report build**: The single task, or the aggregation, reads the findings back (one item per check, with a **coverage** line stating how many projects were scanned), reads the **previous scan's summary** of the same scope from the bucket's `scopes/` prefix and compares the two (the report's *since* line and its deltas), renders the HTML and CSV reports, uploads them to Google Cloud Storage, files this scan's own summary under `scopes/` for the next scan to find, and deletes the intermediate files.
+6.  **Report build**: The single task, or the aggregation, reads the findings back (one item per check, with a **coverage** line stating how many projects were scanned), reads the **previous scan's summary** of the same scope from the bucket's `scopes/` prefix and compares the two (the report's *since* line and its deltas), with `BIGQUERY_DATASET` set loads the scan into BigQuery (v17, [History and analytics](#history-and-analytics)) and states the outcome in the header, renders the HTML and CSV reports, uploads them to Google Cloud Storage, files this scan's own summary under `scopes/` for the next scan to find, and deletes the intermediate files.
 7.  **Status and report pages**: The status page polls `/api/status/<job>/<scope_id>` every few seconds; for a sharded scan it shows *"Scanned 640 of 1,000 projects · organization-level checks: completed"*. When the job completes it offers **View interactive report** (`/report/<job>/<scope_id>`, the HTML served from the bucket by the service) and **Download CSV** (`/report/<job>/<scope_id>/csv`, streamed from the bucket by the service, behind the same sign-in as every other page). The report's on-demand features call the API from its pages: the Scorecard's executive summary (`/api/get-summary`, Gemini over the CSV in the bucket), the Overview's **Draft fixes** (`/api/get-suggestions`, Gemini) and the Cost Optimization page's **Get detailed insights** (`/api/get-insights`, the Recommender's insight types). Shards are an implementation detail: everything the user reads (status page, coverage line, error rows) speaks of projects and organization-level checks.
 
 ### **Architecture Diagram**
@@ -246,6 +258,7 @@ CloudGauge has four screens: three redesigned in v14.2 around one small design s
 * **The report's Overview** — the operator's working page. A fixed sidebar (each category with the colour of its worst status and the number of items that need a human, and when the report was generated and by which release), a header that states the scope, the report ID, the **Coverage** ("312 of 312 projects · organization-level checks completed"; amber with a note under the count cards when a sharded scan did not finish everything), in a folder scan a **Folder membership** row only when Cloud Asset Inventory and Resource Manager disagree about which projects are in the folder (see [How to Use](#how-to-use)), and the **Previous scan** (a link, or "none — first scan of this organization"), four count cards with how each moved since that scan, the review scores as bars, the **Changes since last scan** card when there is a previous scan, and the **Suggested fixes** card (powered by Gemini) with **Draft fixes**; the status line under it reports where the drafted fixes landed ("Suggested fixes added to 12 findings: Security & Identity (5) · Cost Optimization (7)") and offers **Try again** after an error.
 * **The report's Scorecard** — the one-pager for the people who will not open the category pages: a quarterly review, a leadership update. Four **stoplights**, one per pillar over one report category (Stability over Reliability & Resilience, Security over Security & Identity, Operations over Operational Excellence & Observability, Efficiency over Cost Optimization), each a three-lamp light that reads in monochrome, the category's score with its delta, a state in the bands the score bars already use (above 90 **Healthy**, above 70 **Needs attention**, else **At risk**; **Not assessed**, with no lamp lit and a dash for the score, when no check in the category reached a verdict) and the evidence behind it ("22 of 24 checks compliant · 1 could not be checked · 3 projects with findings · 1 incident impacted you in 90 days, 0 active"). Under them a **since line** — new and resolved findings, the first three status changes and a link to the rest on the Overview, or "First scan of this organization — changes appear from the next scan". **Top actions** lists the ten failing checks ranked by status, then projects affected, then findings (the table says so, and shows all three), each linking to its finding and tagged *fix in report* when the check ships its own command (the other failing checks get a drafted fix from Gemini on the Overview); its footers give the Organization Policies tally, the checks that could not run, and how many more failing checks the category pages hold. Last, the **Executive summary** card, where **Generate executive summary** asks Gemini; the summary is labelled *AI-generated* and has a **Copy** button. Three outline buttons at the top: **Print** (the Scorecard alone, on one A4 page), **Download action plan (CSV)** (the ranked actions with `Findings` and `Fix in report` columns and blank `Owner` and `Target date` columns to fill in) and **Copy as Markdown** (stoplights, since line, actions, and the executive summary once generated). Everything on the page is built from the same report context, so it states nothing the category pages cannot back (`app/reporting/scorecard.py`).
 * **A category page** — the checks as accordions, worst first. Each row is a status dot, the check's name with its one-line summary ("1,204 findings across 312 of 1,000 projects (31%)"), a status pill and, after a previous scan, a change chip ("+3 new · −5 resolved", or "not compared"); on load the items that need a human (Action Required, Investigation Recommended, Error) are open and the Compliant and Informational ones collapsed. Rows the previous scan did not have carry a **New** marker (generated by CSS, so it is never part of the row's text for sorting, filtering or the CSV), and the rows it had and this scan does not are listed under the table. **Expand all** / **Collapse all** sit next to the filter box, and a `#<section>-<check>` link opens that one check.
+* **The history page** *(v17)* — `/history/<scope>/<scope id>`, linked from the report header's **History** row, the status page's **View history** and the setup page once a resource is chosen: the scope's scans over time from the summaries filed under `scopes/`. The four pillar scores as monochrome lines (inline SVG, one dash pattern per pillar, no script), then one row per scan — when, who asked (a person, or `schedule: weekly-org`), the release, the project count, the four scores, the four Overview counts and the checks whose status changed since the scan before — each linking to its report. Scores are recomputed from each scan's check statuses under the current rule, as *Changes since last scan* does.
 
 ![A category page: accordions, status pills, monospace resources](./assets/report_findings.png)
 
@@ -277,26 +290,28 @@ app/
 ├── scan_job.py          # Background scan: run checks -> build reports -> upload -> clean up (or dispatch shards)
 ├── fanout.py            # Sharded scans: dispatcher, shard worker, marker fan-in, aggregation, sweeper
 ├── routes/              # Blueprints
-│   ├── ui.py            #   /, /scan, /status/..., /report/...
+│   ├── ui.py            #   /, /scan, /status/..., /report/..., /history/<scope>/<scope_id> (v17)
 │   ├── api.py           #   /api/list-resources, /api/status/..., /api/get-summary, /api/get-suggestions, /api/get-insights
-│   └── worker.py        #   /run-scan, /scan-shard, /run-aggregation, /sweep (invoked by Cloud Tasks)
-├── checks/              # Checks grouped by pillar: security, cost, reliability, operations, network
+│   └── worker.py        #   /run-scan, /scan-shard, /run-aggregation, /sweep (invoked by Cloud Tasks); /scheduled-scan (Cloud Scheduler, v17)
+├── checks/              # Checks grouped by pillar: security, cost, reliability, operations, network, capacity (v17)
 │   ├── registry.py      #   The check plan: which checks run, and in what order
 │   ├── runner.py        #   Runs the plan concurrently (ThreadPoolExecutor) and reports progress
 │   ├── categories.py    #   Maps check names to report categories; folds briefing rows across shards
 │   ├── service_health.py#   Service Health Incidents briefing + Personalized Service Health API Coverage (v14)
 │   ├── advisories.py    #   Advisory Notifications briefing + Advisory Notifications Settings (v14)
 │   ├── gke_versions.py  #   GKE Supported Versions: clusters and node pools on minors GKE no longer offers (v15)
+│   ├── capacity.py      #   Capacity Commitments, Reservation Coverage, Commitments Expiring, Capacity Signals (v17)
 │   └── not_checked.py   #   The projects a check could not cover, reported as "Projects not checked"
-├── services/            # gcp.py (clients), tasks.py (Cloud Tasks), results_store.py (the bucket: findings, status, reports, per-scope scan summaries), resource_manager.py (scope listing, projects in scope, folder membership reconciled with Resource Manager, v15.4), org_policies.py, gemini.py, insights.py, worker_url.py
-├── reporting/           # HTML and CSV report builders; layouts.py lays out a check's table (v14.1); changes.py compares two scans (v15); scorecard.py builds the Scorecard page and its exports (v15.1); scoring.py is the score rule (v15.2)
+├── services/            # gcp.py (clients), tasks.py (Cloud Tasks), results_store.py (the bucket: findings, status, reports, per-scope scan summaries, schedule notes), resource_manager.py (scope listing, projects in scope, folder membership reconciled with Resource Manager, v15.4), org_policies.py, gemini.py, insights.py, worker_url.py, bigquery_export.py (the scans' export, v17), schedules.py (scheduled scans, v17)
+├── reporting/           # HTML and CSV report builders; layouts.py lays out a check's table (v14.1); changes.py compares two scans (v15); scorecard.py builds the Scorecard page and its exports (v15.1); scoring.py is the score rule (v15.2); history.py builds the history page (v17)
 ├── synthetic/           # Synthetic load mode: a generated organization behind the GCP client seam
-└── templates/           # _design.css (tokens and primitives every page inlines, v14.2), index.html, status.html, report/ (HTML, CSS, JS)
+└── templates/           # _design.css (tokens and primitives every page inlines, v14.2), index.html, status.html, history.html (v17), report/ (HTML, CSS, JS)
 tests/                   # pytest suite (see Local Development & Testing)
 tools/synthetic_scan.py  # Offline load test against the synthetic organization (see Load Testing)
 tools/demo_gif.py        # Records the README's demo GIF from a scan on a deployed service (Playwright + Pillow, own venv)
-tools/deploy.sh          # Deploys or updates the two services (worker, web behind IAP) and grants access; see Deployment
+tools/deploy.sh          # Deploys or updates the two services (worker, web behind IAP), the export dataset and the schedules, and grants access; see Deployment
 tools/iap_token.py       # A token that passes IAP, for curl, scripts and demo_gif.py (service-account signed JWT)
+tools/backfill_export.py # Loads the scans made before the BigQuery export existed, from their summaries and CSVs (v17)
 Dockerfile               # Production image
 Dockerfile.test          # Runs the test suite inside the production image
 cloudbuild.yaml          # Cloud Build: build -> test -> push
@@ -353,6 +368,9 @@ Do the **Common Prerequisites** once, then deploy with **Method 1** (the script;
        osconfig.googleapis.com \
        monitoring.googleapis.com \
        cloudasset.googleapis.com
+
+   # v17: scheduled scans, the BigQuery export
+   gcloud services enable cloudscheduler.googleapis.com bigquery.googleapis.com
    ```
 
    > The Service Health and Advisory Notifications APIs must be enabled in the project CloudGauge runs in: the scanner calls them on behalf of every scanned project, and the report says so (as an *Error* on the two Service Health / Advisory Notifications items) if either is missing. The **Personalized Service Health API Coverage** check additionally lists the *scanned* projects in which `servicehealth.googleapis.com` is not enabled.
@@ -360,7 +378,7 @@ Do the **Common Prerequisites** once, then deploy with **Method 1** (the script;
 
 2. **Create Service Account & Grant Permissions**:  
    * This SA is the identity of both services: it scans the organization, creates the tasks and invokes the worker.
-   * `tools/deploy.sh` creates it and grants the **project-level** roles (2 and 3 below) if they are missing. The **organization-level** roles (1 and 1b) are the one manual step, for an account that can grant roles on the organization.
+   * `tools/deploy.sh` creates it and grants the **project-level** roles (2 and 3 below) if they are missing. The **organization-level** roles (1 and 1b) are the one manual step, for an account that can grant roles on the organization. **v17 adds no organization-level role**: the new checks read through roles the account already holds — `roles/iam.securityReviewer` lists every Recommender (the commitment, IAM and quota recommenders included), `roles/compute.networkViewer` the reservations, commitments and quotas, `roles/logging.viewer` the capacity signals, `roles/cloudasset.viewer` the snapshots, disks and Cloud SQL versions. The BigQuery export, when configured, adds two **project-level** grants in the project CloudGauge runs in (step 2c), nothing on the organization. Nothing on any **billing account** either: billing access is centralised in most organizations, so CloudGauge does not read billing accounts; spend-based commitments arrive in v17.1 through the organization's Recommender export to BigQuery.
 ```
    # Set your Organization ID
    export ORG_ID="<your-org-id>"
@@ -440,6 +458,11 @@ Do the **Common Prerequisites** once, then deploy with **Method 1** (the script;
 
    gcloud projects add-iam-policy-binding ${PROJECT_ID} --member="serviceAccount:${SA_EMAIL}" --role="roles/cloudbuild.builds.builder"
 
+   # 2c. (v17, only with BIGQUERY_DATASET) the export: load jobs in the project, and WRITER on the dataset alone
+   #     (tools/deploy.sh creates the dataset in REGION and grants both; see History and analytics)
+
+   gcloud projects add-iam-policy-binding ${PROJECT_ID} --member="serviceAccount:${SA_EMAIL}" --role="roles/bigquery.jobUser"
+
    
 
    # 3. Service Account User on the SA itself: the web service hands its own identity to Cloud Tasks
@@ -478,6 +501,8 @@ The script, in order (every step is idempotent):
 3. **Worker** — deploys `cloudgauge-worker` with `CLOUDGAUGE_ROLE=worker`, `--no-allow-unauthenticated --ingress internal --timeout 3600 --concurrency 4 --memory 2Gi`, and makes the service account its only invoker.
 4. **Web** — deploys `cloudgauge` with `CLOUDGAUGE_ROLE=web`, `WORKER_URL` (the worker), `PROJECT_NUMBER`, `--iap --no-allow-unauthenticated --concurrency 80 --memory 1Gi --timeout 600`, and grants IAP's service agent `roles/run.invoker` on it.
 5. **Access** — grants each `OPERATORS` entry `roles/iap.httpsResourceAccessor` on the web service.
+6. **Export** *(v17, with `BIGQUERY_DATASET`)* — creates the dataset in `REGION` if missing and lets the service account load into it (WRITER on the dataset, `roles/bigquery.jobUser` on the project).
+7. **Schedules** *(v17, with `SCHEDULES`)* — creates or updates one Cloud Scheduler job per entry, posting to the worker's `/scheduled-scan` with the service account's OIDC token.
 
 It ends with the URL to open. Both services are told `WORKER_URL` = Cloud Run's deterministic URL of the worker, `https://cloudgauge-worker-<project number>.<region>.run.app`, which is known before the worker exists, so nothing is discovered at startup and no `roles/run.viewer` is needed.
 
@@ -489,7 +514,10 @@ It ends with the URL to open. Both services are told `WORKER_URL` = Cloud Run's 
 | `QUEUE`, `BUCKET`, `SERVICE_ACCOUNT` | `cloudgauge-scan-queue`, `cloudgauge-reports-${PROJECT_ID}`, `cloudgauge-sa` | The names from the prerequisites (an email works for the service account). |
 | `IMAGE`, `TAG` | `gcr.io/${PROJECT_ID}/${SERVICE}`, the short git hash | What to build and deploy. |
 | `OPERATORS` | – | Comma-separated principals allowed to sign in: `user:`, `group:`, `domain:` (a bare email counts as a user). |
-| `EXTRA_ENV` | – | More settings for both services, `KEY=VALUE,KEY=VALUE` (see [Configuration Reference](#configuration-reference)). |
+| `EXTRA_ENV` | – | More settings for both services, `KEY=VALUE,KEY=VALUE` (see [Configuration Reference](#configuration-reference)); values cannot contain commas. |
+| `COST_ALLOCATION_LABELS` | – | The label keys every project must carry, `cost-center,environment,owner` (v17, [Cost Allocation Labels](#what-it-checks)); its own variable because the value has commas. |
+| `BIGQUERY_DATASET` | – | Export every finished scan to this BigQuery dataset (v17): the script creates it in `REGION` if missing, grants the service account WRITER on it and `roles/bigquery.jobUser` on the project, and sets the variable on both services ([History and analytics](#history-and-analytics)). |
+| `SCHEDULES` | – | Scheduled scans (v17), semicolon-separated `NAME=SCOPE/SCOPE_ID@CRON` with the cron in UTC: `"weekly-org=organization/123456789012@30 0 * * 1"`. One Cloud Scheduler job per entry, created or updated, posting to the worker's `/scheduled-scan` as the service account. |
 | `SKIP_SETUP=1`, `SKIP_BUILD=1` | – | Skip step 1 (updating a deployment that works); skip step 2 and deploy `IMAGE:TAG` as it is. |
 | `PROGRAMMATIC_ACCESS=1` | – | Also lets the service account through IAP and lets your gcloud account sign tokens for it, so `tools/iap_token.py` works ([Who can use it](#who-can-use-it)). |
 | `DRY_RUN=1` | – | Prints the gcloud commands instead of running them. |
@@ -618,6 +646,11 @@ CloudGauge is configured entirely through environment variables on the Cloud Run
 | `SERVICE_HEALTH_WINDOW_DAYS` | No | `90` | How far back the **Service Health Incidents** briefing looks (1–366 days). |
 | `SERVICE_HEALTH_RELEVANCE` | No | `IMPACTED,RELATED` | Which Personalized Service Health relevance levels the briefing lists, comma-separated: `IMPACTED`, `RELATED`, `PARTIALLY_RELATED`, `NOT_IMPACTED`, `UNKNOWN`. Add `PARTIALLY_RELATED` for a wider view. |
 | `ADVISORY_WINDOW_DAYS` | No | `365` | How far back the **Advisory Notifications** briefing looks (1–3660 days). |
+| `COST_ALLOCATION_LABELS` | No | – | The label keys every project must carry, comma-separated (`cost-center,environment,owner`); **Cost Allocation Labels** lists the projects missing one. Unset: the check is *Informational* and stays out of the score (v17). |
+| `SNAPSHOT_MAX_AGE_DAYS` | No | `90` | A disk snapshot older than this is listed by **Snapshot Sprawl** (v17). |
+| `RESERVATION_COVERAGE_MIN_VCPUS` | No | `32` | **Reservation Coverage** speaks up from this many running vCPUs in one zone of a project with fewer reserved there (v17). |
+| `BIGQUERY_DATASET` | No | – | The BigQuery dataset, in `PROJECT_ID`, every finished scan is loaded into (`scans` and `findings`; v17). Unset: nothing is exported. `tools/deploy.sh BIGQUERY_DATASET=…` creates it and grants what the load needs ([History and analytics](#history-and-analytics)). |
+| `BIGQUERY_EXPORT_WAIT_SECONDS` | No | `60` | How long the report build waits for the export's load jobs (0–600) before it reports them as still running; they complete on their own either way. |
 | `SCAN_SHARD_SIZE` | No | `20` | Projects per shard. A scope with more projects than this runs as a sharded scan (see [Scaling to Large Organizations](#scaling-to-large-organizations)); up to this many, in one task as before. |
 | `SCAN_MAX_CONCURRENT_SHARDS` | No | `25` | Shards Cloud Tasks runs at a time (the queue's max concurrent dispatches). Lower it if the organization's API quotas are tight, raise it for speed. |
 | `SHARD_TIME_BUDGET_SECONDS` | No | `1200` | Time a shard gives its checks (60–1800). Checks still running when it runs out are reported as errors for that shard. |
@@ -708,6 +741,81 @@ A canary does not touch the pages' access: the IAP bindings belong to the servic
 > **What differs by scope.** Every scope runs the same project checks over the projects in scope, Organization Policies as they are *effective* at the scanned resource, and **Resilience of Critical Assets** (Cloud SQL HA, backups, retention and PITR; zonal MIGs; single-region snapshots) over the Asset Inventory of the scanned organization, folder or project (since v15.6; organization scans only before). An organization scan adds the checks that describe the organization itself: **Organization IAM**, **Security Command Center Status**, **Organization Audit Logging**, **Essential Contacts**, **Unattended Projects**, and the organization's own Advisory Notifications and Recent Changes.
 
 > **Folder scans and recently moved projects.** A folder scan finds the folder's projects with Cloud Asset Inventory, which can lag a project move or creation by an hour or more, so it also asks Resource Manager for the folder's direct child projects (one call) and compares the two. A project Resource Manager lists in the folder that Asset Inventory does not yet is scanned too; one Asset Inventory still places there that Resource Manager no longer does (moved out, deleted, or not readable by the scanner) is scanned anyway. When the two disagree the header shows a **Folder membership** row and the Overview a note naming the projects; when they agree — the usual case — nothing appears. Projects under a subfolder of the scanned folder come from Asset Inventory alone.
+
+## **History and analytics**
+
+Every finished scan leaves a summary under `scopes/<scope>/<scope id>/` in the results bucket, which the report's *Changes since last scan* reads. v17 builds three things on top of it: **scheduled scans**, so the history fills in without anyone clicking; the **history page**, the scope's scans over time; and a **BigQuery export** of every scan, for dashboards and questions the pages do not answer.
+
+### **Scheduled scans**
+
+`SCHEDULES` on `tools/deploy.sh` creates one Cloud Scheduler job per entry (`NAME=SCOPE/SCOPE_ID@CRON`, cron in UTC):
+
+```
+PROJECT_ID=my-project SKIP_BUILD=1 TAG=<tag> \
+SCHEDULES="weekly-org=organization/123456789012@30 0 * * 1;nightly-prod=project/my-prod@0 2 * * *" \
+tools/deploy.sh
+```
+
+Each job posts `{"scope", "scope_id", "name"}` to the worker's `/scheduled-scan` with the service account's OIDC token — the same identity Cloud Tasks uses, so the worker needs no new invoker and the web service, behind IAP, is not involved. The endpoint enqueues the same scan task **Start scan** does; the report and the summary read *Requested by* `schedule: <name>`. One rule on top: a scope scans once at a time — while the scope's previous scheduled scan is still running the endpoint answers **409** and starts nothing (the job's last run shows the failure in Cloud Scheduler), so a weekly schedule on an organization that takes longer than a week never piles scans up. `gcloud scheduler jobs run NAME --location=REGION` starts one now; the status page of the job it started is `/status/<job id>/<scope>/<scope id>` (the 202 body names it).
+
+### **The history page**
+
+`/history/<scope>/<scope id>` — from the report header's **History** row, the status page's **View history**, or the setup page once a resource is chosen — shows the newest 52 scans of a scope: the four pillar scores as lines over time and one row per scan with its scores, its four Overview counts, who asked and the checks whose status changed since the scan before, each linking to its report. It reads the summaries, so it covers every scan since v15 and needs nothing configured.
+
+### **The BigQuery export**
+
+With `BIGQUERY_DATASET` set (`tools/deploy.sh BIGQUERY_DATASET=cloudgauge` creates the dataset in `REGION` and grants the service account WRITER on it and `roles/bigquery.jobUser` on the project — nothing on the organization), the report build loads each finished scan into two tables before it renders, with BigQuery **load jobs** (free, idempotent: a retried build is told the jobs exist), and the report's header says what became of it — *n finding rows and this scan's summary loaded into cloudgauge.findings and cloudgauge.scans*, *still running*, or *failed: …*. The export never fails a scan. Synthetic scans are not exported.
+
+| Table | One row per | Columns |
+|---|---|---|
+| `scans` | scan | `job_id`, `scope`, `scope_id`, `generated_at` (partition), `release`, `requested_by`, `total_projects`, `projects_scanned`, the four Overview counts (`action_count` …), the four scores (`security_score`, `cost_score`, `reliability_score`, `operations_score`; null when not assessed), `checks` (repeated: `check_name`, `category`, `status`, `rows`), `export_version` |
+| `findings` | finding row of every check, plus one per organization policy | `job_id`, `scope`, `scope_id`, `generated_at` (partition), `release`, `category`, `check_name`, `status`, `project`, `identity` (the string the report compares scans by, so a finding can be followed across scans), `new_since_last_scan` (null when the scan compared nothing), `row_json` (the row as JSON: `JSON_VALUE(row_json, '$.Bucket')`) |
+
+Both tables are clustered by `scope_id` (and `check_name`). Scans made before the export existed are loaded once from their summaries and CSV reports:
+
+```
+python tools/backfill_export.py --project my-project --location asia-south1 --bucket cloudgauge-reports-my-project --dataset cloudgauge [--dry-run]
+```
+
+It skips the scans already in `scans`, so it can be run again. **Five queries to start from** (replace the dataset and scope ID):
+
+```sql
+-- 1. The four scores over time, one row per scan
+SELECT generated_at, security_score, cost_score, reliability_score, operations_score, total_projects
+FROM `my-project.cloudgauge.scans` WHERE scope_id = '123456789012' ORDER BY generated_at;
+
+-- 2. Which checks flipped status between the last two scans
+WITH last_two AS (
+  SELECT job_id, generated_at, c.check_name, c.status, ROW_NUMBER() OVER (ORDER BY generated_at DESC) AS n
+  FROM `my-project.cloudgauge.scans`, UNNEST(checks) AS c WHERE scope_id = '123456789012'
+  QUALIFY DENSE_RANK() OVER (ORDER BY generated_at DESC) <= 2)
+SELECT a.check_name, b.status AS before, a.status AS after
+FROM last_two a JOIN last_two b USING (check_name)
+WHERE a.generated_at > b.generated_at AND a.status != b.status;
+
+-- 3. Findings that have been open for every one of the last N scans (the ones nobody fixes)
+SELECT check_name, identity, COUNT(DISTINCT job_id) AS scans_open, MIN(generated_at) AS first_seen
+FROM `my-project.cloudgauge.findings`
+WHERE scope_id = '123456789012' AND status IN ('Action Required', 'Investigation Recommended')
+GROUP BY check_name, identity HAVING scans_open >= 4 ORDER BY scans_open DESC, first_seen;
+
+-- 4. Identified monthly savings per scan (the Efficiency line, over time)
+SELECT generated_at, ROUND(SUM(SAFE_CAST(REPLACE(SPLIT(JSON_VALUE(row_json, '$."Est. Monthly Saving"'), ' ')[OFFSET(0)], ',', '') AS FLOAT64)), 2) AS usd_per_month
+FROM `my-project.cloudgauge.findings`
+WHERE scope_id = '123456789012' AND category = 'Cost Optimization' AND JSON_VALUE(row_json, '$."Est. Monthly Saving"') LIKE '% USD'
+GROUP BY generated_at ORDER BY generated_at;
+
+-- 5. The projects with the most open findings in the latest scan
+SELECT project, COUNT(*) AS findings, COUNT(DISTINCT check_name) AS checks
+FROM `my-project.cloudgauge.findings`
+WHERE job_id = (SELECT job_id FROM `my-project.cloudgauge.scans` WHERE scope_id = '123456789012' ORDER BY generated_at DESC LIMIT 1)
+  AND status IN ('Action Required', 'Investigation Recommended') AND project IS NOT NULL
+GROUP BY project ORDER BY findings DESC LIMIT 20;
+```
+
+**Looker Studio.** Create a report → add a data source → BigQuery → your project → `cloudgauge` → `scans`; a time-series chart with `generated_at` as the dimension and the four scores as metrics (aggregation *Average*, filter `scope_id`) is the history page as a dashboard. A second data source on `findings` gives a table of `check_name`, `project`, `status` filtered to the latest `job_id`, and a scorecard of `COUNT_DISTINCT(identity)` where `status = 'Action Required'`. Both tables are partitioned by `generated_at`: keep a date-range control on it to keep queries small.
+
+**Gemini Enterprise / "talk to your infrastructure".** Point a Gemini Enterprise (Agentspace) data store, or a Conversational Analytics agent in Looker Studio, at the `cloudgauge` dataset: the column names above are what the questions resolve against ("which projects gained findings since last month", "how long has the public bucket in data-lake been open"). `row_json` holds every column a check wrote, so questions about a check's own fields (`$.Bucket`, `$.Principal`, `$.Zone`) are answered with `JSON_VALUE`.
 
 ## **Local Development & Testing**
 

@@ -72,18 +72,24 @@ RESOURCE, RESOURCE_LIST, NUMBER, TIME, STATE, PROSE = "resource", "resource-list
 COLUMN_ROLES = {
     **dict.fromkeys(("Project", "Project ID", "Instance", "VM", "Cluster", "Node Pool", "Bucket", "Service Account", "Principal", "Member",
                      "Role", "Rule Name", "VPC", "Network", "Subnet", "MIG Name", "Sink Name", "Destination", "Resource", "Resource Name",
-                     "Region", "Location", "Metric", "ID", "Incident ID", "Policy", "Version"), RESOURCE),
-    **dict.fromkeys(("Projects", "Project IDs", "Locations", "VMs Not Reporting", "Standalone VMs", "Source Ranges", "Ports"), RESOURCE_LIST),
-    **dict.fromkeys(("Rule Count", "Est. Monthly Saving", "Usage", "Retention", "Impacted projects"), NUMBER),
-    **dict.fromkeys(("Date", "When (UTC)", "Started", "Ended"), TIME),
+                     "Region", "Location", "Metric", "ID", "Incident ID", "Policy", "Version",
+                     # v17
+                     "Snapshot", "Zone", "Commitment", "Name", "Current Role", "Recommended Role", "Storage Class",
+                     "Service", "Quota"), RESOURCE),
+    **dict.fromkeys(("Projects", "Project IDs", "Locations", "VMs Not Reporting", "Standalone VMs", "Source Ranges", "Ports", "Missing Labels"), RESOURCE_LIST),
+    **dict.fromkeys(("Rule Count", "Est. Monthly Saving", "Usage", "Retention", "Impacted projects",
+                     # v17
+                     "Age (days)", "Size (GB)", "Days Left", "Running vCPUs", "Reserved vCPUs", "In Use", "Events", "Headroom", "Current Limit"), NUMBER),
+    **dict.fromkeys(("Date", "When (UTC)", "Started", "Ended", "Ends", "Last Seen", "Extended Support From", "Until"), TIME),
     # "Component" ("Control plane", "Node pool pool-2"): a state, so its digits survive in a row's identity (app.reporting.changes).
-    **dict.fromkeys(("Status", "State", "Relevance", "Type", "Finding Type", "Tier", "Category", "Expected Value", "Current Value", "Component"), STATE),
+    **dict.fromkeys(("Status", "State", "Relevance", "Type", "Finding Type", "Tier", "Category", "Expected Value", "Current Value", "Component",
+                     "Kind", "Signal", "Family", "Plan"), STATE),
     **dict.fromkeys(("Finding", "Issue", "Error", "Reason", "Detail", "Details", "Summary", "Recommendation", "Insight", "Incident",
-                     "Notification", "Subject", "Products", "Skipped check", "Missing Categories"), PROSE),
+                     "Notification", "Subject", "Products", "Skipped check", "Missing Categories", "Resources"), PROSE),
 }
 # What the items of a resource-list column are called when there are too many to show inline ("37 projects").
 LIST_NOUNS = {"Projects": "projects", "Project IDs": "projects", "Locations": "locations", "VMs Not Reporting": "VMs", "Standalone VMs": "VMs",
-              "Source Ranges": "ranges", "Ports": "ports"}
+              "Source Ranges": "ranges", "Ports": "ports", "Missing Labels": "labels"}
 # The CSS class a role renders with ("" for prose: the default cell).
 ROLE_CSS = {RESOURCE: "code", RESOURCE_LIST: "code", NUMBER: "num", TIME: "time", STATE: "state", PROSE: "prose"}
 # Values that look like a number, a percentage or an amount: "12", "1,204", "91.3%", "$412.00", "-3".

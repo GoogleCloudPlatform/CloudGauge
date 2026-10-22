@@ -203,16 +203,18 @@ class FanOut:
         task_exists: ``task_exists(task_id) -> bool | None``: whether a named task is
             still on the queue; ``None`` if unknown. Default: always unknown.
         banner: Notice rendered on the report (synthetic mode).
+        exporter: Loads finished scans into BigQuery (v17, ``app.services.bigquery_export``); None: no export.
         clock: Monotonic clock for time budgets (tests).
         now: Wall clock, ``now() -> datetime`` (UTC), for the job's time limit (tests).
     """
 
-    def __init__(self, settings, store, *, enqueue, task_exists=None, banner=None, clock=time.monotonic, now=None):
+    def __init__(self, settings, store, *, enqueue, task_exists=None, banner=None, clock=time.monotonic, now=None, exporter=None):
         self.settings = settings
         self.store = store
         self.enqueue = enqueue
         self.task_exists = task_exists or (lambda task_id: None)
         self.banner = banner
+        self.exporter = exporter
         self.clock = clock
         self.now = now or (lambda: datetime.now(timezone.utc))
 
@@ -445,9 +447,13 @@ class FanOut:
             previous = None if self.banner else self.store.read_previous_summary(scope, scope_id, job_id)
             # The manifest's project dicts carry what the folder listing reconciled (app.services.resource_manager).
             membership = folder_membership([project for shard in manifest["shards"].values() for project in shard])
+            export = None
+            if self.exporter is not None and not self.banner:
+                exporter, scanned = self.exporter, coverage["projects_scanned"]
+                export = lambda summary, results, changes: exporter.export(summary, results, changes, projects_scanned=scanned)
             html_report, csv_report, summary = generate_reports(scope, scope_id, job_id, all_results, banner=self.banner,
                                                                 coverage=coverage, previous=previous, membership=membership,
-                                                                requested_by=manifest.get("requested_by"))
+                                                                requested_by=manifest.get("requested_by"), export=export)
             self.store.upload_reports(job_id, scope_id, html_report, csv_report)
             if not self.banner:
                 self.store.write_scan_summary(summary)

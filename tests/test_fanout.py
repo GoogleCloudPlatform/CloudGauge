@@ -145,15 +145,24 @@ def test_scope_and_project_plans_partition_the_full_plan(scope):
     scope_plan = registry.scope_check_plan(scope, SCOPE_ID, JOB)
     project_plan = registry.project_check_plan(scope, SCOPE_ID, JOB, plist, ['z'], ['r'])
     assert [spec.name for spec in project_plan] == [spec.name for spec in full if spec.name not in scope_level]
-    misc_in_scope = [spec for spec in scope_plan if spec.name == registry.MISCELLANEOUS_CHECK]
-    assert [spec.name for spec in scope_plan if spec.name != registry.MISCELLANEOUS_CHECK] == \
+    split = [spec for spec in scope_plan if spec.name in registry.SPLIT_CHECKS]
+    assert [spec.name for spec in scope_plan if spec.name not in registry.SPLIT_CHECKS] == \
            [spec.name for spec in full if spec.name in scope_level]
-    # The miscellaneous check is split: org-wide insights once (organization only), project work in every shard.
+    # The split checks run their scope-wide half once, in the scopes that have one: the miscellaneous check's
+    # organization insights (organization only), IAM Least Privilege's own recommendations (organization or folder; v17).
+    assert [spec.name for spec in split] == [name for name, (scopes, _, _) in registry.SPLIT_CHECKS.items() if scope in scopes]
+    misc_in_scope = [spec for spec in split if spec.name == registry.MISCELLANEOUS_CHECK]
     assert bool(misc_in_scope) == (scope == 'organization')
     if misc_in_scope:
         assert misc_in_scope[0].func.keywords == {'project_checks': False} and misc_in_scope[0].args[2] == []
+    iam_in_scope = [spec for spec in split if spec.name == 'IAM Least Privilege']
+    assert bool(iam_in_scope) == (scope != 'project')
+    if iam_in_scope:
+        assert iam_in_scope[0].func.keywords == {'project_level': False} and iam_in_scope[0].args[2] == []
     misc_in_project = next(spec for spec in project_plan if spec.name == registry.MISCELLANEOUS_CHECK)
     assert misc_in_project.func.keywords == {'org_insights': False} and misc_in_project.args[2] is plist
+    iam_in_project = next(spec for spec in project_plan if spec.name == 'IAM Least Privilege')
+    assert iam_in_project.func.keywords == {'scope_level': False} and iam_in_project.args[2] is plist
 
 
 def test_project_plan_passes_the_shard_projects_and_locations():
@@ -450,7 +459,7 @@ def test_shard_failure_is_retried_then_becomes_error_rows(store, queue, monkeypa
     assert marker['status'] == 'failed' and marker['attempt'] == 3 and 'quota exceeded' in marker['error']
     names = [spec.name for spec in registry.project_check_plan('organization', SCOPE_ID, JOB, projects(2), [], [])]
     errors = store.read_all_findings(JOB, shard_id='shard-001')
-    assert sorted(f['Check'] for f in errors) == sorted(names) and len(names) == 19  # v14: + Service Health Incidents; v15: + GKE Supported Versions
+    assert sorted(f['Check'] for f in errors) == sorted(names) and len(names) == 25  # v14: + Service Health Incidents; v15: + GKE Supported Versions; v17: + 6
     assert all(f['Status'] == 'Error' and f['Finding'][0]['Error'].startswith(
         'Not checked for 2 projects (p-000, p-001): the scan failed after 3 attempts. Last error: ') for f in errors)
     assert 'quota exceeded' in errors[0]['Finding'][0]['Error']
@@ -667,7 +676,7 @@ def test_sweep_finishes_the_job_when_a_shard_has_died(store, queue, monkeypatch)
     marker = store.read_markers(JOB)['shard-002']
     assert marker['status'] == 'failed' and marker['swept'] == 1 and 'crashed on every attempt' in marker['error']
     errors = store.read_all_findings(JOB, shard_id='shard-002')
-    assert len(errors) == 19 and all(f['Status'] == 'Error' for f in errors)  # one per project-level check (v15: 19)
+    assert len(errors) == 25 and all(f['Status'] == 'Error' for f in errors)  # one per project-level check (v15: 19; v17: 25)
     assert queue.calls == [('/run-aggregation', BODY, f'{JOB}-aggregate', None)]
     assert store.read_status(JOB, SCOPE_ID)['current_task'] == 'The scan of 1 project failed; merging the results of the others...'
     assert all(f['Finding'][0]['Error'] == 'Not checked for 1 project (p-002): the scan crashed on every attempt.' for f in errors)

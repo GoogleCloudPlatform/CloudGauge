@@ -104,6 +104,8 @@ RESHAPED_CHECKS = {
     # v15.6: one row counting the snapshots → one row per single-region snapshot (rows changed);
     # v16.1: a snapshot in a multi-region passes (rule changed). The newest line is the one that matters.
     "Disk Snapshot Resilience": ("16.1", RULE_CHANGED),
+    # v17: the rows gained Family and Headroom (rows changed), and 80–95 % is Investigation Recommended now.
+    "Quota Utilization (>80%)": ("17", ROWS_CHANGED),
 }
 
 DIGITS = re.compile(r"\d[\d,]*(?:\.\d+)?")

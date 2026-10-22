@@ -8,9 +8,208 @@ the test suite running inside the image, a zero-traffic canary revision scanned
 against a real organization, promotion, and a production scan compared fact for
 fact with the previous version's report.
 
-Versions are the image tags (`v5` … `v16.1`); the commit is the one that shipped.
+Versions are the image tags (`v5` … `v17`); the commit is the one that shipped.
 
 ---
+
+## v17 — History, analytics and FinOps
+
+The release that turns single reports into a record. Every finished scan can
+now be **loaded into BigQuery** (two tables, `scans` and `findings`, by free
+load jobs the report build starts and the header accounts for), **scheduled
+scans** fill that record in without anyone clicking (Cloud Scheduler posting to
+the worker as the service account; a scope scans once at a time), and a
+**history page** shows a scope's scans over time — the four pillar scores as
+lines, one row per scan with what flipped since the one before. On the
+findings side, **FinOps** joins the cost checks: six more recommenders
+(resource-based commitments, overprovisioned Cloud SQL, Cloud Run cost,
+BigQuery slots, idle images, Cloud Storage soft delete), **cost-allocation
+labels**, **storage lifecycle**, **snapshot sprawl**, **commitments
+expiring**, and a
+savings total on the Scorecard's Efficiency line. Capacity gets its own pair of
+checks — what is reserved and committed, what runs without a reservation, and
+where Compute Engine has been short of capacity or quota in the last 30 days —
+the quota check learns accelerator families, two thresholds and headroom, Cloud
+SQL versions in extended support are flagged, and the IAM recommender's unused
+roles land in Security. Thirteen new report names, no new organization-level
+role: every new check reads through roles the service account already holds.
+
+### Changed
+
+- **BigQuery export** (`app/services/bigquery_export.py`): with
+  `BIGQUERY_DATASET` set, `generate_reports` calls the exporter between the
+  context and the page — `scans` (one row per scan: who, how many projects,
+  the four scores and counts, every check's status as a repeated record) and
+  `findings` (one row per finding row of every check and per organization
+  policy, with the row's *identity* from `app.reporting.changes`, whether it
+  was new, and the raw row as `row_json`) staged as NDJSON under
+  `exports/<job>/` and loaded by two jobs named after the scan's job ID
+  (`cloudgauge-<job>-<table>`; a 409 is a retry, polled not re-inserted),
+  `WRITE_APPEND`, created on first use, partitioned by day on `generated_at`,
+  clustered by `scope_id` (and `check_name`), `ALLOW_FIELD_ADDITION`. The build
+  waits `BIGQUERY_EXPORT_WAIT_SECONDS` (60) and the header's new **BigQuery
+  export** row says *loaded*, *still running* or *failed: …*; nothing here can
+  fail a scan, and synthetic scans are never exported. The REST API through
+  `app.services.gcp`: no new dependency. `Services.get_exporter()` builds it
+  once; `scan_job` and `FanOut.aggregate` pass it through.
+  `tools/backfill_export.py` loads the scans made before the export existed
+  from their summaries and CSV reports (the CSV's *New since last scan* column
+  becomes the flag; text details are split back on `"; "`), skipping the job
+  IDs already in `scans`.
+- **Scheduled scans** (`app/services/schedules.py`, `/scheduled-scan` on the
+  worker blueprint): Cloud Scheduler posts `{scope, scope_id, name}`; the
+  endpoint validates it (400), notes the job under
+  `schedules/<scope>/<scope id>.json` and enqueues the usual `/run-scan` task
+  with `requested_by="schedule: <name>"` (202 with the status path), or
+  answers 409 while the noted job's status file is missing or not finished
+  (a note older than 36 hours is stale). `tools/deploy.sh SCHEDULES=…` parses
+  `NAME=SCOPE/SCOPE_ID@CRON` entries before it changes anything and creates or
+  updates one job each (`--oidc-service-account-email`, audience the worker's
+  URL, `Etc/UTC`, no retries).
+- **History page** (`app/reporting/history.py`, `history.html`,
+  `/history/<scope>/<scope_id>`): `GcsResultsStore.list_summaries` (newest
+  first, `HISTORY_PAGE_SCANS` = 52) → one `HistoryEntry` per scan with scores
+  recomputed under the current rule (`scores_from_checks`), the Overview
+  counts, and `status_flips` against the scan before (briefings excluded,
+  regressions first); the chart is inline SVG — one polyline per pillar in
+  ink with a dash pattern each, 0/50/100 hairlines, the oldest and newest
+  dates — so the page is a document with no script. Linked from the report
+  header's new **History** row, the status page's **View history** and the
+  setup page's *Scan history* line once a resource is chosen. Empty state and
+  a 404 for an unknown scope.
+- **Cost recommenders** (`app/checks/cost.py`): `COST_RECOMMENDERS` grows to
+  14 with location types `global` and `bigquery` (US, EU and the active
+  regions); `recommender_locations` replaces the inline loop. A global or
+  BigQuery recommender is asked whatever locations were discovered, so the
+  *Projects not checked* row of a project without locations now names the 11
+  location-bound recommenders instead of "all 8".
+- Spend-based commitments are **not** read from billing accounts: that access
+  is centralised in most organizations and a per-deployment billing-account
+  grant would stall scans. v17.1 reads them from the organization's Recommender
+  export to BigQuery (a dataset-level read) instead; CloudGauge holds nothing on
+  any billing account and does not enable the Cloud Billing API.
+- **Cost Allocation Labels** (`COST_ALLOCATION_LABELS`, validated label keys):
+  *Informational* with a how-to note until configured; then Resource Manager
+  per project, rows `Project · Missing Labels · Fix`. **Cloud Storage
+  Lifecycle**: a bucket with no lifecycle rule and Autoclass off, with
+  `--enable-autoclass`, *Investigation Recommended*. **Snapshot Sprawl**
+  (scope-level, two Asset Inventory listings): older than
+  `SNAPSHOT_MAX_AGE_DAYS` (90) or whose source disk is gone, oldest first, with
+  age, size and the delete line. All three with all-clear rows.
+- **Capacity** (`app/checks/capacity.py`): `check_capacity_commitments` reads
+  reservations, future reservations, commitments and running instances per
+  project and writes the **Capacity Commitments** briefing (Informational, a
+  note when there is nothing; shards' notes folded by `fold_note_rows`),
+  **Reservation Coverage** (`RESERVATION_COVERAGE_MIN_VCPUS` = 32 running
+  vCPUs in one zone with fewer reserved; the fix names the zone's most common
+  machine type; vCPUs from `machine_type_vcpus`) and **Commitments Expiring**
+  (active, not auto-renewing, within 90 days; the `--auto-renew` line).
+  `check_capacity_signals` asks Cloud Logging per project for 30 days of
+  `ZONE_RESOURCE_POOL_EXHAUSTED` / `QUOTA_EXCEEDED` operations and groups them
+  by zone, resource and kind — *Action Required* under 7 days old.
+- **Quota Utilization (>80%)** (`app/checks/operations.py`): rows gain
+  `Family` (*Accelerator* for GPU/TPU metrics) and `Headroom`; 80–95 % is
+  *Investigation Recommended*, 95 %+ *Action Required*. In
+  `RESHAPED_CHECKS` as `("17", "rows changed")`: against a scan before v17 the
+  rows are not compared. **Quota Increase Recommendations**: the quota
+  recommender at `global`, per project; each row names the service, the quota
+  and its current limit from the recommendation's `overview`.
+- **Cloud SQL Extended Support** (`app/checks/reliability.py`, scope-level):
+  `EXTENDED_SUPPORT`, a static table of the published dates (MySQL 5.6/5.7/8.0,
+  PostgreSQL 9.6–15, SQL Server 2014–2022); in extended support or past its end
+  *Action Required*, within 180 days *Investigation Recommended*; the fix is
+  the in-place `gcloud sql instances patch --database-version` to the newest
+  major of the engine (SQL Server keeps its edition).
+- **IAM Least Privilege** (`app/checks/security.py`): the IAM recommender for
+  the scanned organization or folder and every project, rows `Project ·
+  Principal · Current Role · Recommended Role · Recommendation · Fix` (the
+  organization or folder by its resource name) from the
+  recommendation's operation groups. A **split check** like the miscellaneous
+  one: `registry.SPLIT_CHECKS` now drives both — the scope shard runs the
+  scope half (`project_level=False`), project shards the rest
+  (`scope_level=False`), with identical all-clear rows so the merge keeps one.
+- **Scorecard** (`app/reporting/scorecard.py`): `savings_text` sums the
+  failing cost checks' *Est. Monthly Saving* per currency onto the Efficiency
+  evidence line. **Layouts**: roles for the new columns (resources, lists,
+  numbers, times, states). **Config**: `VERSION = "17"`,
+  `COST_ALLOCATION_LABELS`, `SNAPSHOT_MAX_AGE_DAYS`,
+  `RESERVATION_COVERAGE_MIN_VCPUS`, `BIGQUERY_DATASET`,
+  `BIGQUERY_EXPORT_WAIT_SECONDS`; `app/utils.py` gains `utcnow`,
+  `parse_timestamp`, `days_between`.
+- **Synthetic world** (`app/synthetic/world.py`, `provider.py`): labels,
+  machine types, Cloud SQL versions, old and orphaned snapshots and the disks
+  behind them, reservations, future reservations, commitments, capacity
+  events, IAM recommendations, a GPU quota, a quota recommendation and the six
+  recommenders' findings — every draw after the existing ones, the dataclass
+  fields added with `replace`, so every synthetic fact of v16.1 is where it
+  was. The provider answers the reservation and commitment listings, Cloud
+  Logging entries, the IAM and quota recommenders, and gives buckets lifecycle
+  rules and Autoclass.
+- **`tools/deploy.sh`**: enables `cloudscheduler` and `bigquery`; steps 6 (dataset, WRITER through the dataset's access list,
+  `roles/bigquery.jobUser`) and 7 (schedules); `BIGQUERY_DATASET` and
+  `COST_ALLOCATION_LABELS` on both services — the latter its own variable, and
+  the services' variables now passed behind gcloud's `^|^` delimiter, because
+  `--update-env-vars` splits on commas and the label keys contain them.
+  README: the catalogue, the pages, the structure, prerequisites
+  (APIs; *no new organization-level role*), the script's variables, the
+  configuration table, and a **History and analytics** section with the
+  tables, the backfill, five queries, Looker Studio and Gemini Enterprise.
+
+### Tests
+
+- `tests/test_finops.py`: the settings; `recommender_locations`; labels
+  (unconfigured, missing keys, all present); lifecycle (rules, Autoclass,
+  neither, a generator of rules); snapshot sprawl (ages, orphans, order, a
+  failed listing); the Efficiency savings line.
+- `tests/test_capacity.py`: `machine_type_vcpus` (standard, custom, shared-core,
+  accelerator-optimized), descriptions, `expiring_row`, `coverage_rows`,
+  signal classification; the commitments check against a fake Compute API
+  (briefing rows, coverage at 50 of 32 reserved, one expiring, a denied project
+  on both scored names' rows); the signals check against a fake Logging API
+  (grouping, a full page as `N+`, 7-day urgency); the quota rows, thresholds
+  and the quota recommender (the service, quota and limit of each row).
+- `tests/test_versions_and_iam.py`: `major_version` (PostgreSQL 9.6 keeps its
+  minor), targets, `assess_sql_version` across the table; the check against
+  Asset Inventory; IAM operations, fixes per resource kind, rows, the scope and
+  projects asked, the split flags, an Error when nothing could be read.
+- `tests/test_export.py`: the `scans` and `findings` rows (schema-complete,
+  identities, policies, text details, *new* flags); the loader against a fake
+  BigQuery API (NDJSON staging, the two job bodies, 409 as a retry, a failed
+  job, a slow job, an API that is down, a bucket that is down); the worker
+  exporting a scan and saying so in the header; a failed export leaving the
+  scan completed; no export without a dataset; synthetic scans skipped; the
+  backfill rebuilding the live rows from a CSV, and its command line.
+- `tests/test_history.py`: flips, entries, the chart's points and labels,
+  the model; the page (newest first, links, empty state, 404, 500, the 52
+  limit, an unreadable summary skipped); the links from the report, status
+  and setup pages; the scheduler body, `scan_in_progress`, the endpoint
+  (202 with the task and the note, 409, another scope, after completion,
+  400s) and its absence from the web service.
+- Updated: `test_category_consistency` (the writers' name tables),
+  `test_fanout` (25 project-level checks; `SPLIT_CHECKS`), `test_worker`
+  (34/30 checks in the plan; the scope plans; the best-practices CSV served
+  in-process so the suite needs no network), `test_not_checked` (14
+  recommenders, 11 location-bound), `test_synthetic` (six Asset listings,
+  the v17 names, the savings line, an empty folder's Efficiency verdict),
+  `test_changes` (`RESHAPED_CHECKS`), `test_routes`, `test_roles`,
+  `test_packaging` (17 rules, `history.html`), `test_design` (the history
+  page under the same rules). 847 tests.
+
+### Upgrade notes
+
+- Nothing to grant on the organization, and nothing on any billing account. In
+  the project CloudGauge runs in, `tools/deploy.sh` enables
+  `cloudscheduler.googleapis.com` and `bigquery.googleapis.com`.
+- The export is opt-in: `BIGQUERY_DATASET=cloudgauge tools/deploy.sh` creates
+  the dataset and the two grants; then `tools/backfill_export.py` loads the
+  earlier scans. Schedules are opt-in too (`SCHEDULES=…`).
+- The first scan after the upgrade compares as usual except **Quota
+  Utilization (>80%)**, whose rows are *not compared (rows changed)* once;
+  the twelve new names are *not compared (new check)*, as every new check
+  is. **Cost Allocation Labels** stays *Informational* (outside the score)
+  until `COST_ALLOCATION_LABELS` names the keys.
+- Reports stored by earlier releases are unchanged; the history page reads
+  every summary filed since v15.
 
 ## v16.1 — Multi-region snapshots pass, downloads behind the sign-in
 
@@ -1299,6 +1498,7 @@ performance; modernization; enablement; roadmap and roadblocks).
 | **v15.6** | Resilience at every scope | *Shipped.* Resilience of Critical Assets (Cloud SQL HA, backups, retention and PITR; zonal MIGs; single-region snapshots, now named one by one) runs in folder and project scans under the scanned scope, and each of its six checks reaches a verdict so Stability counts it; the scope picker offers active folders and projects only and names folders by their path and ID. |
 | **v16** | Authenticated by default | *Shipped.* Deployed **without `--allow-unauthenticated`**: people sign in through Identity-Aware Proxy on the web service's own `run.app` URL — no load balancer, domain, certificate or OAuth client — and a separate worker service is reachable by Cloud Tasks alone (`--ingress internal`, IAM); the pages say who is signed in and the report who requested the scan; `tools/deploy.sh` is the deployment; the public single service becomes an explicit, discouraged option. |
 | **v16.1** | Multi-region snapshots pass, downloads behind the sign-in | *Shipped.* *Disk Snapshot Resilience* reads the kind of a snapshot's storage location: a multi-region (`asia`, `eu`, `us`) is geo-redundant and compliant, a single region is flagged — the first scan after the upgrade says *rule changed* instead of listing the snapshots as resolved. The status page's **Download CSV** is the web service's own route, streamed, so a report's downloads — like its pages — exist only for someone IAP let in; the service account no longer needs Token Creator on itself. |
-| **v17** | History, analytics and FinOps | **BigQuery export** of every scan's findings; **scheduled scans**; a history page (scores over time); a guide for Gemini Enterprise / Looker over the export ("talk to your infrastructure"); **FinOps** — financial governance alongside the cost checks, the first features to be chosen when v17 is planned. |
-| **v18** | Footprint and support | A **Platform Footprint** page (what runs where: services, regions, versions); **modernization indicators** (legacy runtimes, unmanaged VMs, missing release channels); a **Support cases** briefing. |
+| **v17** | History, analytics and FinOps | *Shipped.* **BigQuery export** of every scan (`scans`, `findings`; free load jobs the header accounts for; a backfill for earlier scans), **scheduled scans** (Cloud Scheduler → the worker, as the service account, one scan per scope at a time), the **history page** (pillar scores over time, status flips per scan), the analytics guide (five queries, Looker Studio, Gemini Enterprise); **FinOps** — six more recommenders, cost-allocation labels, storage lifecycle, snapshot sprawl, commitments expiring, a savings total on the Scorecard; **capacity** — reservations and commitments, reservation coverage, stockout and quota signals, accelerator quotas with headroom; Cloud SQL extended support; IAM least privilege. No new organization-level role, nothing on billing accounts. |
+| **v17.1** | Forecasts, budgets and spend | **Spend-based commitment recommendations** from the organization's **Recommender export to BigQuery** (`RECOMMENDATIONS_EXPORT`; a dataset-level read, no billing-account IAM); **Capacity Planner** forecasts (the spike showed `forecasts:query` works per region for vCPUs by family and GPUs by type: `capacityplanner.googleapis.com`, `roles/capacityplanner.viewer`; reservation usage stays on the Compute API); **budget coverage** (projects and billing accounts without a budget); a **spend briefing** over the billing export; cost anomalies if an API exists. |
+| **v18** | Footprint and support | A **Platform Footprint** page (what runs where: services, regions, versions); **modernization indicators** (legacy runtimes, unmanaged VMs, missing release channels); a **Support cases** briefing; the deprecations recommender. |
 | Later | | VM Manager vulnerability summary, Security Command Center findings summary, SLO coverage, PDF export. |

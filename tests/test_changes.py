@@ -224,7 +224,11 @@ def test_rows_are_not_comparable_with_a_previous_scan_by_an_older_release(previo
     that reason — the v15.6 reshape is behind the same line, so one entry per check is enough."""
     assert rows_reshaped_since(RESHAPED, summary('job-1', {}, {}, release=previous_release)) == reason
     assert rows_reshaped_since('Public GCS Buckets', summary('job-1', {}, {}, release=previous_release)) is None
-    assert RESHAPED_CHECKS == {RESHAPED: ('16.1', RULE_CHANGED)}
+    # v17: Quota Utilization's rows gained Family and Headroom; against any scan before v17 they are not compared.
+    quota = 'Quota Utilization (>80%)'
+    assert rows_reshaped_since(quota, summary('job-1', {}, {}, release=previous_release)) == \
+        (None if release_tuple(previous_release) >= (17,) else ROWS_CHANGED)
+    assert RESHAPED_CHECKS == {RESHAPED: ('16.1', RULE_CHANGED), quota: ('17', ROWS_CHANGED)}
     assert (ROWS_CHANGED, RULE_CHANGED) == ('rows changed', 'rule changed')
 
 

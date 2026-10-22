@@ -45,6 +45,8 @@ class Services:
             build it on first use from the fields above.
         identity_verifier: Verifies the Identity-Aware Proxy assertion on requests
             (``app.identity.IapVerifier``); ``None`` means build it on first use.
+        exporter: Loads finished scans into BigQuery (``app.services.bigquery_export.BigQueryExporter``);
+            ``None`` means build it on first use — and it stays ``None`` without ``BIGQUERY_DATASET``.
     """
     settings: Settings
     results_store: GcsResultsStore
@@ -53,6 +55,8 @@ class Services:
     report_banner: str | None = None
     fanout: object = None
     identity_verifier: object = None
+    exporter: object = None
+    _exporter_built: bool = field(default=False, init=False, repr=False, compare=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False, compare=False)
 
     def get_tasks_client(self):
@@ -83,11 +87,24 @@ class Services:
         if self.fanout is None:
             from app.fanout import FanOut  # imports the checks and reporting; only needed by the worker routes
 
+            exporter = self.get_exporter()  # before the lock: it takes the same one
             with self._lock:
                 if self.fanout is None:
                     self.fanout = FanOut(self.settings, self.results_store, enqueue=self.enqueue_task,
-                                         task_exists=self.task_exists, banner=self.report_banner)
+                                         task_exists=self.task_exists, banner=self.report_banner, exporter=exporter)
         return self.fanout
+
+    def get_exporter(self):
+        """Returns the BigQuery exporter, built on first use; ``None`` when no ``BIGQUERY_DATASET`` is configured."""
+        if not self._exporter_built:
+            from app.services.bigquery_export import build_exporter  # imports the reporting layer; only the worker needs it
+
+            with self._lock:
+                if not self._exporter_built:
+                    if self.exporter is None:
+                        self.exporter = build_exporter(self.settings, self.results_store)
+                    self._exporter_built = True
+        return self.exporter
 
     def get_identity_verifier(self):
         """Returns the IAP assertion verifier, built on first use."""

@@ -22,26 +22,41 @@ import functools
 from typing import Any, Callable, NamedTuple
 
 from app.checks.advisories import check_org_advisories, check_project_advisories
-from app.checks.cost import run_cost_recommendations
+from app.checks.capacity import COMMITMENTS_BRIEFING, SIGNALS_CHECK, check_capacity_commitments, check_capacity_signals
+from app.checks.cost import (
+    LABELS_CHECK,
+    LIFECYCLE_CHECK,
+    SNAPSHOT_SPRAWL_CHECK,
+    check_cost_allocation_labels,
+    check_snapshot_sprawl,
+    check_storage_lifecycle,
+    run_cost_recommendations,
+)
 from app.checks.gke_versions import CHECK_NAME as GKE_VERSIONS_CHECK
 from app.checks.gke_versions import check_gke_supported_versions
 from app.checks.network import run_network_insights
 from app.checks.operations import (
+    QUOTA_RECOMMENDATIONS_CHECK,
     check_audit_logging,
     check_monitoring_coverage,
     check_os_config_coverage,
+    check_quota_recommendations,
     check_standalone_vms,
     run_miscellaneous_checks_refactored,
     run_service_limit_checks_refactored,
 )
 from app.checks.reliability import (
+    SQL_VERSIONS_CHECK,
+    check_cloud_sql_versions,
     check_essential_contacts,
     check_gke_hygiene,
     check_resilience_assets,
     check_storage_versioning,
 )
 from app.checks.security import (
+    IAM_CHECK,
     check_cloud_sql_security,
+    check_iam_recommendations,
     check_open_firewall_rules,
     check_org_iam_policy,
     check_organization_policies,
@@ -70,6 +85,10 @@ SERVICE_HEALTH_CHECK = "Service Health Incidents"
 ADVISORIES_CHECK = "Advisory Notifications"
 # Beta v1's organization-only resilience check, run under every scope since v15.6 (app.checks.reliability).
 RESILIENCE_CHECK = "Resilience of Critical Assets"
+# v17: the capacity checks' display names (app.checks.capacity writes several report names each; a crash is
+# recorded under the display name, as for the miscellaneous checks).
+CAPACITY_COMMITMENTS_CHECK = COMMITMENTS_BRIEFING
+CAPACITY_SIGNALS_CHECK = SIGNALS_CHECK
 
 
 
@@ -88,6 +107,11 @@ def build_check_plan(scope, scope_id, job_id, all_projects, active_zones, active
     and Advisory Notifications (v14), read once from the organization in an organization
     scan and per project otherwise. Beta v1's organization-level Personalized Service
     Health probe is retired: the per-project check covers it.
+
+    v17 adds, after them: the FinOps checks (cost-allocation labels, storage lifecycle,
+    snapshot sprawl under the scope), Cloud SQL Extended Support (under the scope),
+    the capacity checks (reservations, commitments and coverage; stockout and quota signals),
+    the quota recommender, and IAM Least Privilege (the scope itself and every project).
 
     The two checks that query by location (Cost-Saving Recommendations, Network
     Insights) take one argument more than in beta v1: ``location_errors``, project ID
@@ -119,6 +143,15 @@ def build_check_plan(scope, scope_id, job_id, all_projects, active_zones, active
         CheckSpec("Reliability & Resilience", SERVICE_HEALTH_CHECK, check_service_health_incidents, (scope_id, all_projects, job_id)),
         CheckSpec("Reliability & Resilience", GKE_VERSIONS_CHECK, check_gke_supported_versions, (scope_id, all_projects, job_id)),
         CheckSpec("Reliability & Resilience", RESILIENCE_CHECK, check_resilience_assets, (scope, scope_id, job_id)),
+        # v17
+        CheckSpec("Cost Optimization", LABELS_CHECK, check_cost_allocation_labels, (scope_id, all_projects, job_id)),
+        CheckSpec("Cost Optimization", LIFECYCLE_CHECK, check_storage_lifecycle, (scope_id, all_projects, job_id)),
+        CheckSpec("Cost Optimization", SNAPSHOT_SPRAWL_CHECK, check_snapshot_sprawl, (scope, scope_id, job_id)),
+        CheckSpec("Reliability & Resilience", SQL_VERSIONS_CHECK, check_cloud_sql_versions, (scope, scope_id, job_id)),
+        CheckSpec("Reliability & Resilience", CAPACITY_COMMITMENTS_CHECK, check_capacity_commitments, (scope_id, all_projects, job_id)),
+        CheckSpec("Reliability & Resilience", CAPACITY_SIGNALS_CHECK, check_capacity_signals, (scope_id, all_projects, job_id)),
+        CheckSpec("Operational Excellence & Observability", QUOTA_RECOMMENDATIONS_CHECK, check_quota_recommendations, (scope_id, all_projects, job_id)),
+        CheckSpec("Security & Identity", IAM_CHECK, check_iam_recommendations, (scope, scope_id, all_projects, job_id)),
     ]
 
     if scope == 'organization':
@@ -141,14 +174,23 @@ def build_check_plan(scope, scope_id, job_id, all_projects, active_zones, active
 # once per shard of projects. Rule: a check is scope-level iff its arguments
 # don't include the project list (tests/test_fanout.py verifies this agrees).
 # Resilience of Critical Assets is one in every scope: it reads the scope's Asset
-# Inventory in three listings, not its projects one by one.
+# Inventory in three listings, not its projects one by one; so are Snapshot Sprawl
+# and Cloud SQL Extended Support (v17).
 SCOPE_LEVEL_CHECKS = frozenset({
     "Organization Policies", "Organization IAM Policy", "Security Command Center Status",
     "Organization Audit Logging", "Essential Contacts", RESILIENCE_CHECK,
+    SNAPSHOT_SPRAWL_CHECK, SQL_VERSIONS_CHECK,
 })
-# The one check that does both: organization-wide insights plus per-project work.
-# Shards split it with its keyword flags (see run_miscellaneous_checks_refactored).
+# The checks that do both: scope-wide work plus per-project work. Shards split them
+# with keyword flags: the scope shard runs the first set, the project shards the second
+# (see run_miscellaneous_checks_refactored and check_iam_recommendations). The scope
+# half of each runs in the scopes listed: the organization's insights exist for an
+# organization only; an organization or a folder has IAM recommendations of its own.
 MISCELLANEOUS_CHECK = "Miscellaneous Checks"
+SPLIT_CHECKS = {
+    MISCELLANEOUS_CHECK: (("organization",), {"project_checks": False}, {"org_insights": False}),
+    IAM_CHECK: (("organization", "folder"), {"project_level": False}, {"scope_level": False}),
+}
 
 
 def scope_level_checks(scope):
@@ -159,14 +201,15 @@ def scope_level_checks(scope):
 
 def scope_check_plan(scope, scope_id, job_id):
     """The scope-level checks of :func:`build_check_plan`: Organization Policies and Resilience of
-    Critical Assets, plus, for an organization, the org-only checks and the organization-wide half
-    of the miscellaneous checks."""
+    Critical Assets, plus, for an organization, the org-only checks and the scope-wide half of the
+    split checks (``SPLIT_CHECKS``) that apply to the scope."""
     scope_level = scope_level_checks(scope)
-    plan = [spec for spec in build_check_plan(scope, scope_id, job_id, [], [], []) if spec.name in scope_level]
-    if scope == 'organization':
-        plan.append(CheckSpec("Operational Excellence & Observability", MISCELLANEOUS_CHECK,
-                              functools.partial(run_miscellaneous_checks_refactored, project_checks=False),
-                              (scope, scope_id, [], job_id)))
+    full = build_check_plan(scope, scope_id, job_id, [], [], [])
+    plan = [spec for spec in full if spec.name in scope_level]
+    for spec in full:
+        split = SPLIT_CHECKS.get(spec.name)
+        if split and scope in split[0]:
+            plan.append(spec._replace(func=functools.partial(spec.func, **split[1])))
     return plan
 
 
@@ -176,8 +219,8 @@ def project_check_plan(scope, scope_id, job_id, projects, active_zones, active_r
     for spec in build_check_plan(scope, scope_id, job_id, projects, active_zones, active_regions, location_errors):
         if spec.name in scope_level:
             continue
-        if spec.name == MISCELLANEOUS_CHECK:
-            spec = spec._replace(func=functools.partial(spec.func, org_insights=False))
+        if spec.name in SPLIT_CHECKS:
+            spec = spec._replace(func=functools.partial(spec.func, **SPLIT_CHECKS[spec.name][2]))
         plan.append(spec)
     return plan
 

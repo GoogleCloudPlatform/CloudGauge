@@ -41,6 +41,8 @@ from app.checks.categories import CATEGORY_ORDER
 from app.checks.registry import CheckSpec
 from app.config import VERSION
 from app.extensions import EXTENSION_KEY
+from app.services import org_policies
+from app.synthetic.world import BEST_PRACTICES_CSV
 from app.utils import ThrottledProgressReporter
 from helpers import assert_same_csv_tables, assert_same_response, comparable, csv_sections, report_facts
 
@@ -244,6 +246,9 @@ def test_scan_without_projects_runs_the_scope_level_checks(legacy_client, client
     Policies) and reports them, so an empty folder's policies are still evaluated. Both report success."""
     for module in (legacy, runner):
         monkeypatch.setattr(module, 'list_projects_for_scope', lambda scope, scope_id: [])
+    # The best-practices CSV comes from GitHub: served here, so the test needs no network (the legacy run downloads
+    # on its own and reports nothing for the policies either way).
+    monkeypatch.setattr(org_policies.gcp, 'http_get', lambda url, **kwargs: SimpleNamespace(status_code=200, text=BEST_PRACTICES_CSV, raise_for_status=lambda: None))
     # One policy set on the organization: what the Organization Policies check evaluates with no project to list.
     gcp.discovery.apis['cloudresourcemanager'] = fakes.FakeResourceManager({f'organizations/{SCOPE_ID}': {'compute.requireOsLogin': True}})
     legacy_run, run = run_both(legacy_client, client, gcp.bucket)
@@ -322,7 +327,11 @@ V15_CHECKS = {'check_gke_supported_versions'}
 # v15.6: Resilience of Critical Assets, organization-only in beta v1, runs under every scope after GKE Supported
 # Versions with the scope in its arguments, so it leaves the beta v1 comparison on both sides.
 V15_6_CHECKS = {'check_resilience_assets'}
-LATER_CHECKS = V14_CHECKS | V15_CHECKS | V15_6_CHECKS
+# v17: FinOps, capacity, quota and IAM, after Resilience of Critical Assets in the common list.
+V17_COMMON_CHECKS = ['check_cost_allocation_labels', 'check_storage_lifecycle', 'check_snapshot_sprawl', 'check_cloud_sql_versions',
+                     'check_capacity_commitments', 'check_capacity_signals', 'check_quota_recommendations', 'check_iam_recommendations']
+V17_CHECKS = set(V17_COMMON_CHECKS)
+LATER_CHECKS = V14_CHECKS | V15_CHECKS | V15_6_CHECKS | V17_CHECKS
 
 
 def finished_checks(progress_updates):
@@ -337,8 +346,10 @@ def test_runner_runs_the_beta_v1_check_plan(scope, scope_id, beta, monkeypatch):
     The v14, v15 and v15.6 checks come after them in the plan, and beta's retired probe is left out of the comparison.
     """
     zones, regions = ['us-central1-a'], ['us-central1', 'global']
-    names = [spec.func.__name__ for spec in registry.build_check_plan(scope, scope_id, JOB_ID, PROJECTS, zones, regions)]
-    assert len(names) == (26 if scope == 'organization' else 22)
+    specs = registry.build_check_plan(scope, scope_id, JOB_ID, PROJECTS, zones, regions)
+    names = [spec.func.__name__ for spec in specs]
+    v17_names = {spec.name for spec in specs if spec.func.__name__ in V17_CHECKS}
+    assert len(names) == (34 if scope == 'organization' else 30)
     # Same order as beta v1's plan lists, which append the four checks after "Service Quota Limits".
     beta_plan = ast.parse(textwrap.dedent(inspect.getsource(beta.run_all_checks)))
     beta_lists = [[entry.elts[2].id for entry in node.elts if isinstance(entry, ast.Tuple)]
@@ -349,7 +360,8 @@ def test_runner_runs_the_beta_v1_check_plan(scope, scope_id, beta, monkeypatch):
     assert shared == [name for name in beta_names if name not in RETIRED_CHECKS | V15_6_CHECKS]
     assert names[14:18] == BETA_V1_CHECKS
     assert names[18:21] == ['check_service_health_incidents', 'check_gke_supported_versions', 'check_resilience_assets']
-    assert names[-1] == ('check_org_advisories' if scope == 'organization' else 'check_project_advisories')
+    assert names[21:29] == V17_COMMON_CHECKS
+    assert names[-2:] == (['check_essential_contacts', 'check_org_advisories'] if scope == 'organization' else ['check_iam_recommendations', 'check_project_advisories'])
     calls = {'beta': {}, 'new': {}}
     sink = RecordingSink()
 
@@ -386,7 +398,7 @@ def test_runner_runs_the_beta_v1_check_plan(scope, scope_id, beta, monkeypatch):
     # Checks finish in any order, so compare progress as sets of messages; both runners end their checks at 95%.
     assert len(progress) == len(names) and len(beta_progress) == len(beta_names)
     assert progress[-1]['progress'] == beta_progress[-1]['progress'] == 95
-    later = {registry.SERVICE_HEALTH_CHECK, registry.GKE_VERSIONS_CHECK, registry.ADVISORIES_CHECK, registry.RESILIENCE_CHECK}
+    later = {registry.SERVICE_HEALTH_CHECK, registry.GKE_VERSIONS_CHECK, registry.ADVISORIES_CHECK, registry.RESILIENCE_CHECK} | v17_names
     assert finished_checks(progress) - later == finished_checks(beta_progress) - {'Personalized Service Health', registry.RESILIENCE_CHECK}
     assert sink.findings == []
 
@@ -399,7 +411,7 @@ def test_check_plan_is_the_legacy_plan_plus_the_beta_v1_checks(scope, legacy):
     legacy_names = set(legacy.run_all_checks.__code__.co_names)
     advisories = 'check_org_advisories' if scope == 'organization' else 'check_project_advisories'
     assert [name for name in names if name not in legacy_names] == \
-           BETA_V1_CHECKS + ['check_service_health_incidents', 'check_gke_supported_versions', advisories]
+           BETA_V1_CHECKS + ['check_service_health_incidents', 'check_gke_supported_versions'] + V17_COMMON_CHECKS + [advisories]
     if scope == 'organization':  # the one legacy check the plan no longer runs
         assert {name for name in legacy_names if name.startswith('check_')} - set(names) == RETIRED_CHECKS
 
@@ -431,10 +443,15 @@ def test_runner_runs_the_scope_level_checks_when_there_is_no_project(scope, scop
     monkeypatch.setattr(runner, 'run_check_plan', lambda plan, job_id, **kwargs: ran.extend(spec.name for spec in plan))
     assert runner.run_all_checks(scope, scope_id, JOB_ID, sink=RecordingSink()) is True
     assert ran == [spec.name for spec in registry.scope_check_plan(scope, scope_id, JOB_ID)]
+    # v17: Snapshot Sprawl and Cloud SQL Extended Support look at the scope too; an organization or folder has IAM
+    # recommendations of its own (the scope half of the split check).
+    scope_level = ['Organization Policies', registry.RESILIENCE_CHECK, 'Snapshot Sprawl', 'Cloud SQL Extended Support']
     if scope == 'organization':
-        assert ran[:3] == ['Organization Policies', registry.RESILIENCE_CHECK, 'Organization IAM Policy'] and registry.MISCELLANEOUS_CHECK in ran
+        assert ran[:5] == scope_level + ['Organization IAM Policy'] and registry.MISCELLANEOUS_CHECK in ran and 'IAM Least Privilege' in ran
+    elif scope == 'folder':
+        assert ran == scope_level + ['IAM Least Privilege']
     else:
-        assert ran == ['Organization Policies', registry.RESILIENCE_CHECK]
+        assert ran == scope_level
 
 
 def test_runner_runs_checks_concurrently(one_project, monkeypatch):

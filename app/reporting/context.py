@@ -414,6 +414,9 @@ class ReportContext:
     version: str = VERSION  # the release that rendered the report, "15.5" (the sidebar's footer, under the time)
     # Since the previous scan of this scope (app.reporting.changes.Changes). None: first scan, nothing is compared.
     changes: object = None
+    # What became of the BigQuery export (app.services.bigquery_export.ExportResult; the header's BigQuery export row).
+    # None: no dataset is configured, or a synthetic scan; the row is not rendered.
+    export: object = None
     # Check name → app.reporting.changes.RowMatcher, for the CSV's "New since last scan" column.
     row_matchers: dict = field(default_factory=dict)
 
