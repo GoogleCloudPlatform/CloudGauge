@@ -31,7 +31,7 @@ checks — what is reserved and committed, what runs without a reservation, and
 where Compute Engine has been short of capacity or quota in the last 30 days —
 the quota check learns accelerator families, two thresholds and headroom, Cloud
 SQL versions in extended support are flagged, and the IAM recommender's unused
-roles land in Security. Thirteen new report names, no new organization-level
+roles land in Security. Sixteen new report names, no new organization-level
 role: every new check reads through roles the service account already holds.
 
 ### Changed
@@ -205,7 +205,7 @@ role: every new check reads through roles the service account already holds.
   earlier scans. Schedules are opt-in too (`SCHEDULES=…`).
 - The first scan after the upgrade compares as usual except **Quota
   Utilization (>80%)**, whose rows are *not compared (rows changed)* once;
-  the twelve new names are *not compared (new check)*, as every new check
+  the sixteen new names are *not compared (new check)*, as every new check
   is. **Cost Allocation Labels** stays *Informational* (outside the score)
   until `COST_ALLOCATION_LABELS` names the keys.
 - Reports stored by earlier releases are unchanged; the history page reads
