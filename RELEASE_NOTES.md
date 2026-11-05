@@ -8,9 +8,155 @@ the test suite running inside the image, a zero-traffic canary revision scanned
 against a real organization, promotion, and a production scan compared fact for
 fact with the previous version's report.
 
-Versions are the image tags (`v5` … `v17`); the commit is the one that shipped.
+Versions are the image tags (`v5` … `v17.1`); the commit is the one that shipped.
 
 ---
+
+## v17.1 — The SSRF chain: GKE and identity hardening
+
+A release shaped by an intrusion pattern seen in the wild: a server-side
+request forgery in an internet-facing pod reaches the node's metadata server,
+steals the token of a Compute Engine default service account that holds
+Editor, replays it from outside Google Cloud, chains through broad Token
+Creator grants into most of the project's service accounts and the
+neighbouring projects, and drives a publicly reachable GKE control plane —
+with no perimeter to stop the replay and no runtime detection to raise an
+alarm. No platform vulnerability; five stacked posture gaps, each of them a
+setting this release now reads. **GKE Credential Exposure** names, per node
+pool, whether pods reach the GCE or the GKE metadata server, the node account,
+its roles and scopes, and the verdict in one sentence — *one SSRF from
+roles/editor on project X*. **Service Account Impersonation** answers *who can
+become which service account*: token minting granted on a project, folder or
+organization, account-to-account chains, principals from outside the
+organization, Workload Identity for the `default` Kubernetes account — with the
+reach of each grant (*every service account under projects/x (27)*, *3 of 27
+service accounts in projects/x*). **GKE Control Plane Exposure** (public
+endpoint without authorized networks or with `0.0.0.0/0` in them, legacy ABAC,
+client certificates), **GKE Node Hardening** (public nodes, no network policy
+enforcement, Shielded nodes and Secure Boot, COS, Binary Authorization,
+posture scanning, secrets encryption), **GKE Threat Detection** (Container and
+Event Threat Detection per cluster and project, logging components,
+data-access audit logs) and **VPC Service Controls Coverage** (projects outside
+every enforced perimeter, perimeters that leave the token-replay services
+unrestricted, dry-run perimeters) complete the chain. The Organization Policies
+check now evaluates the nine `container.managed.*` guardrails. Six new report
+names, one listing of the scope's clusters, one IAM search, one read of the
+access policies; **no new role**, one API enabled for read-only use.
+
+### Changed
+
+- **GKE security posture** (`app/checks/gke_security.py`, scope-level): one
+  Cloud Asset Inventory listing of `container.googleapis.com/Cluster` under the
+  scope feeds four findings. Pure evaluators over the cluster JSON:
+  `pool_metadata_mode` (`GKE_METADATA` or the deprecated
+  `GKE_METADATA_SERVER` count as GKE; metadata concealment does not),
+  `node_service_account` (the API writes `"default"`; the project number from
+  the asset's parent spells it out), `exposure` (GCE metadata and a privileged
+  role — `PRIVILEGED_ROLES`, primitive roles first — is *Action Required*
+  whatever the scopes; the row says when the pool's OAuth scopes limit what a
+  stolen token can call), `control_plane_issues` (the classic
+  `privateClusterConfig`/`masterAuthorizedNetworksConfig` fields and the newer
+  `controlPlaneEndpointsConfig`; anonymous authentication and system-group
+  bindings as one Investigation row), `hardening_issues`, `logging_gaps`,
+  `data_access_logging`. The roles of each node account come from one IAM
+  search per account (`policy:"<email>"`, project/folder/organization
+  bindings only). Threat detection reads the Security Command Center settings
+  API's effective state: `containerThreatDetectionSettings:calculate` per
+  cluster, `eventThreatDetectionSettings:calculate` per project. Autopilot
+  clusters skip the node-pool rows. A failed listing is the four findings'
+  Error; a node account or SCC setting that could not be read is on *Projects
+  not checked*.
+- **Service Account Impersonation** (`app/checks/impersonation.py`,
+  scope-level): `searchAllIamPolicies` with a permission-based query
+  (`iam.serviceAccounts.getAccessToken`, `implicitDelegation`, `signBlob`,
+  `iam.serviceAccountKeys.create`, plus the predefined roles), so custom roles
+  count — their permissions are read once each through `iam.roles.get`. One
+  `searchAllResources` of `iam.googleapis.com/ServiceAccount` gives the reach
+  denominators (per project, folder, organization) and tells a foreign
+  principal from one in scope. `member_kind` sorts principals (public, domain,
+  human, service account, Google-managed service agent, Kubernetes, federated,
+  federated pool); `severity` holds the rules (Google-managed agents and
+  `*.serviceAgent` roles are never listed, nor is an account bound on itself
+  — Cloud Build deploying as the account it runs as; primitive roles stay with
+  Project IAM Hygiene; a person's grant on one account is Investigation —
+  CloudGauge's own operator grant shows there). Rows: *Resource · Level · Principal · Path ·
+  Reach · Targets · Target Roles · Fix*; target roles are looked up for up to
+  200 accounts.
+- **VPC Service Controls Coverage** (`app/checks/perimeters.py`,
+  scope-level): the access policies of the scanned projects' organization
+  (`accessPolicies.list`, scoped policies included; a folder or project scan
+  finds the organization in the project search results) and each policy's
+  `servicePerimeters.list`, both permissions in `roles/iam.securityReviewer`.
+  Asset Inventory's `ACCESS_POLICY` content type was the first design and was
+  dropped: it lagged a newly created policy by longer than a scan can wait.
+  Rows for no perimeter at all, projects outside every enforced regular perimeter,
+  perimeters that leave `iamcredentials`, `storage`, `secretmanager`,
+  `container`, `sqladmin` or `compute` unrestricted, and dry-run-only
+  perimeters; *Investigation Recommended* throughout.
+- **Registry** (`app/checks/registry.py`): three scope-level specs after IAM
+  Least Privilege (37 checks in an organization scan, 33 otherwise; the GKE
+  spec writes four findings). `categories.py`: six names under Security &
+  Identity. `layouts.py`: `Metadata`, `Path`, `Level` as states; `Exposure`,
+  `Reach` as prose; `Scopes`, `Roles`, `Targets`, `Target Roles` as resource
+  lists; `Perimeter` as a resource.
+- **Organization Policies**: `assets/gcp_best_practices.csv` now recommends
+  the nine `container.managed.*` constraints (Workload Identity Federation and
+  no default Compute account as *Must have*; private nodes, network policy,
+  no RBAC system bindings, security bulletins, Binary Authorization as
+  *Should have*; DNS-only control plane access, secrets encryption, Google
+  Groups RBAC as *Could have*), so the check evaluates them instead of
+  skipping rows without a recommendation. The deployed check fetches the CSV
+  from `BEST_PRACTICES_CSV_URL`; the file must be on that branch too.
+- **Synthetic world** (`app/synthetic`): every cluster gets a `GkeHardening`
+  profile, projects an impersonation table (a project-level Token Creator for
+  an account, a person on one account, an account-to-account chain, Workload
+  Identity for `default`, a principal from outside, act-as for a deployer
+  group, a custom token-minting role), threat-detection and audit-log flags;
+  the organization two perimeters (one enforced with two replay services
+  missing, one dry-run) — every draw after the v17 ones, fictional names only.
+  The provider serves cluster and perimeter assets, `searchAllIamPolicies`,
+  the service-account inventory, the SCC `calculate` calls and `iam.roles.get`.
+- README: the six checks in the Security catalogue with the chain they break,
+  the project structure, prerequisites (*no new role*). `VERSION = "17.1"`.
+
+### Tests
+
+- `tests/test_gke_security.py`: metadata modes (including concealment and the
+  deprecated field), the default account by name and by number, scopes, legacy
+  endpoints; the exposure verdicts and their wording; credential rows with the
+  three fixes and the Autopilot skip; control-plane issues on classic and new
+  fields (`0.0.0.0/0`, Google public IPs, ABAC, certificates, basic auth, the
+  anonymous/system-group row); hardening issues for Standard and Autopilot;
+  logging gaps and audit configs; the check against the fakes (one listing,
+  one search per account, the four findings, a failed listing, partial
+  failures on *Projects not checked*, all-clear rows).
+- `tests/test_impersonation.py`: member kinds, the path of predefined and
+  custom roles, the severity table, rows with reach, targets, order and fixes
+  (an organization scan and a folder scan), the check against the fakes
+  (custom roles read once, counts, an unreadable role, a failed search), the
+  perimeter facts and coverage rows, the perimeter check (organization and
+  folder scans, the no-access-policy answer, an Error).
+- `tests/fakes.py`: assets with parents and ancestors, perimeters, IAM policy
+  search, service-account resources. Updated: `test_worker` (37/33 checks; the
+  scope-level plan), `test_category_consistency` (the GKE writer's names),
+  `test_synthetic` (eight organization listings, the perimeters read at the
+  organization in folder and project scans). 905 tests.
+
+### Upgrade notes
+
+- Nothing to grant: the checks read through `roles/cloudasset.viewer`
+  (clusters, the IAM and resource searches), `roles/iam.securityReviewer`
+  (access policies, perimeters, custom roles) and
+  `roles/securitycenter.settingsViewer` (threat-detection settings), all of
+  which the service account already holds. `tools/deploy.sh` enables
+  `accesscontextmanager.googleapis.com` in the project CloudGauge runs in
+  (read-only calls); without it *VPC Service Controls Coverage* reports an
+  Error and nothing else changes.
+- The six new names are *not compared (new check)* on the first scan after the
+  upgrade, as every new check is. No existing check changed shape.
+- Expect the Security pillar to drop on the first scan of an organization with
+  Standard clusters on the default node account or project-level Token Creator
+  grants: that is the point.
 
 ## v17 — History, analytics and FinOps
 
@@ -145,7 +291,7 @@ role: every new check reads through roles the service account already holds.
   was. The provider answers the reservation and commitment listings, Cloud
   Logging entries, the IAM and quota recommenders, and gives buckets lifecycle
   rules and Autoclass.
-- **`tools/deploy.sh`**: enables `cloudscheduler` and `bigquery`; steps 6 (dataset, WRITER through the dataset's access list,
+- **`tools/deploy.sh`**: enables `cloudscheduler` and `bigquery` (v17) and `accesscontextmanager` (v17.1); steps 6 (dataset, WRITER through the dataset's access list,
   `roles/bigquery.jobUser`) and 7 (schedules); `BIGQUERY_DATASET` and
   `COST_ALLOCATION_LABELS` on both services — the latter its own variable, and
   the services' variables now passed behind gcloud's `^|^` delimiter, because
@@ -1499,6 +1645,7 @@ performance; modernization; enablement; roadmap and roadblocks).
 | **v16** | Authenticated by default | *Shipped.* Deployed **without `--allow-unauthenticated`**: people sign in through Identity-Aware Proxy on the web service's own `run.app` URL — no load balancer, domain, certificate or OAuth client — and a separate worker service is reachable by Cloud Tasks alone (`--ingress internal`, IAM); the pages say who is signed in and the report who requested the scan; `tools/deploy.sh` is the deployment; the public single service becomes an explicit, discouraged option. |
 | **v16.1** | Multi-region snapshots pass, downloads behind the sign-in | *Shipped.* *Disk Snapshot Resilience* reads the kind of a snapshot's storage location: a multi-region (`asia`, `eu`, `us`) is geo-redundant and compliant, a single region is flagged — the first scan after the upgrade says *rule changed* instead of listing the snapshots as resolved. The status page's **Download CSV** is the web service's own route, streamed, so a report's downloads — like its pages — exist only for someone IAP let in; the service account no longer needs Token Creator on itself. |
 | **v17** | History, analytics and FinOps | *Shipped.* **BigQuery export** of every scan (`scans`, `findings`; free load jobs the header accounts for; a backfill for earlier scans), **scheduled scans** (Cloud Scheduler → the worker, as the service account, one scan per scope at a time), the **history page** (pillar scores over time, status flips per scan), the analytics guide (five queries, Looker Studio, Gemini Enterprise); **FinOps** — six more recommenders, cost-allocation labels, storage lifecycle, snapshot sprawl, commitments expiring, a savings total on the Scorecard; **capacity** — reservations and commitments, reservation coverage, stockout and quota signals, accelerator quotas with headroom; Cloud SQL extended support; IAM least privilege. No new organization-level role, nothing on billing accounts. |
-| **v17.1** | Forecasts, budgets and spend | **Spend-based commitment recommendations** from the organization's **Recommender export to BigQuery** (`RECOMMENDATIONS_EXPORT`; a dataset-level read, no billing-account IAM); **Capacity Planner** forecasts (the spike showed `forecasts:query` works per region for vCPUs by family and GPUs by type: `capacityplanner.googleapis.com`, `roles/capacityplanner.viewer`; reservation usage stays on the Compute API); **budget coverage** (projects and billing accounts without a budget); a **spend briefing** over the billing export; cost anomalies if an API exists. |
-| **v18** | Footprint and support | A **Platform Footprint** page (what runs where: services, regions, versions); **modernization indicators** (legacy runtimes, unmanaged VMs, missing release channels); a **Support cases** briefing; the deprecations recommender. |
+| **v17.1** | The SSRF chain: GKE and identity hardening | *Shipped.* **GKE Credential Exposure** (metadata server, node account, roles, scopes, *one SSRF from roles/editor*), **Service Account Impersonation** (who can become which service account, with reach), **GKE Control Plane Exposure**, **GKE Node Hardening**, **GKE Threat Detection**, **VPC Service Controls Coverage**; the nine `container.managed.*` guardrails in Organization Policies. No new role, no new API. |
+| **v17.2** | Forecasts, budgets and spend | **Spend-based commitment recommendations** from the organization's **Recommender export to BigQuery** (`RECOMMENDATIONS_EXPORT`; a dataset-level read, no billing-account IAM); **Capacity Planner** forecasts (the spike showed `forecasts:query` works per region for vCPUs by family and GPUs by type: `capacityplanner.googleapis.com`, `roles/capacityplanner.viewer`; reservation usage stays on the Compute API); **budget coverage** (projects and billing accounts without a budget); a **spend briefing** over the billing export; cost anomalies if an API exists. |
+| **v18** | Footprint, support and detection | A **Platform Footprint** page (what runs where: services, regions, versions); **modernization indicators** (legacy runtimes, unmanaged VMs, missing release channels); a **Support cases** briefing; the deprecations recommender; the detective half of the SSRF chain over Cloud Logging — **GKE control-plane activity** (exec, webhooks, RBAC and DaemonSet changes by service accounts or external IPs), **service-account activity signals**, **edge protection** (external load balancers without Cloud Armor). |
 | Later | | VM Manager vulnerability summary, Security Command Center findings summary, SLO coverage, PDF export. |

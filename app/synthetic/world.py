@@ -189,6 +189,33 @@ class GkeCluster:
 
 
 @dataclass(frozen=True)
+class GkeHardening:
+    """v17.1: a cluster's security posture, as the Asset Inventory resource shows it (``provider._cluster_asset``)."""
+    autopilot: bool
+    workload_identity: bool  # the cluster has a workload pool
+    gke_metadata_pools: tuple  # per node pool: True = GKE_METADATA, False = GCE metadata
+    default_service_account: bool  # nodes run as the Compute Engine default account
+    privileged_node_account: bool  # the node account holds roles/editor on the project
+    cloud_platform_scope: bool
+    public_endpoint: bool
+    authorized_networks: bool
+    open_authorized_networks: bool  # 0.0.0.0/0 among the authorized networks
+    legacy_abac: bool
+    client_certificate: bool
+    private_nodes: bool
+    network_policy: bool
+    shielded_nodes: bool
+    secure_boot: bool
+    cos_image: bool
+    binary_authorization: bool
+    security_posture: bool
+    vulnerability_scanning: bool
+    secrets_encryption: bool
+    workload_logs: bool
+    ctd_enabled: bool  # Container Threat Detection, effective state
+
+
+@dataclass(frozen=True)
 class ProjectProfile:
     index: int
     project_id: str
@@ -231,6 +258,12 @@ class ProjectProfile:
     gpu_quota: tuple = ()  # (region, metric, usage, limit): an accelerator quota near its limit
     quota_recommendation: bool = False  # the quota recommender suggests an increase
     future_reservation: bool = False  # a future reservation in the project's first zone
+    # v17.1: the SSRF chain
+    gke_hardening: dict = field(default_factory=dict)  # cluster name -> GkeHardening
+    impersonation_bindings: tuple = ()  # (level, resource, role, member): level is 'project' or 'service account' (resource = the target email)
+    custom_role_bindings: tuple = ()  # (role name, member): a custom role on the project that carries token permissions
+    etd_enabled: bool = True  # Event Threat Detection, effective state in the project
+    data_access_logs: bool = False  # DATA_READ/DATA_WRITE audit logs for container.googleapis.com
 
     @property
     def project_number(self):
@@ -456,6 +489,38 @@ class SyntheticOrg:
         quota_recommendation = _chance(rng, 0.08)
         future_reservation = bool(vms) and size == "large" and _chance(rng, 0.2)
 
+        # v17.1 (drawn after every v17 draw): the clusters' security posture, who may become which service account,
+        # threat detection and audit logging. Fictional names only.
+        gke_hardening = {}
+        for cluster in gke_clusters:
+            autopilot = _chance(rng, 0.2)
+            workload_identity = autopilot or _chance(rng, 0.55)
+            gke_hardening[cluster.name] = GkeHardening(
+                autopilot=autopilot, workload_identity=workload_identity,
+                gke_metadata_pools=tuple(workload_identity and _chance(rng, 0.8) for _ in cluster.node_pools),
+                default_service_account=_chance(rng, 0.5), privileged_node_account=_chance(rng, 0.5), cloud_platform_scope=_chance(rng, 0.4),
+                public_endpoint=_chance(rng, 0.7), authorized_networks=_chance(rng, 0.6), open_authorized_networks=_chance(rng, 0.15),
+                legacy_abac=_chance(rng, 0.05), client_certificate=_chance(rng, 0.1), private_nodes=_chance(rng, 0.6), network_policy=_chance(rng, 0.5),
+                shielded_nodes=_chance(rng, 0.8), secure_boot=_chance(rng, 0.7), cos_image=_chance(rng, 0.9), binary_authorization=_chance(rng, 0.2),
+                security_posture=_chance(rng, 0.6), vulnerability_scanning=_chance(rng, 0.3), secrets_encryption=_chance(rng, 0.2),
+                workload_logs=_chance(rng, 0.85), ctd_enabled=_chance(rng, 0.5))
+        impersonation_bindings = []
+        if service_accounts and _chance(rng, 0.08):  # the dangerous one: token minting granted on the whole project to an account
+            impersonation_bindings.append(('project', project_id, 'roles/iam.serviceAccountTokenCreator', f'serviceAccount:{service_accounts[0].email}'))
+        if service_accounts and _chance(rng, 0.2):  # a person who may mint tokens for one account (Investigation)
+            impersonation_bindings.append(('service account', service_accounts[-1].email, 'roles/iam.serviceAccountTokenCreator', 'user:ops-lead@example.com'))
+        if len(service_accounts) >= 2 and _chance(rng, 0.1):  # an account-to-account chain
+            impersonation_bindings.append(('service account', service_accounts[0].email, 'roles/iam.serviceAccountTokenCreator', f'serviceAccount:{service_accounts[1].email}'))
+        if service_accounts and gke_clusters and _chance(rng, 0.3):  # Workload Identity for the default Kubernetes account
+            impersonation_bindings.append(('service account', service_accounts[0].email, 'roles/iam.workloadIdentityUser', f'serviceAccount:{project_id}.svc.id.goog[default/default]'))
+        if service_accounts and _chance(rng, 0.05):  # a principal from outside the organization
+            impersonation_bindings.append(('service account', service_accounts[0].email, 'roles/iam.serviceAccountTokenCreator', 'serviceAccount:deploy@outside-example.iam.gserviceaccount.com'))
+        if _chance(rng, 0.1):  # act-as for everyone in the project (deploy pipelines often get this)
+            impersonation_bindings.append(('project', project_id, 'roles/iam.serviceAccountUser', 'group:deployers@example.com'))
+        custom_role_bindings = ((f'projects/{project_id}/roles/tokenMinter', 'serviceAccount:ci@example-ci.iam.gserviceaccount.com'),) if _chance(rng, 0.04) else ()
+        etd_enabled = _chance(rng, 0.6)
+        data_access_logs = _chance(rng, 0.25)
+
         # Cost recommendations of the v17 recommenders (merged after the draws, so the dict above is as it was).
         extra_recommendations = {}
         if vms and _chance(rng, 0.1):
@@ -495,6 +560,8 @@ class SyntheticOrg:
             labels=labels, old_snapshots=old_snapshots, orphan_snapshots=orphan_snapshots, reservations=reservations,
             commitments=commitments, capacity_events=capacity_events, iam_recommendations=iam_recommendations,
             gpu_quota=gpu_quota, quota_recommendation=quota_recommendation, future_reservation=future_reservation,
+            gke_hardening=gke_hardening, impersonation_bindings=tuple(impersonation_bindings), custom_role_bindings=custom_role_bindings,
+            etd_enabled=etd_enabled, data_access_logs=data_access_logs,
         )
 
     # --- organization-level data ---
@@ -520,6 +587,19 @@ class SyntheticOrg:
     def unattended_project_ids(self):
         """Projects the Recommender flags as unattended: every 40th project."""
         return [self.project_id(i) for i in range(0, self.n_projects, 40)]
+
+    def perimeters(self):
+        """The organization's VPC Service Controls perimeters (v17.1): one enforced perimeter around the first folder's
+        projects that leaves two replay services unrestricted, one dry-run perimeter around the second folder's."""
+        first = [p for p in self.projects(self.folder_ids[0])]
+        second = [p for p in self.projects(self.folder_ids[1])] if len(self.folder_ids) > 1 else []
+        return [
+            {"name": "prod_perimeter", "title": "prod perimeter", "regular": True, "dry_run": False,
+             "resources": [f"projects/{p.project_number}" for p in first],
+             "restricted": ["storage.googleapis.com", "secretmanager.googleapis.com", "container.googleapis.com", "sqladmin.googleapis.com", "bigquery.googleapis.com"]},
+            {"name": "staging_perimeter", "title": "staging perimeter (dry run)", "regular": True, "dry_run": True,
+             "resources": [f"projects/{p.project_number}" for p in second[:3]], "restricted": ["storage.googleapis.com"]},
+        ]
 
     def summary(self):
         """Totals over the generated organization (for logs and the load-test report)."""

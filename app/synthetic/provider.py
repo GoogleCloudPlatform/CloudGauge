@@ -63,6 +63,7 @@ API_LATENCY_SCALE = {
     "cloudresourcemanager": 0.8, "compute": 1.0, "iam": 1.0, "sqladmin": 1.2, "container": 1.5,
     "recommender": 1.6, "monitoring": 1.2, "logging": 1.0, "securitycenter": 1.0, "essentialcontacts": 1.0,
     "asset": 2.0, "osconfig": 0.8, "storage": 0.8, "http": 1.0, "servicehealth": 1.2, "advisorynotifications": 1.0,
+    "accesscontextmanager": 1.0,
 }
 LATENCY_SIGMA = 0.45  # log-normal spread: p95 is about 2x the median
 PASSTHROUGH_SERVICES = ("run",)  # infrastructure APIs the synthetic provider never fakes
@@ -324,12 +325,33 @@ class SyntheticGcp:
     def _h_cloudresourcemanager_projects_getIamPolicy(self, kw, project_id):
         self.call("cloudresourcemanager", "projects.getIamPolicy", project_id=project_id, style="http")
         profile = self.world.project(project_id)
+        policy = {"bindings": self._project_policy_bindings(profile), "etag": "synthetic"}
+        if profile.data_access_logs:  # v17.1
+            policy["auditConfigs"] = [{"service": "container.googleapis.com", "auditLogConfigs": [{"logType": "DATA_READ"}, {"logType": "DATA_WRITE"}]}]
+        return policy
+
+    def _project_policy_bindings(self, profile):
+        """A project's IAM bindings: a reader group, the primitive bindings and (v17.1) the impersonation table's project-level
+        entries, the custom roles, the privileged node account and a Google-managed service agent."""
         bindings = [{"role": "roles/viewer", "members": ["group:readers@example.com"]}]
         by_role = {}
         for role, member in profile.primitive_bindings:
             by_role.setdefault(role, []).append(member)
         bindings += [{"role": role, "members": members} for role, members in by_role.items()]
-        return {"bindings": bindings, "etag": "synthetic"}
+        return bindings + self._project_level_impersonation(profile)
+
+    def _project_level_impersonation(self, profile):
+        """v17.1: the project-level bindings of the impersonation table, the custom roles, the privileged node account."""
+        extra = {}
+        for level, resource, role, member in profile.impersonation_bindings:
+            if level == "project":
+                extra.setdefault(role, []).append(member)
+        for role, member in profile.custom_role_bindings:
+            extra.setdefault(role, []).append(member)
+        if any(h.privileged_node_account and not h.autopilot for h in profile.gke_hardening.values()):
+            extra.setdefault("roles/editor", []).append(f"serviceAccount:{profile.project_number}-compute@developer.gserviceaccount.com")
+        extra.setdefault("roles/compute.serviceAgent", []).append(f"serviceAccount:service-{profile.project_number}@compute-system.iam.gserviceaccount.com")
+        return [{"role": role, "members": members} for role, members in extra.items()]
 
     def _h_cloudresourcemanager_projects_getAncestry(self, kw, project_id):
         self.call("cloudresourcemanager", "projects.getAncestry", style="http")
@@ -538,6 +560,38 @@ class SyntheticGcp:
         self.call("logging", "sinks.list", style="http")
         return {"sinks": [{"name": "org-audit-sink", "destination": f"bigquery.googleapis.com/projects/{HOST_PROJECT}/datasets/audit_logs"}]}
 
+    def _h_securitycenter_projects_locations_clusters_containerThreatDetectionSettings_calculate(self, kw, project_id):
+        self.call("securitycenter", "containerThreatDetectionSettings.calculate", project_id=project_id, style="http")
+        profile, cluster_name = self.world.project(project_id), kw["name"].split("/clusters/", 1)[1].split("/", 1)[0]
+        hardening = profile.gke_hardening.get(cluster_name)
+        return {"name": kw["name"], "serviceEnablementState": "ENABLED" if (hardening is None or hardening.ctd_enabled) else "DISABLED"}
+
+    def _h_securitycenter_projects_eventThreatDetectionSettings_calculate(self, kw, project_id):
+        self.call("securitycenter", "eventThreatDetectionSettings.calculate", project_id=project_id, style="http")
+        return {"name": kw["name"], "serviceEnablementState": "ENABLED" if self.world.project(project_id).etd_enabled else "DISABLED"}
+
+    def _h_iam_projects_roles_get(self, kw, project_id):
+        self.call("iam", "roles.get", project_id=project_id, style="http")
+        return {"name": kw["name"], "includedPermissions": ["iam.serviceAccounts.getAccessToken", "iam.serviceAccounts.get"]}
+
+    def _h_accesscontextmanager_accessPolicies_list(self, kw, project_id):
+        self.call("accesscontextmanager", "accessPolicies.list", style="http")
+        return {"accessPolicies": [{"name": "accessPolicies/100", "parent": kw.get("parent", ""), "title": "synthetic policy"}]}
+
+    def _h_accesscontextmanager_accessPolicies_servicePerimeters_list(self, kw, project_id):
+        self.call("accesscontextmanager", "servicePerimeters.list", style="http")
+        perimeters = []
+        for p in self.world.perimeters():
+            config = {"resources": list(p["resources"]), "restrictedServices": list(p["restricted"])}
+            entry = {"name": f"{kw.get('parent', 'accessPolicies/100')}/servicePerimeters/{p['name']}", "title": p["title"],
+                     "perimeterType": "PERIMETER_TYPE_REGULAR" if p["regular"] else "PERIMETER_TYPE_BRIDGE"}
+            if p["dry_run"]:
+                entry.update(spec=config, useExplicitDryRunSpec=True)
+            else:
+                entry["status"] = config
+            perimeters.append(entry)
+        return {"servicePerimeters": perimeters}
+
     def _h_securitycenter_organizations_getOrganizationSettings(self, kw, project_id):
         self.call("securitycenter", "getOrganizationSettings", style="http")
         return {"name": kw["name"], "tier": "STANDARD"}
@@ -598,8 +652,17 @@ class SyntheticGcp:
         if "cloudresourcemanager.googleapis.com/Project" in asset_types:
             results += [SimpleNamespace(name=f"//cloudresourcemanager.googleapis.com/projects/{p.project_id}", display_name=p.display_name,
                                         asset_type="cloudresourcemanager.googleapis.com/Project", project=f"projects/{p.project_number}",
-                                        parent_full_resource_name=f"//cloudresourcemanager.googleapis.com/folders/{p.folder_id}")
-                        for p in self.world.projects(folder_id)]
+                                        parent_full_resource_name=f"//cloudresourcemanager.googleapis.com/folders/{p.folder_id}",
+                                        folders=[f"folders/{p.folder_id}"], organization=f"organizations/{self.world.org_id}")
+                        for p in ([self.world.project(scope.split("/", 1)[1])] if scope.startswith("projects/") else self.world.projects(folder_id))]
+        if "iam.googleapis.com/ServiceAccount" in asset_types:  # v17.1: the accounts in scope, the default compute account included
+            project_id = scope.split("/", 1)[1] if scope.startswith("projects/") else None
+            for p in ([self.world.project(project_id)] if project_id else self.world.projects(folder_id)):
+                emails = [sa.email for sa in p.service_accounts] + [f"{p.project_number}-compute@developer.gserviceaccount.com"]
+                results += [SimpleNamespace(name=f"//iam.googleapis.com/projects/{p.project_id}/serviceAccounts/{e}", display_name=e.split("@")[0],
+                                            asset_type="iam.googleapis.com/ServiceAccount", project=f"projects/{p.project_number}",
+                                            folders=[f"folders/{p.folder_id}"], organization=f"organizations/{self.world.org_id}",
+                                            parent_full_resource_name=f"//cloudresourcemanager.googleapis.com/projects/{p.project_id}") for e in emails]
         self.call("asset", "searchAllResources", pages=max(1, math.ceil(len(results) / PAGE_SIZE)))
         return results
 
@@ -612,8 +675,7 @@ class SyntheticGcp:
             profile = self.world.project(project_id)
             found = self._resilience_assets(profile, asset_types)
             if "container.googleapis.com/Cluster" in asset_types:
-                found += [SimpleNamespace(name=f"//container.googleapis.com/projects/{project_id}/locations/{c.location}/clusters/{c.name}",
-                                          resource=SimpleNamespace(data={"name": c.name})) for c in profile.gke_clusters]
+                found += [self._cluster_asset(profile, c) for c in profile.gke_clusters]
             if "compute.googleapis.com/ForwardingRule" in asset_types:
                 found += [SimpleNamespace(name=f"//compute.googleapis.com/projects/{project_id}/regions/{r}/forwardingRules/lb-{r}",
                                           resource=SimpleNamespace(data={"name": f"lb-{r}"})) for r in profile.forwarding_rule_regions]
@@ -623,8 +685,81 @@ class SyntheticGcp:
         found = []
         for profile in self.world.projects(folder_id):
             found += self._resilience_assets(profile, asset_types)
+            if "container.googleapis.com/Cluster" in asset_types:
+                found += [self._cluster_asset(profile, c) for c in profile.gke_clusters]
         self.call("asset", "listAssets(folder)" if folder_id else "listAssets(org)", pages=max(1, math.ceil(len(found) / PAGE_SIZE)))
         return found
+
+    def _cluster_asset(self, profile, cluster):
+        """A ``container.googleapis.com/Cluster`` asset with the fields the v17.1 checks read, from the cluster's GkeHardening."""
+        h = profile.gke_hardening.get(cluster.name)
+        project_id = profile.project_id
+        scopes = ["https://www.googleapis.com/auth/cloud-platform"] if (h and h.cloud_platform_scope) else [
+            "https://www.googleapis.com/auth/devstorage.read_only", "https://www.googleapis.com/auth/logging.write", "https://www.googleapis.com/auth/monitoring"]
+        pools = []
+        for i, (name, auto, version) in enumerate(cluster.node_pools):
+            gke_metadata = bool(h and i < len(h.gke_metadata_pools) and h.gke_metadata_pools[i])
+            config = {"serviceAccount": "default" if (h is None or h.default_service_account) else f"gke-nodes@{project_id}.iam.gserviceaccount.com",
+                      "oauthScopes": scopes, "metadata": {"disable-legacy-endpoints": "true"},
+                      "imageType": "COS_CONTAINERD" if (h is None or h.cos_image) else "UBUNTU_CONTAINERD",
+                      "shieldedInstanceConfig": {"enableSecureBoot": bool(h and h.secure_boot), "enableIntegrityMonitoring": True}}
+            if gke_metadata:
+                config["workloadMetadataConfig"] = {"mode": "GKE_METADATA"}
+            pools.append({"name": name, "version": version, "config": config, "management": {"autoUpgrade": auto},
+                          "networkConfig": {"enablePrivateNodes": bool(h and h.private_nodes)}})
+        data = {"name": cluster.name, "location": cluster.location, "status": "RUNNING", "currentMasterVersion": cluster.master_version,
+                "nodePools": pools, "legacyAbac": {"enabled": bool(h and h.legacy_abac)}, "masterAuth": {"clusterCaCertificate": "c3ludGhldGlj"},
+                "loggingConfig": {"componentConfig": {"enableComponents": ["SYSTEM_COMPONENTS"] + (["WORKLOADS"] if (h is None or h.workload_logs) else [])}},
+                "databaseEncryption": {"state": "ENCRYPTED" if (h and h.secrets_encryption) else "DECRYPTED"},
+                "securityPostureConfig": {"mode": "BASIC" if (h is None or h.security_posture) else "DISABLED",
+                                          "vulnerabilityMode": "VULNERABILITY_BASIC" if (h and h.vulnerability_scanning) else "VULNERABILITY_DISABLED"},
+                "shieldedNodes": {"enabled": h is None or h.shielded_nodes}, "anonymousAuthenticationConfig": {"mode": "LIMITED"},
+                "privateClusterConfig": {"enablePrivateNodes": bool(h and h.private_nodes), "enablePrivateEndpoint": not (h is None or h.public_endpoint)},
+                "masterAuthorizedNetworksConfig": {"enabled": bool(h and h.authorized_networks),
+                                                   "cidrBlocks": ([{"cidrBlock": "0.0.0.0/0"}] if (h and h.open_authorized_networks) else [{"cidrBlock": "10.0.0.0/8"}])}}
+        if cluster.release_channel:
+            data["releaseChannel"] = {"channel": "REGULAR"}
+        if h and h.autopilot:
+            data["autopilot"] = {"enabled": True}
+        if h and h.workload_identity:
+            data["workloadIdentityConfig"] = {"workloadPool": f"{project_id}.svc.id.goog"}
+        if h and h.client_certificate:
+            data["masterAuth"]["clientCertificateConfig"] = {"issueClientCertificate": True}
+        if h and h.network_policy:
+            data["networkConfig"] = {"datapathProvider": "ADVANCED_DATAPATH"}
+        if h and h.binary_authorization:
+            data["binaryAuthorization"] = {"evaluationMode": "PROJECT_SINGLETON_POLICY_ENFORCE"}
+        return SimpleNamespace(name=f"//container.googleapis.com/projects/{project_id}/locations/{cluster.location}/clusters/{cluster.name}",
+                               resource=SimpleNamespace(data=data, parent=f"//cloudresourcemanager.googleapis.com/projects/{profile.project_number}"),
+                               ancestors=[f"projects/{profile.project_number}", f"folders/{profile.folder_id}", f"organizations/{self.world.org_id}"])
+
+    def search_all_iam_policies(self, request):
+        """v17.1: the IAM policies that mention a service account (``policy:\"email\"``) or that open an impersonation path."""
+        scope, query = request["scope"], request.get("query", "")
+        folder_id = scope.split("/")[1] if scope.startswith("folders/") else None
+        profiles = [self.world.project(scope.split("/", 1)[1])] if scope.startswith("projects/") else self.world.projects(folder_id)
+        email = query.split('"')[1] if query.startswith('policy:"') else None
+        results = []
+        for profile in profiles:
+            project_bindings = self._project_policy_bindings(profile)
+            common = {"project": f"projects/{profile.project_number}", "organization": f"organizations/{self.world.org_id}", "folders": [f"folders/{profile.folder_id}"]}
+            if email is None:
+                wanted = [b for b in project_bindings if b["role"] in ("roles/iam.serviceAccountTokenCreator", "roles/iam.serviceAccountUser", "roles/compute.serviceAgent")
+                          or "/roles/" in b["role"]]
+            else:
+                wanted = [b for b in project_bindings if f"serviceAccount:{email}" in b["members"]]
+            if wanted:
+                results.append(SimpleNamespace(asset_type="cloudresourcemanager.googleapis.com/Project", resource=f"//cloudresourcemanager.googleapis.com/projects/{profile.project_id}",
+                                               policy=SimpleNamespace(bindings=[SimpleNamespace(role=b["role"], members=list(b["members"])) for b in wanted]), **common))
+            by_target = {}
+            for level, resource, role, member in profile.impersonation_bindings:
+                if level == "service account" and (email is None or email == resource):
+                    by_target.setdefault(resource, []).append(SimpleNamespace(role=role, members=[member]))
+            for target, bindings in by_target.items():
+                results.append(SimpleNamespace(asset_type="iam.googleapis.com/ServiceAccount", resource=f"//iam.googleapis.com/projects/{profile.project_id}/serviceAccounts/{target}",
+                                               policy=SimpleNamespace(bindings=bindings), **common))
+        self.call("asset", "searchAllIamPolicies", pages=max(1, math.ceil(len(results) / PAGE_SIZE)))
+        return results
 
     def _resilience_assets(self, profile, asset_types):
         """A project's Cloud SQL instances, managed instance groups, snapshots (single-region and, since v16.1,
@@ -834,6 +969,9 @@ class _AssetStub:
 
     def list_assets(self, request):
         return self._p.list_assets(request)
+
+    def search_all_iam_policies(self, request):
+        return self._p.search_all_iam_policies(request)
 
 
 class _RecommenderStub:

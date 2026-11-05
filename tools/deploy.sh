@@ -172,8 +172,8 @@ if [[ "${SKIP_SETUP:-0}" != 1 ]]; then
     advisorynotifications.googleapis.com essentialcontacts.googleapis.com compute.googleapis.com \
     container.googleapis.com sqladmin.googleapis.com osconfig.googleapis.com monitoring.googleapis.com \
     cloudasset.googleapis.com
-  # v17: scheduled scans, the BigQuery export.
-  g services enable cloudscheduler.googleapis.com bigquery.googleapis.com
+  # v17: scheduled scans, the BigQuery export. v17.1: VPC Service Controls Coverage reads the perimeters (read-only use).
+  g services enable cloudscheduler.googleapis.com bigquery.googleapis.com accesscontextmanager.googleapis.com
 
   step "Service account ${SA_EMAIL}"
   if [[ "$DRY_RUN" == 1 ]] || ! gcloud --project "$PROJECT_ID" iam service-accounts describe "$SA_EMAIL" >/dev/null 2>&1; then

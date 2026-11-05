@@ -71,6 +71,10 @@ CATEGORY_MAP = {
     "Recent Changes (Org & Project)": "Operational Excellence & Observability", "Unattended Projects": "Operational Excellence & Observability",
     "Quota Utilization (>80%)": "Operational Excellence & Observability",
     "Quota Increase Recommendations": "Operational Excellence & Observability",  # v17
+    # v17.1: the SSRF chain — GKE security posture (app.checks.gke_security), impersonation, perimeters.
+    "GKE Credential Exposure": "Security & Identity", "GKE Control Plane Exposure": "Security & Identity",
+    "GKE Node Hardening": "Security & Identity", "GKE Threat Detection": "Security & Identity",
+    "Service Account Impersonation": "Security & Identity", "VPC Service Controls Coverage": "Security & Identity",
 
     # B2: error results. These names are only written when a check fails; the
     # legacy map left them out, so failures silently disappeared from the report.

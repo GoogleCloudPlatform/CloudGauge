@@ -24,7 +24,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.checks import capacity, categories, cost, network, registry, reliability, runner
+from app.checks import capacity, categories, cost, gke_security, network, registry, reliability, runner
 from app.checks.categories import CATEGORY_MAP, categorize_findings
 
 CHECKS_DIR = pathlib.Path(categories.__file__).parent
@@ -33,6 +33,7 @@ DYNAMIC_NAMES = {
     ('cost.py', 'check_name'): cost.COST_RECOMMENDERS,
     ('cost.py', 'check'): cost.FINOPS_CHECKS,  # v17: the FinOps checks share one writer
     ('capacity.py', 'check'): capacity.CAPACITY_CHECKS,  # v17: the capacity checks share one writer
+    ('gke_security.py', 'check'): gke_security.GKE_SECURITY_CHECKS,  # v17.1: four findings from one listing
     ('network.py', 'check_name'): network.NETWORK_INSIGHT_TYPES,
     ('reliability.py', 'check'): reliability.RESILIENCE_CHECKS,  # v15.6: a verdict or an Error per name
     ('runner.py', 'check_name'): None,  # the registry display names (test_registry_names_...)
@@ -113,8 +114,10 @@ def test_every_name_a_check_writes_is_mapped():
     # The v17 tables name every check their writers can produce.
     assert set(cost.FINOPS_CHECKS) == {'Cost Allocation Labels', 'Cloud Storage Lifecycle', 'Snapshot Sprawl'}
     assert set(capacity.CAPACITY_CHECKS) == {'Reservation Coverage', 'Commitments Expiring', 'Capacity Signals'}
+    assert set(gke_security.GKE_SECURITY_CHECKS) == {'GKE Credential Exposure', 'GKE Control Plane Exposure', 'GKE Node Hardening', 'GKE Threat Detection'}
     assert {name for name in names if name not in cost.COST_RECOMMENDERS} >= {capacity.COMMITMENTS_BRIEFING, 'IAM Least Privilege',
-                                                                               'Cloud SQL Extended Support', 'Quota Increase Recommendations'}
+                                                                               'Cloud SQL Extended Support', 'Quota Increase Recommendations',
+                                                                               'Service Account Impersonation', 'VPC Service Controls Coverage'}
 
 
 @pytest.mark.parametrize('scope', ['project', 'folder', 'organization'])

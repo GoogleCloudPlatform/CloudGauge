@@ -691,34 +691,34 @@ Manually updated: 2025-03-09",2025-03,"When enforced, this constraint requires t
 Restrict endpoint usage,List,Manually updated: 2024-03-26,2025-04,"This list constraint defines the set of Google Cloud API endpoints that can be used to access resources in an organization, folder, or project.This constraint can be used to block access to Google Cloud resources through global API endpoints, enforcing that locational or regional endpoints be used. For example, specifying bigquery.googleapis.com in this policy's denylist will cause requests to bigquery.googleapis.com/... to fail but requests to {location}-bigquery.googleapis.com/... succeed.By default, access to all Google Cloud API endpoints is allowed.The denied list of endpoints must come from the list below. Trying to save the denied list with other values will fail.For more information, including the list of valid constraint values, please refer to the Restrict endpoint usage user guide.",,,,,gcp.restrictEndpointUsage,
 Require enabling Binary Authorization for GKE clusters.,Boolean,"
 True, False
-Manually updated: 2025-04-19",2025-04,"Enable Binary Authorization when creating or updating GKE clusters. For details, see https://cloud.google.com/binary-authorization/docs/setting-up.",,,,,container.managed.enableBinaryAuthorization,
+Manually updated: 2025-04-19",2025-04,"Enable Binary Authorization when creating or updating GKE clusters. For details, see https://cloud.google.com/binary-authorization/docs/setting-up.",Should have,,,,container.managed.enableBinaryAuthorization,
 Require enabling Google Groups for RBAC in GKE clusters.,Boolean,"
 True, False
-Manually updated: 2025-04-19",2025-04,"Enable Google Groups for RBAC when creating or updating GKE clusters. For details, see https://cloud.google.com/kubernetes-engine/docs/how-to/google-groups-rbac.",,,,,container.managed.enableGoogleGroupsRBAC,
+Manually updated: 2025-04-19",2025-04,"Enable Google Groups for RBAC when creating or updating GKE clusters. For details, see https://cloud.google.com/kubernetes-engine/docs/how-to/google-groups-rbac.",Could have,,,,container.managed.enableGoogleGroupsRBAC,
 Require enabling network policy enforcement in GKE clusters.,Boolean,"
 True, False
-Manually updated: 2025-04-19",2025-04,"Enable the use of Kubernetes NetworkPolicies by enabling network policy enforcement or GKE Dataplane V2. For details, see https://cloud.google.com/kubernetes-engine/docs/how-to/network-policy or https://cloud.google.com/kubernetes-engine/docs/how-to/dataplane-v2.",,,,,container.managed.enableNetworkPolicy,
+Manually updated: 2025-04-19",2025-04,"Enable the use of Kubernetes NetworkPolicies by enabling network policy enforcement or GKE Dataplane V2. For details, see https://cloud.google.com/kubernetes-engine/docs/how-to/network-policy or https://cloud.google.com/kubernetes-engine/docs/how-to/dataplane-v2.",Should have,,,,container.managed.enableNetworkPolicy,
 Require enabling Security Bulletin Notifications in GKE clusters.,Boolean,"
 True, False
-Manually updated: 2025-04-19",2025-04,"Enable Security Bulletin Notifications when creating or updating GKE clusters. For details, see https://cloud.google.com/kubernetes-engine/docs/concepts/cluster-notifications#securitybulletin",,,,,container.managed.enableSecurityBulletinNotifications,
+Manually updated: 2025-04-19",2025-04,"Enable Security Bulletin Notifications when creating or updating GKE clusters. For details, see https://cloud.google.com/kubernetes-engine/docs/concepts/cluster-notifications#securitybulletin",Should have,,,,container.managed.enableSecurityBulletinNotifications,
 Require enabling Workload Identity Federation for GKE.,Boolean,"
 True, False
-Manually updated: 2025-04-19",2025-04,"Enable Workload Identity Federation for GKE when creating or updating clusters. For details, see https://cloud.google.com/kubernetes-engine/docs/how-to/workload-identity.",,,,,container.managed.enableWorkloadIdentityFederation,
+Manually updated: 2025-04-19",2025-04,"Enable Workload Identity Federation for GKE when creating or updating clusters. For details, see https://cloud.google.com/kubernetes-engine/docs/how-to/workload-identity.",Must have,,,,container.managed.enableWorkloadIdentityFederation,
 Disallow using the default Compute Engine service account as the node pool service account.,Boolean,"
 True, False
-Manually updated: 2025-04-19",2025-04,"Don't use the default Compute Engine service account as the cluster or node pool service account. Use a minimally-privileged IAM service account instead. For details, see https://cloud.google.com/kubernetes-engine/docs/how-to/hardening-your-cluster#use_least_privilege_sa",,,,,container.managed.disallowDefaultComputeServiceAccount,
+Manually updated: 2025-04-19",2025-04,"Don't use the default Compute Engine service account as the cluster or node pool service account. Use a minimally-privileged IAM service account instead. For details, see https://cloud.google.com/kubernetes-engine/docs/how-to/hardening-your-cluster#use_least_privilege_sa",Must have,,,,container.managed.disallowDefaultComputeServiceAccount,
 Require using only the DNS-based endpoint to access GKE clusters.,Boolean,"
 True, False
-Manually updated: 2025-04-19",2025-04,"Enable the DNS-based endpoint for GKE control plane access and disable IP-based endpoints when creating or updating clusters. For details, see https://cloud.google.com/kubernetes-engine/docs/how-to/latest/network-isolation#dns-based-endpoint.",,,,,container.managed.enableControlPlaneDNSOnlyAccess,
+Manually updated: 2025-04-19",2025-04,"Enable the DNS-based endpoint for GKE control plane access and disable IP-based endpoints when creating or updating clusters. For details, see https://cloud.google.com/kubernetes-engine/docs/how-to/latest/network-isolation#dns-based-endpoint.",Could have,,,,container.managed.enableControlPlaneDNSOnlyAccess,
 Require enabling private nodes in GKE clusters.,Boolean,"
 True, False
-Manually updated: 2025-04-19",2025-04,"Enable private nodes when creating or updating GKE clusters and node pools. For details, see https://cloud.google.com/kubernetes-engine/docs/how-to/latest/network-isolation#configure-cluster-networking.",,,,,container.managed.enablePrivateNodes,
+Manually updated: 2025-04-19",2025-04,"Enable private nodes when creating or updating GKE clusters and node pools. For details, see https://cloud.google.com/kubernetes-engine/docs/how-to/latest/network-isolation#configure-cluster-networking.",Should have,,,,container.managed.enablePrivateNodes,
 Require enabling self-managed secrets Encryption in GKE clusters.,Boolean,"
 True, False
-Manually updated: 2025-04-19",2025-04,"Enable Secret encryption with self-managed keys when creating or updating GKE clusters. For details, see https://cloud.google.com/kubernetes-engine/docs/how-to/encrypting-secrets.",,,,,container.managed.enableSecretsEncryption,
+Manually updated: 2025-04-19",2025-04,"Enable Secret encryption with self-managed keys when creating or updating GKE clusters. For details, see https://cloud.google.com/kubernetes-engine/docs/how-to/encrypting-secrets.",Could have,,,,container.managed.enableSecretsEncryption,
 Requires disabling RBAC bindings to system identities in GKE clusters.,Boolean,"
 True, False
-Manually updated: 2025-04-19",2025-04,"Disable non-default ClusterRoleBindings and RoleBindings that reference the system:anonymous, system:authenticated, or system:unauthenticated system identities when creating or updating GKE clusters. For details, see https://cloud.google.com/kubernetes-engine/docs/best-practices/rbac#prevent-default-group-usage",,,,,container.managed.disableRBACSystemBindings,
+Manually updated: 2025-04-19",2025-04,"Disable non-default ClusterRoleBindings and RoleBindings that reference the system:anonymous, system:authenticated, or system:unauthenticated system identities when creating or updating GKE clusters. For details, see https://cloud.google.com/kubernetes-engine/docs/best-practices/rbac#prevent-default-group-usage",Should have,,,,container.managed.disableRBACSystemBindings,
 VM Manager - Restrict inline script and output file usage,Boolean,"
 True, False
 Manually updated: 2025-05-21",2025-05,"This boolean constraint, when set to 'True', enforces compliance with Assured Workloads requirements by restricting the creation or modification of VM Manager resources that use inline scripts or binary output files. Specifically, the 'script' and 'output\_file\_path' fields within the OSPolicyAssignment and PolicyOrchestrator resources must remain empty.",,,,,osconfig.restrictInlineScriptAndOutputFileUsage,

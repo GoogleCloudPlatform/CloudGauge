@@ -239,9 +239,11 @@ def test_scan_completes_against_the_synthetic_organization(gcp, scope):
         assert check in html, check
     metrics = provider.metrics.snapshot()
     by_method = metrics['by_method']
-    # Three resilience listings, two for Snapshot Sprawl and one for Cloud SQL Extended Support (v17), all under the scope.
-    assert by_method.get('asset.listAssets(org)', 0) == (6 if scope == 'organization' else 0)
-    assert by_method.get('asset.listAssets(folder)', 0) == (6 if scope == 'folder' else 0)
+    # Three resilience listings, two for Snapshot Sprawl and one for Cloud SQL Extended Support (v17), one for the clusters
+    # (v17.1), all under the scope; the perimeters (v17.1) come from the Access Context Manager API.
+    assert by_method.get('asset.listAssets(org)', 0) == (7 if scope == 'organization' else 0)
+    assert by_method.get('asset.listAssets(folder)', 0) == (7 if scope == 'folder' else 0)
+    assert by_method.get('accesscontextmanager.servicePerimeters.list', 0) == 1
     metrics = provider.metrics.snapshot()
     assert metrics['total_calls'] > 50 and metrics['errors'] == {}
     # v15.4: a folder scan compares Asset Inventory's projects with Resource Manager's direct children (one call);

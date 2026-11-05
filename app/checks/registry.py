@@ -23,6 +23,9 @@ from typing import Any, Callable, NamedTuple
 
 from app.checks.advisories import check_org_advisories, check_project_advisories
 from app.checks.capacity import COMMITMENTS_BRIEFING, SIGNALS_CHECK, check_capacity_commitments, check_capacity_signals
+from app.checks.gke_security import CREDENTIAL_EXPOSURE_CHECK, check_gke_security
+from app.checks.impersonation import IMPERSONATION_CHECK, check_service_account_impersonation
+from app.checks.perimeters import VPC_SC_CHECK, check_vpc_sc_coverage
 from app.checks.cost import (
     LABELS_CHECK,
     LIFECYCLE_CHECK,
@@ -113,6 +116,10 @@ def build_check_plan(scope, scope_id, job_id, all_projects, active_zones, active
     the capacity checks (reservations, commitments and coverage; stockout and quota signals),
     the quota recommender, and IAM Least Privilege (the scope itself and every project).
 
+    v17.1 adds, after them, the SSRF-chain checks, all scope-level: the GKE security posture
+    (four findings from one listing of the scope's clusters), Service Account Impersonation
+    and VPC Service Controls Coverage.
+
     The two checks that query by location (Cost-Saving Recommendations, Network
     Insights) take one argument more than in beta v1: ``location_errors``, project ID
     -> the error that stopped location discovery for that project, which they report
@@ -152,6 +159,10 @@ def build_check_plan(scope, scope_id, job_id, all_projects, active_zones, active
         CheckSpec("Reliability & Resilience", CAPACITY_SIGNALS_CHECK, check_capacity_signals, (scope_id, all_projects, job_id)),
         CheckSpec("Operational Excellence & Observability", QUOTA_RECOMMENDATIONS_CHECK, check_quota_recommendations, (scope_id, all_projects, job_id)),
         CheckSpec("Security & Identity", IAM_CHECK, check_iam_recommendations, (scope, scope_id, all_projects, job_id)),
+        # v17.1: the SSRF chain
+        CheckSpec("Security & Identity", CREDENTIAL_EXPOSURE_CHECK, check_gke_security, (scope, scope_id, job_id)),
+        CheckSpec("Security & Identity", IMPERSONATION_CHECK, check_service_account_impersonation, (scope, scope_id, job_id)),
+        CheckSpec("Security & Identity", VPC_SC_CHECK, check_vpc_sc_coverage, (scope, scope_id, job_id)),
     ]
 
     if scope == 'organization':
@@ -175,11 +186,12 @@ def build_check_plan(scope, scope_id, job_id, all_projects, active_zones, active
 # don't include the project list (tests/test_fanout.py verifies this agrees).
 # Resilience of Critical Assets is one in every scope: it reads the scope's Asset
 # Inventory in three listings, not its projects one by one; so are Snapshot Sprawl
-# and Cloud SQL Extended Support (v17).
+# and Cloud SQL Extended Support (v17), and the v17.1 SSRF-chain checks (one cluster
+# listing, one IAM search, one perimeter listing for the whole scope).
 SCOPE_LEVEL_CHECKS = frozenset({
     "Organization Policies", "Organization IAM Policy", "Security Command Center Status",
     "Organization Audit Logging", "Essential Contacts", RESILIENCE_CHECK,
-    SNAPSHOT_SPRAWL_CHECK, SQL_VERSIONS_CHECK,
+    SNAPSHOT_SPRAWL_CHECK, SQL_VERSIONS_CHECK, CREDENTIAL_EXPOSURE_CHECK, IMPERSONATION_CHECK, VPC_SC_CHECK,
 })
 # The checks that do both: scope-wide work plus per-project work. Shards split them
 # with keyword flags: the scope shard runs the first set, the project shards the second

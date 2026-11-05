@@ -469,21 +469,45 @@ class FakeAssets:
         self.assets = []
         self.list_errors = {}  # asset type -> error its listing raises
         self.list_requests = []
+        # v17.1: IAM policy search results (objects with asset_type, resource, project, policy.bindings) and its error
+        self.iam_policies = []
+        self.iam_error = None
+        self.iam_queries = []
 
-    def add(self, kind, resource_id, display_name, parent=None):
+    def add(self, kind, resource_id, display_name, parent=None, project_number=None, organization=None):
         """Adds a folder or a project (``kind`` is ``'folders'`` or ``'projects'``); ``parent`` is what Asset Search
-        reports as the parent, e.g. ``'folders/42'`` (``None``: the fake reports none)."""
+        reports as the parent, e.g. ``'folders/42'`` (``None``: the fake reports none); ``project_number`` and
+        ``organization`` fill the search result's ``project`` and ``organization`` fields (v17.1)."""
         self.resources.append(SimpleNamespace(
             name=f'//cloudresourcemanager.googleapis.com/{kind}/{resource_id}',
             display_name=display_name, asset_type=ASSET_TYPES[kind],
-            parent_full_resource_name=f'//cloudresourcemanager.googleapis.com/{parent}' if parent else ''))
+            parent_full_resource_name=f'//cloudresourcemanager.googleapis.com/{parent}' if parent else '',
+            project=f'projects/{project_number}' if project_number else '', organization=f'organizations/{organization}' if organization else ''))
 
-    def add_asset(self, asset_type, name, data, folder=None):
+    def add_service_account(self, email, project_id, project_number, folder=None):
+        """Adds an ``iam.googleapis.com/ServiceAccount`` search result (v17.1)."""
+        self.resources.append(SimpleNamespace(
+            name=f'//iam.googleapis.com/projects/{project_id}/serviceAccounts/{email}', display_name=email.split('@')[0],
+            asset_type='iam.googleapis.com/ServiceAccount', project=f'projects/{project_number}',
+            folders=[f'folders/{folder}'] if folder else [], organization=f'organizations/{ORG_ID}',
+            parent_full_resource_name=f'//cloudresourcemanager.googleapis.com/projects/{project_id}'))
+
+    def add_asset(self, asset_type, name, data, folder=None, project_number=None):
         """Adds an asset for ``list_assets``: ``name`` is its full name (``//compute.googleapis.com/projects/p1/global/snapshots/s1``),
-        ``data`` its resource data. It is listed under its project, under ``folder`` (a folder ID) if given, and under the organization."""
+        ``data`` its resource data. It is listed under its project, under ``folder`` (a folder ID) if given, and under the organization.
+        ``project_number`` fills ``resource.parent`` and ``ancestors`` (v17.1)."""
         project_id = name.split('/projects/', 1)[1].split('/', 1)[0]
         parents = {f'projects/{project_id}', f'organizations/{ORG_ID}'} | ({f'folders/{folder}'} if folder else set())
-        self.assets.append(SimpleNamespace(asset_type=asset_type, name=name, resource=SimpleNamespace(data=data), parents=parents))
+        resource = SimpleNamespace(data=data, parent=f'//cloudresourcemanager.googleapis.com/projects/{project_number}' if project_number else '')
+        ancestors = ([f'projects/{project_number}'] if project_number else []) + ([f'folders/{folder}'] if folder else []) + [f'organizations/{ORG_ID}']
+        self.assets.append(SimpleNamespace(asset_type=asset_type, name=name, resource=resource, parents=parents, ancestors=ancestors))
+
+    def add_iam_policy(self, asset_type, resource, bindings, project_number=None, folders=()):
+        """Adds an IAM policy search result (v17.1): ``bindings`` are ``(role, [members])`` pairs."""
+        self.iam_policies.append(SimpleNamespace(
+            asset_type=asset_type, resource=resource, project=f'projects/{project_number}' if project_number else '',
+            organization=f'organizations/{ORG_ID}', folders=[f'folders/{f}' for f in folders],
+            policy=SimpleNamespace(bindings=[SimpleNamespace(role=role, members=list(members)) for role, members in bindings])))
 
     @property
     def client_class(self):
@@ -505,6 +529,16 @@ class FakeAssets:
                     if asset_type in assets.list_errors:
                         raise assets.list_errors[asset_type]
                 return [a for a in assets.assets if a.asset_type in request['asset_types'] and request['parent'] in a.parents]
+
+            def search_all_iam_policies(self, request):
+                assets.iam_queries.append(request['query'])
+                if assets.iam_error:
+                    raise assets.iam_error
+                query = request['query']
+                if query.startswith('policy:"'):  # the policies that mention one member
+                    email = query.split('"')[1]
+                    return [p for p in assets.iam_policies if any(f'serviceAccount:{email}' in b.members for b in p.policy.bindings)]
+                return list(assets.iam_policies)
 
         return FakeAssetServiceClient
 
