@@ -46,6 +46,7 @@
         .chart .axis { font: 11px var(--font-mono); fill: var(--muted); }
         .chart .line { fill: none; stroke: var(--ink); stroke-width: 1.5; stroke-linejoin: round; stroke-linecap: round; }
         .chart .value { font: 500 11px var(--font-mono); fill: var(--ink); }
+        .chart .dot { fill: var(--surface, #fff); stroke: var(--ink); stroke-width: 1.2; }
         .legend { display: flex; flex-wrap: wrap; gap: 8px 20px; margin-top: 10px; font-size: 13px; color: var(--body); }
         .legend-item { display: inline-flex; align-items: center; gap: 8px; }
         .legend-item svg { display: block; }
@@ -87,17 +88,22 @@
             <h2>Scores over time</h2>
             <svg class="chart" viewBox="{{ history.chart.view_box }}" role="img" aria-label="The four pillar scores over {{ history.chart.scans }} scans">
             {% for y, label in history.chart.ticks %}
-                <line class="grid" x1="36" x2="{{ history.chart.width - 90 }}" y1="{{ y }}" y2="{{ y }}"></line>
-                <text class="axis" x="28" y="{{ y + 4 }}" text-anchor="end">{{ label }}</text>
+                <line class="grid" x1="{{ history.chart.plot_left }}" x2="{{ history.chart.plot_right }}" y1="{{ y }}" y2="{{ y }}"></line>
+                <text class="axis" x="{{ history.chart.plot_left - 8 }}" y="{{ y + 4 }}" text-anchor="end">{{ label }}</text>
             {% endfor %}
             {% for x, label in history.chart.labels %}
-                <text class="axis" x="{{ x }}" y="{{ history.chart.height - 8 }}" text-anchor="{{ 'start' if loop.first else 'end' }}">{{ label }}</text>
+                <text class="axis" x="{{ x }}" y="{{ history.chart.height - 8 }}" text-anchor="{{ 'start' if loop.first else ('end' if loop.last else 'middle') }}">{{ label }}</text>
             {% endfor %}
             {% for line in history.chart.lines %}
                 {% if line.points %}
                 <polyline class="line" points="{{ line.points }}"{% if line.dash %} stroke-dasharray="{{ line.dash }}"{% endif %}></polyline>
                 <text class="value" x="{{ line.last_x + 8 }}" y="{{ line.label_y + 4 }}">{{ line.pillar }} {{ line.last_text }}</text>
                 {% endif %}
+            {% endfor %}
+            {% for line in history.chart.lines %}
+                {% for x, y, title in line.markers %}
+                <circle class="dot" cx="{{ x }}" cy="{{ y }}" r="2.4"><title>{{ title }}</title></circle>
+                {% endfor %}
             {% endfor %}
             </svg>
             <div class="legend">
@@ -133,7 +139,7 @@
                 </tbody>
             </table>
             </div>
-            <p class="foot">Scores are recomputed from each scan's check statuses under the current rule, so a change of rule between releases never shows as a change of posture. The newest {{ history.count }} scans are listed; every scan is in the BigQuery export when it is configured.</p>
+            <p class="foot">Scores are recomputed from each scan's check statuses under the current rule, so a change of rule between releases never shows as a change of posture. {% if history.capped %}The newest {{ history.count }} of {{ history.total }} scans are listed; the older ones stay in the bucket.{% else %}All {{ history.count }} scans are listed.{% endif %} Every scan is kept in the results bucket — its summary under <code>scopes/</code> (what this page reads), its HTML and CSV reports under the job's folder — and, when the BigQuery export is configured, loaded into BigQuery as well.</p>
         </section>
 {% endif %}
     </div>

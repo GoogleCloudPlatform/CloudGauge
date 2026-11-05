@@ -126,8 +126,8 @@ def view_history(scope, scope_id):
     if scope not in SCOPES:
         return "Scope must be organization, folder or project.", 404
     try:
-        summaries = get_services().results_store.list_summaries(scope, scope_id, limit=HISTORY_PAGE_SCANS)
+        summaries, total = get_services().results_store.list_summaries(scope, scope_id, limit=HISTORY_PAGE_SCANS, with_total=True)
     except Exception as e:
         print(f"Error listing the scan history of {scope} {scope_id}: {e}")
         return "Could not read the scan history.", 500
-    return render_template("history.html", history=build_history(scope, scope_id, summaries))
+    return render_template("history.html", history=build_history(scope, scope_id, summaries, total=total))

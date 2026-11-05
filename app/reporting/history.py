@@ -29,9 +29,13 @@ from dataclasses import dataclass, replace
 from app.reporting.scorecard import PILLARS
 from app.reporting.scoring import NOT_ASSESSED_TEXT, overview_from_checks, scores_from_checks
 
-# The chart's drawing area (SVG user units): the pillar lines run across it, left (oldest) to right (newest).
+# The chart's drawing area (SVG user units): the pillar lines run across it, left (oldest) to right (newest). The right
+# padding holds the end labels ("Operations 100%" in 11 px monospace is about 100 units) so they are never clipped.
 CHART_WIDTH, CHART_HEIGHT = 720, 220
-CHART_PADDING = {"left": 36, "right": 90, "top": 12, "bottom": 28}
+CHART_PADDING = {"left": 36, "right": 124, "top": 12, "bottom": 28}
+TICKS = (0, 25, 50, 75, 100)  # horizontal gridlines, all labelled
+DATE_LABELS = 5  # at most this many dates under the axis
+MIN_LABEL_GAP = 84  # SVG units between two date labels
 # The lines read in monochrome, like the Scorecard's stoplights: one dash pattern per pillar.
 DASHES = {"Stability": "", "Security": "6 4", "Operations": "2 3", "Efficiency": "10 3 2 3"}
 # How many status changes a scan's row lists before "N more".
@@ -79,6 +83,7 @@ class ChartLine:
     last_y: float | None
     last_text: str  # "80%" or "—"
     label_y: float | None = None  # where the label is drawn: last_y, nudged apart from the labels of lines that end together
+    markers: tuple = ()  # (x, y, title) per scan the pillar was assessed in: a dot with a native tooltip, no script
 
 
 @dataclass(frozen=True)
@@ -94,6 +99,14 @@ class HistoryChart:
     def view_box(self):
         return f"0 0 {self.width} {self.height}"
 
+    @property
+    def plot_left(self):
+        return CHART_PADDING["left"]
+
+    @property
+    def plot_right(self):
+        return self.width - CHART_PADDING["right"]
+
 
 @dataclass(frozen=True)
 class History:
@@ -103,6 +116,12 @@ class History:
     entries: tuple  # HistoryEntry, newest first
     chart: HistoryChart | None  # None without a scan
     pillars: tuple  # the pillar names, in Scorecard order
+    total: int | None = None  # how many scans the scope has in all, when known (the listing window may leave older ones out)
+
+    @property
+    def capped(self):
+        """Older scans exist beyond the listed ones."""
+        return self.total is not None and self.total > self.count
 
     @property
     def count(self):
@@ -178,21 +197,40 @@ def build_chart(entries):
 
     lines = []
     for pillar, _ in PILLARS:
-        points, last = [], None
+        points, markers, last = [], [], None
         for index, entry in enumerate(oldest_first):
             score = entry.scores.get(pillar)
             if score is None:
                 continue
             x, y = round(x_of(index), 1), round(y_of(score), 1)
             points.append(f"{x},{y}")
+            markers.append((x, y, f"{entry.generated_at} \u00b7 {pillar} {score:.0f}%"))
             last = (x, y, f"{score:.0f}%")
-        lines.append(ChartLine(pillar=pillar, dash=DASHES.get(pillar, ""), points=" ".join(points),
+        lines.append(ChartLine(pillar=pillar, dash=DASHES.get(pillar, ""), points=" ".join(points), markers=tuple(markers),
                                last_x=last[0] if last else None, last_y=last[1] if last else None, last_text=last[2] if last else "\u2014"))
-    ticks = tuple((round(y_of(value), 1), f"{value}") for value in (0, 50, 100))
-    labels = [(round(x_of(0), 1), oldest_first[0].generated_at[:10])]
-    if count > 1:
-        labels.append((round(x_of(count - 1), 1), oldest_first[-1].generated_at[:10]))
+    ticks = tuple((round(y_of(value), 1), f"{value}") for value in TICKS)
+    labels = date_labels([entry.generated_at[:10] for entry in oldest_first], x_of)
     return HistoryChart(width=CHART_WIDTH, height=CHART_HEIGHT, lines=tuple(spread_labels(lines)), ticks=ticks, labels=tuple(labels), scans=count)
+
+
+def date_labels(dates, x_of):
+    """``[(x, date)]`` under the axis: the oldest and newest scans' dates, and up to three evenly spaced dates between
+    them — a date is dropped when it repeats its neighbour's or sits closer than ``MIN_LABEL_GAP`` to the label before."""
+    count = len(dates)
+    if count == 1:
+        return [(round(x_of(0), 1), dates[0])]
+    indices = sorted({round(i * (count - 1) / (DATE_LABELS - 1)) for i in range(DATE_LABELS)})
+    last_x, last_index = x_of(count - 1), count - 1
+    labels = []
+    for index in indices:
+        x = x_of(index)
+        if index == last_index:
+            if labels and (dates[index] == labels[-1][1] or x - labels[-1][0] < MIN_LABEL_GAP):
+                labels.pop()  # the newest date wins over a middle one that would crowd or repeat it
+            labels.append((round(x, 1), dates[index]))
+        elif not labels or (dates[index] != labels[-1][1] and x - labels[-1][0] >= MIN_LABEL_GAP and last_x - x >= MIN_LABEL_GAP):
+            labels.append((round(x, 1), dates[index]))
+    return labels
 
 
 # Two end labels closer than this (SVG units) are nudged apart, top to bottom.
@@ -209,8 +247,9 @@ def spread_labels(lines):
     return [replace(line, label_y=placed.get(line.pillar)) for line in lines]
 
 
-def build_history(scope, scope_id, summaries):
-    """The page's model from the scope's summaries, newest first (``GcsResultsStore.list_summaries``)."""
+def build_history(scope, scope_id, summaries, total=None):
+    """The page's model from the scope's summaries, newest first (``GcsResultsStore.list_summaries``); ``total`` is how
+    many summaries the scope has in all, so the footer can say how many older scans the page leaves out."""
     entries = build_entries(list(summaries))
     return History(scope=scope, scope_id=scope_id, scope_title=scope.capitalize(), entries=entries, chart=build_chart(entries),
-                   pillars=tuple(name for name, _ in PILLARS))
+                   pillars=tuple(name for name, _ in PILLARS), total=total)

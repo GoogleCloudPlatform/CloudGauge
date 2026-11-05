@@ -118,6 +118,13 @@ access policies; **no new role**, one API enabled for read-only use.
   the service-account inventory, the SCC `calculate` calls and `iam.roles.get`.
 - README: the six checks in the Security catalogue with the chain they break,
   the project structure, prerequisites (*no new role*). `VERSION = "17.1"`.
+- **History page** (follow-up): the chart's right margin holds its end labels
+  (they were clipped), gridlines at 0/25/50/75/100, up to five date labels
+  with repeats and crowding removed, one dot per scan with a native tooltip
+  (`<title>`, no script). The footer says where scans are kept — summaries
+  under `scopes/` in the results bucket, reports under the job's folder, and
+  BigQuery when the export is configured — and, when the 52-scan window
+  leaves older scans out, how many (`list_summaries(with_total=True)`).
 
 ### Tests
 
@@ -140,7 +147,7 @@ access policies; **no new role**, one API enabled for read-only use.
   search, service-account resources. Updated: `test_worker` (37/33 checks; the
   scope-level plan), `test_category_consistency` (the GKE writer's names),
   `test_synthetic` (eight organization listings, the perimeters read at the
-  organization in folder and project scans). 905 tests.
+  organization in folder and project scans). 907 tests.
 
 ### Upgrade notes
 

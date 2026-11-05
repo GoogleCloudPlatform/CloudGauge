@@ -22,7 +22,7 @@ import pytest
 from app import create_app
 from app.config import HISTORY_PAGE_SCANS
 from app.extensions import EXTENSION_KEY
-from app.reporting.history import build_chart, build_entries, build_history, status_flips
+from app.reporting.history import date_labels, build_chart, build_entries, build_history, status_flips
 from app.services import schedules
 from app.services.results_store import GcsResultsStore
 from helpers import make_settings
@@ -78,22 +78,39 @@ def test_entries_recompute_scores_and_counts_under_the_current_rule():
 
 def test_the_chart_draws_one_monochrome_line_per_pillar_oldest_left():
     chart = build_chart(build_entries(SUMMARIES))
-    assert chart.scans == 3 and chart.view_box == '0 0 720 220'
+    assert chart.scans == 3 and chart.view_box == '0 0 720 220' and (chart.plot_left, chart.plot_right) == (36, 596)
     lines = {line.pillar: line for line in chart.lines}
     assert list(lines) == ['Stability', 'Security', 'Operations', 'Efficiency']
-    assert lines['Stability'].points.split() == ['36.0,12.0', '333.0,192.0', '630.0,12.0'] and lines['Stability'].dash == ''  # 100 %, 0 %, 100 %
+    assert lines['Stability'].points.split() == ['36.0,12.0', '316.0,192.0', '596.0,12.0'] and lines['Stability'].dash == ''  # 100 %, 0 %, 100 %
     assert lines['Security'].points.split()[0] == '36.0,102.0' and lines['Security'].dash == '6 4' and lines['Security'].last_text == '50%'
-    assert lines['Operations'].points.split() == ['333.0,12.0', '630.0,12.0']  # not assessed in the first scan: the line starts at the second
-    assert lines['Efficiency'].points.split() == ['333.0,12.0', '630.0,12.0'] and lines['Efficiency'].last_text == '100%'
+    assert lines['Operations'].points.split() == ['316.0,12.0', '596.0,12.0']  # not assessed in the first scan: the line starts at the second
+    assert lines['Efficiency'].points.split() == ['316.0,12.0', '596.0,12.0'] and lines['Efficiency'].last_text == '100%'
     # Three lines end at 100 %: their labels are spread 13 units apart instead of being drawn over each other.
     assert [(line.pillar, line.last_y, line.label_y) for line in chart.lines] == [
         ('Stability', 12.0, 12.0), ('Security', 102.0, 102.0), ('Operations', 12.0, 25.0), ('Efficiency', 12.0, 38.0)]
-    assert chart.ticks == ((192.0, '0'), (102.0, '50'), (12.0, '100')) and chart.labels == ((36.0, '2026-10-06'), (630.0, '2026-10-20'))
+    # The right padding holds the longest label; one dot per assessed scan carries a tooltip without any script.
+    assert lines['Stability'].markers == ((36.0, 12.0, '2026-10-06 06:00 UTC · Stability 100%'), (316.0, 192.0, '2026-10-13 06:00 UTC · Stability 0%'),
+                                          (596.0, 12.0, '2026-10-20 06:00 UTC · Stability 100%'))
+    assert len(lines['Operations'].markers) == 2
+    assert chart.ticks == ((192.0, '0'), (147.0, '25'), (102.0, '50'), (57.0, '75'), (12.0, '100'))
+    assert chart.labels == ((36.0, '2026-10-06'), (316.0, '2026-10-13'), (596.0, '2026-10-20'))
     one = build_chart(build_entries(SUMMARIES[:1]))
     assert one.labels == ((36.0, '2026-10-20'),) and one.lines[0].points == '36.0,12.0'
     never = build_chart(build_entries([summary('j', '20261001T000000Z', {'x': (COST, 'Error')})]))
-    assert all(line.points == '' and line.last_text == '\u2014' for line in never.lines)
+    assert all(line.points == '' and line.last_text == '\u2014' and line.markers == () for line in never.lines)
     assert build_chart(()) is None
+
+
+def test_date_labels_keep_the_ends_and_up_to_three_distinct_dates_between():
+    x = lambda i: 36 + 560 * i / 36  # 37 scans across the plot
+    # Many scans on few days: a repeated date is not written twice; the newest date always wins the right end.
+    assert date_labels(['2026-10-04'] * 10 + ['2026-10-05'] * 20 + ['2026-10-14'] * 6 + ['2026-11-05'], x) == [
+        (36.0, '2026-10-04'), (316.0, '2026-10-05'), (596.0, '2026-11-05')]
+    distinct = [f'2026-10-{d:02d}' for d in range(1, 32)] + [f'2026-11-{d:02d}' for d in range(1, 7)]
+    assert date_labels(distinct, x) == [(36.0, '2026-10-01'), (176.0, '2026-10-10'), (316.0, '2026-10-19'), (456.0, '2026-10-28'), (596.0, '2026-11-06')]
+    assert date_labels(['2026-10-01', '2026-10-02'], lambda i: 36 + 560 * i) == [(36, '2026-10-01'), (596, '2026-10-02')]
+    assert date_labels(['2026-10-01', '2026-10-01'], lambda i: 36 + 560 * i) == [(596, '2026-10-01')]
+    assert date_labels(['2026-10-01'], lambda i: 36.0) == [(36.0, '2026-10-01')]
 
 
 def test_the_history_model():
@@ -101,7 +118,8 @@ def test_the_history_model():
     assert (history.scope_title, history.count, history.span_text) == ('Organization', 3, '3 scans, 2026-10-06 to 2026-10-20')
     assert history.pillars == ('Stability', 'Security', 'Operations', 'Efficiency')
     empty = build_history('folder', '42', [])
-    assert empty.entries == () and empty.chart is None and empty.span_text == ''
+    assert empty.entries == () and empty.chart is None and empty.span_text == '' and empty.capped is False
+    assert build_history(SCOPE, SCOPE_ID, SUMMARIES, total=3).capped is False and build_history(SCOPE, SCOPE_ID, SUMMARIES, total=9).capped is True
     assert build_history(SCOPE, SCOPE_ID, SUMMARIES[:1]).span_text == '1 scan, 2026-10-20 06:00 UTC'
 
 
@@ -144,7 +162,9 @@ def test_the_history_page_reads_the_newest_summaries_only(client, gcp):
     gcp.bucket.put(f'scopes/{SCOPE}/{SCOPE_ID}/20270101T000000Z_broken.json', '{not json')
     assert len(store.list_summaries(SCOPE, SCOPE_ID)) == HISTORY_PAGE_SCANS + 5  # the unreadable one is skipped
     page = client.get(f'/history/{SCOPE}/{SCOPE_ID}').get_data(as_text=True)
-    assert f'The newest {HISTORY_PAGE_SCANS - 1} scans are listed' in page  # the unreadable summary took one slot of the listing window
+    # The unreadable summary took one slot of the listing window; the footer still knows how many scans the scope has.
+    assert f'The newest {HISTORY_PAGE_SCANS - 1} of {HISTORY_PAGE_SCANS + 6} scans are listed; the older ones stay in the bucket.' in page
+    assert store.list_summaries(SCOPE, SCOPE_ID, limit=2, with_total=True)[1] == HISTORY_PAGE_SCANS + 6
 
 
 def test_the_report_and_the_status_page_link_to_the_history(client, gcp):

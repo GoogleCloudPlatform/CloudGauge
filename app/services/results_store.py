@@ -360,10 +360,12 @@ class GcsResultsStore:
             logging.error(f"[{job_id}] Could not read the previous scan summary under {prefix}: {e}")
         return None
 
-    def list_summaries(self, scope, scope_id, limit=None):
+    def list_summaries(self, scope, scope_id, limit=None, with_total=False):
         """The scope's scan summaries, newest first (the history page, v17); at most ``limit`` of them.
 
-        A summary that cannot be read is skipped (logged); a listing that fails raises.
+        A summary that cannot be read is skipped (logged); a listing that fails raises. With ``with_total`` the
+        result is ``(summaries, total)``, ``total`` being how many summaries the scope has in all (v17.1: the
+        history page says how many older scans the listing window leaves out).
         """
         prefix = self.summaries_prefix(scope, scope_id)
         bucket = self.bucket()
@@ -374,7 +376,7 @@ class GcsResultsStore:
                 summaries.append(json.loads(bucket.blob(name).download_as_text()))
             except Exception as e:
                 logging.error(f"Could not read the scan summary {name}: {e}")
-        return summaries
+        return (summaries, len(names)) if with_total else summaries
 
     def list_scopes(self):
         """Every ``(scope, scope_id)`` that has at least one scan summary, in listing order (``tools/backfill_export.py``)."""
