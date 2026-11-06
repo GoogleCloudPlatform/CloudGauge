@@ -54,6 +54,7 @@ CATEGORY_MAP = {
     "Cloud SQL High Availability": "Reliability & Resilience", "Cloud SQL Automated Backups": "Reliability & Resilience",
     "Cloud SQL Backup Retention": "Reliability & Resilience", "Cloud SQL PITR": "Reliability & Resilience",
     "MIG Resilience (Zonal)": "Reliability & Resilience", "Disk Snapshot Resilience": "Reliability & Resilience",
+    "GKE Cluster Resilience": "Reliability & Resilience", "Incident Exposure": "Reliability & Resilience",  # v17.3
     # v17: Cloud SQL versions in extended support; the capacity briefing and its two scored companions.
     "Cloud SQL Extended Support": "Reliability & Resilience",
     "Capacity Commitments": "Reliability & Resilience", "Reservation Coverage": "Reliability & Resilience",
@@ -124,6 +125,8 @@ def categorize_findings(findings):
     ``"Projects not checked"`` record (``app.checks.not_checked``) is written
     under that one name in whichever category the skipped check belongs to.
     """
+    from app.checks import exposure  # here, not at the top: exposure reads this module's constants
+    findings = exposure.with_incident_exposure(finalize_briefing_notes(findings))
     categorized_results = {cat: [] for cat in CATEGORY_ORDER}
     for data in findings:
         # The check name is stored inside the JSON object itself
@@ -177,6 +180,8 @@ def merge_shard_findings(findings):
         rows, first = finding.get("Finding"), by_key.get(key)
         if first is not None and isinstance(rows, list) and isinstance(first.get("Finding"), list):
             first["Finding"].extend(rows)
+            if OMITTED_KEY in finding:  # the briefing's global incidents, by ID: the same one comes back from several shards
+                first[OMITTED_KEY] = sorted(set(first.get(OMITTED_KEY) or ()) | set(finding[OMITTED_KEY]))
             continue
         if isinstance(rows, list):
             finding = {**finding, "Finding": list(rows)}
@@ -210,6 +215,62 @@ ADVISORY_DATE = "Date"
 ADVISORY_TYPE = "Type"
 ADVISORY_SUBJECT = "Subject"
 ADVISORY_PROJECTS = "Projects"  # folder/project scans only; an organization's notifications have no project
+INCIDENT_SCOPE = "Scope"  # v17.3: "Global", "Location-specific" or "No location"
+GLOBAL_SCOPE, LOCAL_SCOPE, UNLOCATED_SCOPE = "Global", "Location-specific", "No location"
+# An incident whose locations cover this many regions is global: Personalized Service Health enumerates every
+# region (about 42) for a product-wide event, and no failover answers a global product incident.
+GLOBAL_REGION_COUNT = 30
+# A briefing record lists under this key the IDs of the global "Related" incidents it left out (v17.3); the shards'
+# lists are unioned by ``merge_shard_findings`` and ``finalize_briefing_notes`` turns them into the note under the table.
+OMITTED_KEY = "Omitted"
+NOTE_KEY = "Note"
+
+
+def regions_of(locations):
+    """The regions among ``locations`` (a comma-separated text or a list of zones and regions): a zone counts for its
+    region, a multi-region (``us``, ``eu``, ``asia``) for nothing."""
+    items = _split_list(locations) if isinstance(locations, str) else [str(item) for item in (locations or ())]
+    regions = []
+    for item in items:
+        parts = item.split("-")
+        region = "-".join(parts[:2]) if len(parts) >= 2 else ""
+        if region and region not in regions:
+            regions.append(region)
+    return regions
+
+
+def is_global_incident(locations):
+    """Whether an incident's locations make it global (``GLOBAL_REGION_COUNT`` regions or more)."""
+    return len(regions_of(locations)) >= GLOBAL_REGION_COUNT
+
+
+def scope_of(locations):
+    """``GLOBAL_SCOPE`` (every region), ``LOCAL_SCOPE`` (some regions: what Incident Exposure can meet), or ``UNLOCATED_SCOPE``
+    (Personalized Service Health gave no location: nothing to meet)."""
+    count = len(regions_of(locations))
+    return GLOBAL_SCOPE if count >= GLOBAL_REGION_COUNT else (LOCAL_SCOPE if count else UNLOCATED_SCOPE)
+
+
+def is_location_specific(locations):
+    return scope_of(locations) == LOCAL_SCOPE
+
+
+def finalize_briefing_notes(findings):
+    """Turns a briefing record's ``Omitted`` IDs into its ``Note`` (the count of global Related incidents not listed),
+    once the shards' records are merged. Records without the key pass through unchanged."""
+    finalized = []
+    for record in findings:
+        omitted = record.get(OMITTED_KEY)
+        if omitted is None:
+            finalized.append(record)
+            continue
+        record = {key: value for key, value in record.items() if key != OMITTED_KEY}
+        if omitted:
+            count = len(omitted)
+            record[NOTE_KEY] = (f"{count} Related incident{'s' if count != 1 else ''} without a specific location (global, or none given) "
+                                f"{'are' if count != 1 else 'is'} not listed; SERVICE_HEALTH_RELEVANCE=IMPACTED,RELATED lists them.")
+        finalized.append(record)
+    return finalized
 
 
 def _split_list(text):

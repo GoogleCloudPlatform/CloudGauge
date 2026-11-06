@@ -70,7 +70,7 @@ def coverage_rows(projects, perimeters, organization):
     numbers = {f"projects/{number}": project_id for project_id, number in projects}
     enforced = [p for p in perimeters if p and p["regular"] and p["enforced_resources"]]
     if not enforced:
-        rows.append({"Project": f"organizations/{organization}" if organization else "(scope)", "Perimeter": "none", "Projects": sorted(numbers.values()),
+        rows.append({"Project": f"organizations/{organization}" if organization else "(scope)", "Perimeter": "none", "Projects": ", ".join(sorted(numbers.values())),
                      "Issue": f"No enforced VPC Service Controls perimeter protects the {len(numbers)} scanned projects: a token stolen from any of them "
                               f"can be replayed against Google APIs from anywhere.",
                      "Fix": "gcloud access-context-manager perimeters create <name> --title=<title> --resources=projects/<number>,... "
@@ -83,21 +83,21 @@ def coverage_rows(projects, perimeters, organization):
                 covered.setdefault(numbers[resource], []).append(perimeter)
     outside = sorted(project_id for project_id in numbers.values() if project_id not in covered)
     if outside:
-        rows.append({"Project": "(outside)", "Perimeter": "none", "Projects": outside,
+        rows.append({"Project": "(outside)", "Perimeter": "none", "Projects": ", ".join(outside),
                      "Issue": f"{len(outside)} of {len(numbers)} scanned projects are outside every enforced perimeter.",
                      "Fix": "gcloud access-context-manager perimeters update <name> --add-resources=projects/<number> --policy=<policy>"})
     for perimeter in enforced:
         missing = [service for service in REPLAY_SERVICES if service not in perimeter["restricted"]]
         inside = sorted(project_id for project_id, resource in ((pid, f"projects/{num}") for pid, num in projects) if resource in perimeter["enforced_resources"])
         if missing and inside:
-            rows.append({"Project": "(inside)", "Perimeter": perimeter["title"], "Projects": inside,
+            rows.append({"Project": "(inside)", "Perimeter": perimeter["title"], "Projects": ", ".join(inside),
                          "Issue": f"Restricts {len(perimeter['restricted'])} services but not {', '.join(missing)}.",
                          "Fix": f"gcloud access-context-manager perimeters update {perimeter['name']} --add-restricted-services={','.join(missing)} --policy=<policy>"})
     for perimeter in perimeters:
         if perimeter and perimeter["regular"] and not perimeter["enforced_resources"] and perimeter["dry_run_resources"]:
             inside = sorted(numbers[r] for r in perimeter["dry_run_resources"] if r in numbers)
             if inside:
-                rows.append({"Project": "(dry run)", "Perimeter": perimeter["title"], "Projects": inside,
+                rows.append({"Project": "(dry run)", "Perimeter": perimeter["title"], "Projects": ", ".join(inside),
                              "Issue": "Dry-run perimeter only: violations are logged, nothing is blocked.",
                              "Fix": f"gcloud access-context-manager perimeters dry-run enforce {perimeter['name']} --policy=<policy>"})
     return rows

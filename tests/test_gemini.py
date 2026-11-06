@@ -209,6 +209,22 @@ def test_large_csv_is_condensed_per_check():
     assert len(condensed) < len(csv_data) / 10
 
 
+def test_the_summary_prompt_never_sees_the_service_health_briefing():
+    """v17.3: Google's incidents are not the customer's posture; the executive summary speaks of what the customer can change."""
+    results = {'Reliability & Resilience': [
+        {'Check': 'Service Health Incidents', 'Status': 'Informational', 'Finding': [
+            {'State': 'Resolved', 'Started': '2026-10-13 14:19', 'Ended': '2026-10-13 17:35', 'Incident': 'An incident with Compute Engine',
+             'Products': 'Google Compute Engine', 'Locations': 'asia-south1', 'Impacted projects': 1, 'Project IDs': 'p1', 'Relevance': 'Related',
+             'Scope': 'Location-specific', 'Incident ID': 'abc'}]},
+        {'Check': 'Incident Exposure', 'Status': 'Action Required', 'Finding': [
+            {'Project': 'p1', 'Asset': 'zonal MIG dws-ig', 'Location': 'asia-south1-c', 'Incidents': '2026-10-13 Google Compute Engine (asia-south1)'}]}]}
+    condensed = gemini_service.condense_csv_for_prompt(generate_csv_data(results))
+    rows = list(csv.reader(io.StringIO(condensed)))
+    assert not any(row[:1] == ['Service Health Incidents'] for row in rows if len(row) > 1) and 'An incident with Compute Engine' not in condensed
+    assert ['Incident Exposure', 'Action Required', 'p1', 'zonal MIG dws-ig', 'asia-south1-c', '2026-10-13 Google Compute Engine (asia-south1)'] in rows
+    assert gemini_service.SUMMARY_EXCLUDED_CHECKS == ('Service Health Incidents',)
+
+
 def test_condensed_csv_is_cut_at_the_character_limit():
     csv_data = big_csv(rows_per_check=1000)
     condensed = gemini_service.condense_csv_for_prompt(csv_data, max_chars=1500)

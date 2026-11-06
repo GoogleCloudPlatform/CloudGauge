@@ -234,8 +234,8 @@ def impersonation_rows(results, inventory, permissions_of_custom_role, roles_of_
             total = inventory.count_under(level, resource, entry["result"])
             reach = f"every service account under {resource}" + (f" ({total} in scope)" if total else "")
             label = resource
-        rows.append({"Resource": label, "Level": level, "Principal": member, "Path": path, "Reach": reach, "Targets": targets,
-                     "Target Roles": sorted(target_roles), "Fix": fix_for(level, path, kind, role, member, targets[0] if targets else ""),
+        rows.append({"Resource": label, "Level": level, "Principal": member, "Path": path, "Reach": reach, "Targets": ", ".join(targets),
+                     "Target Roles": ", ".join(sorted(target_roles)), "Fix": fix_for(level, path, kind, role, member, targets[0] if targets else ""),
                      "_status": status})
     return rows
 

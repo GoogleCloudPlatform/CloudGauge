@@ -99,13 +99,32 @@ def test_the_evidence_line_counts_checks_projects_and_incidents():
         COST: [check('Disks', 'Compliant', 'none')],
     }
     stability, security, operations, efficiency = card(results).stoplights
-    # The Error is coverage, stated after the verdicts and outside the "of" (app.reporting.scoring).
-    assert stability.evidence == '1 of 3 checks compliant · 1 could not be checked · 3 projects with findings · 2 incidents impacted you in 90 days, 1 active'
+    # The Error is coverage, stated after the verdicts and outside the "of" (app.reporting.scoring). v17.3: the Service Health
+    # briefing is never tallied here - Google's incidents are not the customer's posture (the line used to end with
+    # "2 incidents impacted you in 90 days, 1 active", a count of mostly Related rows on the executive page).
+    assert stability.evidence == '1 of 3 checks compliant · 1 could not be checked · 3 projects with findings'
     assert operations.evidence == '0 of 1 check compliant'  # text findings have no project column
     assert efficiency.evidence == '1 of 1 check compliant'
     assert security.evidence == 'no check reached a verdict'
     no_incidents = card({RELIABILITY: [check('Service Health Incidents', 'Informational', [])]}).stoplights[0]
-    assert no_incidents.evidence == 'no check reached a verdict'  # an empty briefing is text details, so no tally
+    assert no_incidents.evidence == 'no check reached a verdict'
+    assert 'incident' not in stability.evidence and 'impacted you' not in str(card(results).__dict__)
+
+
+def test_the_evidence_line_counts_the_assets_incident_exposure_found():
+    """v17.3: the customer's finding replaces the tally - the assets without failover in locations that had incidents,
+    one per row of Incident Exposure, and only while the check has rows."""
+    exposure = [{'Project': 'p1', 'Asset': 'zonal MIG web', 'Location': 'asia-south1-c', 'Incidents': '2026-10-13 Compute Engine (asia-south1)'},
+                {'Project': 'p1', 'Asset': 'zonal Cloud SQL instance db', 'Location': 'asia-south1', 'Incidents': '2026-09-23 Cloud SQL (asia-south1)'},
+                {'Project': 'p2', 'Asset': '12 single-region snapshots', 'Location': 'asia-south1', 'Incidents': '2026-10-13 Compute Engine (asia-south1)'}]
+    results = {RELIABILITY: [check('Backups', 'Compliant', 'set'), check('Incident Exposure', 'Action Required', exposure)]}
+    assert card(results).stoplights[0].evidence == '1 of 2 checks compliant · 2 projects with findings · 3 assets without failover in locations that had incidents'
+    one = card({RELIABILITY: [check('Incident Exposure', 'Action Required', exposure[:1])]}).stoplights[0]
+    assert one.evidence.endswith('1 asset without failover in locations that had incidents')
+    quiet = card({RELIABILITY: [check('Incident Exposure', 'Informational', [{'Summary': 'No location-specific incident ... nothing to assess.'}])]}).stoplights[0]
+    assert 'failover' not in quiet.evidence
+    clear = card({RELIABILITY: [check('Incident Exposure', 'Compliant', [{'Status': '2 location-specific incidents ...; every asset there had failover.'}])]}).stoplights[0]
+    assert clear.evidence == '1 of 1 check compliant'
 
 
 def test_the_evidence_line_counts_a_project_once_across_checks():

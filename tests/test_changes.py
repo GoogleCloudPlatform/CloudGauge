@@ -228,7 +228,13 @@ def test_rows_are_not_comparable_with_a_previous_scan_by_an_older_release(previo
     quota = 'Quota Utilization (>80%)'
     assert rows_reshaped_since(quota, summary('job-1', {}, {}, release=previous_release)) == \
         (None if release_tuple(previous_release) >= (17,) else ROWS_CHANGED)
-    assert RESHAPED_CHECKS == {RESHAPED: ('16.1', RULE_CHANGED), quota: ('17', ROWS_CHANGED)}
+    # v17.3: Cloud SQL High Availability's rows gained Region and MIG Resilience (Zonal)'s Zone; against any scan before v17.3
+    # they are not compared.
+    for check in ('Cloud SQL High Availability', 'MIG Resilience (Zonal)'):
+        assert rows_reshaped_since(check, summary('job-1', {}, {}, release=previous_release)) == \
+            (None if release_tuple(previous_release) >= (17, 3) else ROWS_CHANGED)
+    assert RESHAPED_CHECKS == {RESHAPED: ('16.1', RULE_CHANGED), quota: ('17', ROWS_CHANGED),
+                               'Cloud SQL High Availability': ('17.3', ROWS_CHANGED), 'MIG Resilience (Zonal)': ('17.3', ROWS_CHANGED)}
     assert (ROWS_CHANGED, RULE_CHANGED) == ('rows changed', 'rule changed')
 
 

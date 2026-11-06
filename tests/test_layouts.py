@@ -161,9 +161,10 @@ def test_incident_rows_become_six_display_columns():
     assert active[0] == Cell('text', 'Active (confirmed)', nowrap=True, css='state state-active') and resolved[0] == Cell('text', 'Resolved', nowrap=True, css='state')
     assert active[1] == Cell('stack', lines=('2026-09-20 10:00', '→ ongoing'), nowrap=True, css='time')
     assert resolved[1].lines == ('2026-09-20 10:00', '→ 2026-09-20 12:30')
-    # The incident: title, the locations (listed when three or fewer, else behind "5 locations"), and the ID on its own mono line.
+    # The incident: title, the regions (listed when three or fewer, else behind "5 regions"; v17.3: regions, the zones folded
+    # into them), and the ID on its own mono line.
     assert active[2] == Cell('rich', text='Cloud Run latency in us-central1', secondary='us-central1, us-east1', code='JZBYGFV', css='prose')
-    assert resolved[2] == Cell('rich', text='Cloud SQL connectivity', more=('5 locations', 'region-0, region-1, region-2, region-3, region-4'),
+    assert resolved[2] == Cell('rich', text='Cloud SQL connectivity', more=('5 regions', 'region-0, region-1, region-2, region-3, region-4'),
                                code='A1B2C3', css='prose')
     assert active[3] == Cell('text', 'Cloud Run', css='prose') and resolved[3].text == 'Cloud SQL, Cloud Run'
     assert active[4] == Cell('chips', text='4 projects', lines=('p-1', 'p-2', 'p-3', 'p-4'), css='code') and resolved[4] == Cell('chips', lines=('p-9',), css='code')
@@ -203,6 +204,7 @@ def test_a_check_that_knows_its_fix_shows_it_under_the_table_not_in_a_column():
     coverage = item(html, COVERAGE_CHECK)
     assert '<th>Project</th><th>Issue</th></tr>' in coverage and '<th>Fix</th>' not in html
     assert ('<div class="fix-block"><div class="fix-head"><strong>Fix</strong>'
+            '<span class="attribution">exact, from the check — Draft fixes covers the findings without one</span>'
             '<button type="button" class="btn btn-outline btn-sm copy-btn" onclick="copyFix(this)">Copy</button></div>'
             '<pre>gcloud services enable servicehealth.googleapis.com --project=p-2\n'
             'gcloud services enable servicehealth.googleapis.com --project=p-3</pre></div>') in coverage
@@ -234,7 +236,7 @@ def test_incident_table_markup():
             '<code class="chip">p-2</code> <code class="chip">p-3</code> <code class="chip">p-4</code></span></details></td>'
             '<td class="nowrap state">Impacted</td></tr>') in table
     assert ('<tr><td class="nowrap state">Resolved</td><td class="nowrap time">2026-09-20 10:00<br><span class="muted">→ 2026-09-20 12:30</span></td>'
-            '<td class="prose"><span class="cell-title">Cloud SQL connectivity</span><span class="cell-secondary"><details class="cell-more"><summary>5 locations</summary>'
+            '<td class="prose"><span class="cell-title">Cloud SQL connectivity</span><span class="cell-secondary"><details class="cell-more"><summary>5 regions</summary>'
             '<span class="more-body">region-0, region-1, region-2, region-3, region-4</span></details><code class="cell-code">A1B2C3</code></span></td>'
             '<td class="prose">Cloud SQL, Cloud Run</td><td class="code"><code class="chip">p-9</code></td><td class="nowrap state">Related</td></tr>') in table
     # What the page says is the raw data, flattened: nothing was cut on the way.

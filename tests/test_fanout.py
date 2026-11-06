@@ -552,7 +552,8 @@ def test_aggregate_records_missing_shards_as_error_rows(store, queue, monkeypatc
     rows = csv_rows(store.read_report(JOB, SCOPE_ID, 'csv'))
     error_checks = sorted({row[0] for row in rows if len(row) > 1 and row[1] == 'Error'})
     expected = sorted({spec.name for spec in registry.project_check_plan('organization', SCOPE_ID, JOB, projects(1), [], [])}
-                      | {spec.name for spec in registry.scope_check_plan('organization', SCOPE_ID, JOB)})
+                      | {spec.name for spec in registry.scope_check_plan('organization', SCOPE_ID, JOB)}
+                      | {'Incident Exposure'})  # v17.3: derived from the briefing, so the briefing's Error is its Error
     assert error_checks == expected
     assert store.read_status(JOB, SCOPE_ID)['status'] == 'completed'
 

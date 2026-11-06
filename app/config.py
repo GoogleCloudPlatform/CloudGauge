@@ -26,7 +26,7 @@ from dataclasses import dataclass
 # The release, as the image tag names it ("15.6" for v15.6; tests/test_packaging.py pins it to the newest entry
 # of RELEASE_NOTES.md). The report's footer shows it, and every scan summary records it so the next scan can tell
 # a check that is new to the release from one that merely had nothing to check last time (app.reporting.changes).
-VERSION = "17.2"
+VERSION = "17.3"
 # Best-practices CSV for the Organization Policies check (legacy name: GCS_PUBLIC_URL;
 # it points at GitHub, not GCS). The value is frozen byte-for-byte; override it
 # with the BEST_PRACTICES_CSV_URL environment variable.
@@ -97,12 +97,16 @@ QUEUE_MAX_BACKOFF_SECONDS = 600
 # --- Service Health incidents and Advisory Notifications (the report's briefings) ---
 # The Service Health Incidents briefing lists the incidents updated in the last
 # SERVICE_HEALTH_WINDOW_DAYS whose relevance to a scanned project is one of
-# SERVICE_HEALTH_RELEVANCE (comma-separated; "Impacted" is only computed for some
-# products, so "Related" is included by default). The Advisory Notifications
-# briefing lists the notifications created in the last ADVISORY_WINDOW_DAYS (the
-# API keeps about a year).
+# SERVICE_HEALTH_RELEVANCE (comma-separated) - "Impacted" alone by default (v17.3;
+# "Impacted" is only computed for some products) - plus, whatever the setting, the
+# "Related" incidents confined to specific locations: those are the evidence of the
+# Incident Exposure check (app.checks.exposure). Global "Related" incidents are
+# counted in a note under the table, not listed. SERVICE_HEALTH_INCIDENTS=off skips
+# the briefing and Incident Exposure altogether; the API coverage check still runs.
+# The Advisory Notifications briefing lists the notifications created in the last
+# ADVISORY_WINDOW_DAYS (the API keeps about a year).
 DEFAULT_SERVICE_HEALTH_WINDOW_DAYS = 90
-DEFAULT_SERVICE_HEALTH_RELEVANCE = ("IMPACTED", "RELATED")
+DEFAULT_SERVICE_HEALTH_RELEVANCE = ("IMPACTED",)
 SERVICE_HEALTH_RELEVANCE_VALUES = ("IMPACTED", "RELATED", "PARTIALLY_RELATED", "NOT_IMPACTED", "UNKNOWN")
 DEFAULT_ADVISORY_WINDOW_DAYS = 365
 
@@ -184,6 +188,18 @@ def _dataset(value):
     return dataset
 
 
+def _switch(value, name, default=True):
+    """``on``/``off`` (also ``true``/``false``, ``1``/``0``, ``yes``/``no``); the default when unset."""
+    text = (value or '').strip().lower()
+    if text == '':
+        return default
+    if text in ('on', 'true', '1', 'yes'):
+        return True
+    if text in ('off', 'false', '0', 'no'):
+        return False
+    raise ValueError(f"{name} must be on or off, not {value!r}")
+
+
 def _relevance(value):
     """``SERVICE_HEALTH_RELEVANCE`` as a tuple of relevance values (any casing, comma-separated); the default when unset."""
     values = tuple(dict.fromkeys(v.strip().upper() for v in (value or '').split(',') if v.strip()))
@@ -234,6 +250,7 @@ class Settings:
     # Service Health incidents and Advisory Notifications (see the constants above)
     service_health_window_days: int = DEFAULT_SERVICE_HEALTH_WINDOW_DAYS
     service_health_relevance: tuple = DEFAULT_SERVICE_HEALTH_RELEVANCE
+    service_health_incidents: bool = True  # SERVICE_HEALTH_INCIDENTS=off: no briefing, no Incident Exposure (v17.3)
     advisory_window_days: int = DEFAULT_ADVISORY_WINDOW_DAYS
     # FinOps and capacity (v17; see the constants above)
     cost_allocation_labels: tuple = ()
@@ -294,6 +311,7 @@ class Settings:
             task_max_attempts=_number(env, 'TASK_MAX_ATTEMPTS', QUEUE_MAX_ATTEMPTS, int, minimum=1, maximum=100),
             service_health_window_days=_number(env, 'SERVICE_HEALTH_WINDOW_DAYS', DEFAULT_SERVICE_HEALTH_WINDOW_DAYS, int, minimum=1, maximum=366),
             service_health_relevance=_relevance(env.get('SERVICE_HEALTH_RELEVANCE')),
+            service_health_incidents=_switch(env.get('SERVICE_HEALTH_INCIDENTS'), 'SERVICE_HEALTH_INCIDENTS'),
             advisory_window_days=_number(env, 'ADVISORY_WINDOW_DAYS', DEFAULT_ADVISORY_WINDOW_DAYS, int, minimum=1, maximum=3660),
             cost_allocation_labels=_label_keys(env.get('COST_ALLOCATION_LABELS')),
             snapshot_max_age_days=_number(env, 'SNAPSHOT_MAX_AGE_DAYS', DEFAULT_SNAPSHOT_MAX_AGE_DAYS, int, minimum=1, maximum=3660),

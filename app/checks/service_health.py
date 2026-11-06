@@ -19,11 +19,18 @@ One check, two records:
 - **Service Health Incidents** - a *briefing*: one row per incident, updated in
   the last ``SERVICE_HEALTH_WINDOW_DAYS`` (default 90), whose relevance to at
   least one scanned project is in ``SERVICE_HEALTH_RELEVANCE`` (default
-  Impacted and Related; "Impacted" is only computed for some products), active
-  and resolved. Always ``Informational``, including the "nothing in the window"
-  note: Google-side incidents are not the customer's configuration, so they
-  never count toward the score (the report scores Compliant against the failing
-  statuses only; Informational is outside both).
+  Impacted alone since v17.3; "Impacted" is only computed for some products) -
+  plus, whatever the setting, the *Related* incidents confined to specific
+  locations (``categories.is_location_specific``): they are the evidence the
+  Incident Exposure check (``app.checks.exposure``) reads. The other Related
+  incidents - global (a product-wide event lists every region) or with no
+  location given - are not listed; their IDs ride on the record
+  (``categories.OMITTED_KEY``) and become the note under the table. Active and resolved. Always ``Informational``, including the
+  "nothing in the window" note: Google-side incidents are not the customer's
+  configuration, so they never count toward the score (the report scores
+  Compliant against the failing statuses only; Informational is outside both).
+  ``SERVICE_HEALTH_INCIDENTS=off`` skips the briefing (the coverage check below
+  still runs, from the same calls).
 - **Personalized Service Health API Coverage** - a scored check: ``Action
   Required`` with one row per project in which the Service Health API is not
   enabled (such a project has no personalized incident view, alerts or
@@ -175,8 +182,20 @@ def incident_row(incident):
         categories.INCIDENT_PROJECT_COUNT: len(incident["projects"]),
         categories.INCIDENT_PROJECTS: ", ".join(incident["projects"]),
         categories.INCIDENT_RELEVANCE: relevance,
+        categories.INCIDENT_SCOPE: categories.scope_of(incident["locations"]),
         categories.INCIDENT_ID: incident["id"],
     }
+
+
+def listed_incident(incident, wanted):
+    """Whether a folded incident is listed: its relevance is wanted, or it is a Related incident confined to specific
+    locations (what Incident Exposure examines). ``None`` for a Related incident the note counts instead - global, or with no
+    location given; ``False`` otherwise."""
+    if incident["relevances"] & set(wanted):
+        return True
+    if "RELATED" in incident["relevances"]:
+        return True if categories.is_location_specific(incident["locations"]) else None
+    return False
 
 
 def describe_relevance(values):
@@ -201,6 +220,7 @@ def check_service_health_incidents(scope_id, all_projects, job_id, *, sink):
     """
     settings = get_settings()
     wanted = set(settings.service_health_relevance)
+    candidates = wanted | {"RELATED"}
     since = (datetime.now(timezone.utc) - timedelta(days=settings.service_health_window_days)).strftime("%Y-%m-%dT%H:%M:%SZ")
     print(f"❤️‍🩹 [{job_id}] Checking {INCIDENTS_CHECK} ({', '.join(sorted(wanted))}, since {since[:10]}) in {len(all_projects)} projects...")
     skipped = NotChecked(INCIDENTS_CHECK)
@@ -227,14 +247,22 @@ def check_service_health_incidents(scope_id, all_projects, job_id, *, sink):
             else:
                 skipped.add(project_id, e)
             continue
-        events_by_project[project_id] = [e for e in events if (e.get("relevance") or "UNKNOWN") in wanted]
+        # Impacted (or whatever SERVICE_HEALTH_RELEVANCE names) and Related: the Related ones are decided per folded incident
+        # below, by location; a project's copy with any other relevance never puts that project on the row.
+        events_by_project[project_id] = [e for e in events if (e.get("relevance") or "UNKNOWN") in candidates]
 
-    incidents = fold_events(events_by_project)
-    rows = categories.sort_incident_rows([incident_row(incident) for incident in incidents.values()])
-    if not rows:
-        rows = [{"Summary": f"No Google Cloud incidents with relevance {describe_relevance(settings.service_health_relevance)} "
-                            f"to these projects were recorded in the last {settings.service_health_window_days} days."}]
-    sink.write_finding(job_id, "Service_Health_Incidents", {"Check": INCIDENTS_CHECK, "Finding": rows, "Status": "Informational"})
+    if settings.service_health_incidents:
+        incidents = fold_events(events_by_project)
+        listed = {key: listed_incident(incident, wanted) for key, incident in incidents.items()}
+        rows = categories.sort_incident_rows([incident_row(incident) for key, incident in incidents.items() if listed[key]])
+        if not rows:
+            rows = [{"Summary": f"No Google Cloud incidents with relevance {describe_relevance(settings.service_health_relevance)}, and no "
+                                f"Related incident confined to specific locations, touched these projects in the last "
+                                f"{settings.service_health_window_days} days."}]
+        sink.write_finding(job_id, "Service_Health_Incidents", {"Check": INCIDENTS_CHECK, "Finding": rows, "Status": "Informational",
+                                                                categories.OMITTED_KEY: sorted(key for key, value in listed.items() if value is None)})
+    else:
+        logging.info(f"{INCIDENTS_CHECK}: skipped (SERVICE_HEALTH_INCIDENTS=off)")
 
     if without_api:
         coverage_rows = [{"Project": project_id,

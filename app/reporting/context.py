@@ -51,6 +51,7 @@ from datetime import datetime, timezone
 
 from markupsafe import Markup
 
+from app.checks.categories import NOTE_KEY
 from app.config import VERSION
 from app.reporting.changes import (IDENTITY_SEPARATOR, ORG_POLICIES_CHECK, RowMatcher, compare, identities_for, summarize,
                                    text_identities)
@@ -141,6 +142,7 @@ class CheckItem:
     slug: str = ""  # the item's anchor within its section ("open-firewall-rules"); #<section id>-<slug> opens it
     open: bool = True  # expanded when the page loads: what needs a human is, Compliant and Informational are not
     change: object = None  # app.reporting.changes.CheckChange since the previous scan, or None
+    note: str = ""  # v17.3: a record's note under its table ("34 global Related incidents are not listed; ...")
 
 
 @dataclass(frozen=True)
@@ -477,7 +479,9 @@ def group_findings(findings_list):
         check_name = finding.get('Check')
         if not check_name: continue
         if check_name not in grouped:
-            grouped[check_name] = {"details": [], "Status": finding.get('Status')}
+            grouped[check_name] = {"details": [], "Status": finding.get('Status'), "notes": []}
+        if finding.get(NOTE_KEY) and finding[NOTE_KEY] not in grouped[check_name]["notes"]:  # v17.3: the note under the table
+            grouped[check_name]["notes"].append(str(finding[NOTE_KEY]))
 
         finding_detail = finding.get('Finding')
 
@@ -702,6 +706,7 @@ def build_report_context(scope, scope_id, job_id, all_results, banner=None, cove
                 summary=summarize_details(details, status, total_projects, check_name),
                 slug=slug_for(f"{check_name}"),
                 open=status in FAILING_STATUSES,
+                note=" ".join(group_data.get("notes", ())),
             ))
         has_content = bool(checks) or org_content_for_section is not None
         footer = None

@@ -214,6 +214,11 @@ def is_single_region(storage_locations):
     return not any(str(location).lower() in MULTI_REGIONS for location in storage_locations or ())
 
 
+def zone_name(zone):
+    """``https://www.googleapis.com/compute/v1/projects/p/zones/asia-south1-c`` or ``asia-south1-c`` -> ``asia-south1-c``."""
+    return str(zone or "").rstrip("/").rsplit("/", 1)[-1]
+
+
 def project_of_asset(asset_name):
     """The project ID in an asset name (``//compute.googleapis.com/projects/p1/zones/…``), or ``'unknown'``."""
     parts = asset_name.split('/')
@@ -272,7 +277,8 @@ def check_resilience_assets(scope, scope_id, job_id, *, sink):
         for asset in list_assets(asset_client, "sqladmin.googleapis.com/Instance"):
             s, name, proj = asset.resource.data.get("settings", {}), asset.resource.data.get('name'), project_of_asset(asset.name)
             if s.get("availabilityType") == "ZONAL":
-                non_ha.append({"Project": proj, "Instance": name})
+                # The region (v17.3): what Incident Exposure meets a Cloud SQL incident's locations with.
+                non_ha.append({"Project": proj, "Instance": name, "Region": asset.resource.data.get("region") or ""})
             backup_conf = s.get("backupConfiguration", {})
             if not backup_conf.get("enabled"):
                 no_backup.append({"Project": proj, "Instance": name})
@@ -287,8 +293,9 @@ def check_resilience_assets(scope, scope_id, job_id, *, sink):
             write(check, rows)
 
     # Managed instance groups: a zonal MIG lives in one zone (GKE's node-pool MIGs are the cluster's concern).
+    # The zone (v17.3) is what Incident Exposure meets a Compute Engine incident's locations with.
     try:
-        zonal_migs = [{"Project": project_of_asset(a.name), "MIG Name": a.resource.data.get('name')}
+        zonal_migs = [{"Project": project_of_asset(a.name), "MIG Name": a.resource.data.get('name'), "Zone": zone_name(a.resource.data.get('zone'))}
                       for a in list_assets(asset_client, "compute.googleapis.com/InstanceGroupManager")
                       if 'zone' in a.resource.data and not a.resource.data.get('name', '').startswith('gke-')]
     except Exception as e:

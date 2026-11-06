@@ -96,7 +96,7 @@
   suggestedFixHtml() in _script.js emits the same markup for Gemini's drafts.
 #}
 {% macro fix_block(lines) -%}
-<div class="fix-block"><div class="fix-head"><strong>Fix</strong><button type="button" class="btn btn-outline btn-sm copy-btn" onclick="copyFix(this)">Copy</button></div><pre>{{ lines|join("\n") }}</pre></div>
+<div class="fix-block"><div class="fix-head"><strong>Fix</strong><span class="attribution">exact, from the check — Draft fixes covers the findings without one</span><button type="button" class="btn btn-outline btn-sm copy-btn" onclick="copyFix(this)">Copy</button></div><pre>{{ lines|join("\n") }}</pre></div>
 {%- endmacro %}
 
 {% macro render_cell(cell) -%}
@@ -183,6 +183,9 @@
             {% endif %}
             {% if check.details is not none and check.details.omitted_rows %}
             <div class="table-note">Only the first {{ "{:,}".format(check.details.total_rows - check.details.omitted_rows) }} of {{ "{:,}".format(check.details.total_rows) }} rows are included in this page. The complete list is in the <a href="{{ csv_href }}">CSV report</a>.</div>
+            {% endif %}
+            {% if check.note %}
+            <div class="table-note check-note">{{ check.note }}</div>
             {% endif %}
             {{ resolved_list(check.change) }}
             {% if check.details is not none and check.details.fix_lines %}

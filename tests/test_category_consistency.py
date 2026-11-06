@@ -114,7 +114,8 @@ def test_every_name_a_check_writes_is_mapped():
     # The v17 tables name every check their writers can produce.
     assert set(cost.FINOPS_CHECKS) == {'Cost Allocation Labels', 'Cloud Storage Lifecycle', 'Snapshot Sprawl'}
     assert set(capacity.CAPACITY_CHECKS) == {'Reservation Coverage', 'Commitments Expiring', 'Capacity Signals'}
-    assert set(gke_security.GKE_SECURITY_CHECKS) == {'GKE Credential Exposure', 'GKE Control Plane Exposure', 'GKE Node Hardening', 'GKE Threat Detection'}
+    assert set(gke_security.GKE_SECURITY_CHECKS) == {'GKE Credential Exposure', 'GKE Control Plane Exposure', 'GKE Node Hardening', 'GKE Threat Detection',
+                                                     'GKE Cluster Resilience'}  # v17.3: the fifth record of the listing, under Reliability
     assert {name for name in names if name not in cost.COST_RECOMMENDERS} >= {capacity.COMMITMENTS_BRIEFING, 'IAM Least Privilege',
                                                                                'Cloud SQL Extended Support', 'Quota Increase Recommendations',
                                                                                'Service Account Impersonation', 'VPC Service Controls Coverage'}

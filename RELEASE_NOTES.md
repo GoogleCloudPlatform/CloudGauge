@@ -8,7 +8,123 @@ the test suite running inside the image, a zero-traffic canary revision scanned
 against a real organization, promotion, and a production scan compared fact for
 fact with the previous version's report.
 
-Versions are the image tags (`v5` … `v17.2`); the commit is the one that shipped.
+Versions are the image tags (`v5` … `v17.3`); the commit is the one that shipped.
+
+---
+
+## v17.3 — Incidents as evidence
+
+A release that began with a question from the field: should a posture report
+hand a customer a list of Google's incidents? The production report answered
+it — 42 incidents in 90 days for a three-project organization, 40 of them
+*Related* rather than *Impacted*, most of them global and niche, and the
+Scorecard's Stability line reading *42 incidents impacted you in 90 days*: our
+word *impacted* for rows Personalized Service Health calls *Related*. So two
+things at once. The briefing steps back: nothing about Google's incidents on
+the Scorecard, in its Markdown copy or in the executive summary; by default it
+lists what PSH classed *Impacted* plus the *Related* incidents confined to
+specific locations, counts the global ones in a note, and can be switched off.
+And the incidents become the customer's finding: **Incident Exposure** joins
+each location-specific incident with the customer's own zonal assets in the
+locations and the product it concerned — *what you ran, without failover, where
+the product you ran had an incident* — one row per asset, with the incidents as
+evidence and the fix. It needs the footprint to carry its locations, so **GKE
+Cluster Resilience** arrives with it (zonal control planes and single-zone
+node pools, a gap the tool never flagged), the Cloud SQL HA rows gain their
+Region and the MIG rows their Zone. Also in this release: five v17.1 columns
+rendered Python lists (`['a', 'b']`, `[]`) in the page and the CSV — fixed at
+the source, with a guard — and the Fix block says what it is.
+
+### Added
+
+- **Incident Exposure** (Reliability & Resilience; `app/checks/exposure.py`):
+  derived at categorization — the one place a sharded and an inline scan both
+  pass through — from the Service Health briefing's rows and the resilience
+  checks' rows; no API call. Matching: the incident is location-specific
+  (fewer than 30 regions; PSH enumerates every region for a product-wide
+  event), its product maps to the asset's kind (Compute Engine and Persistent
+  Disk → zonal MIGs and single-region snapshots; GKE → zonal control planes and
+  single-zone node pools; Cloud SQL → zonal instances), the asset's project is
+  one the incident touched and its location one the incident named (a zone
+  counts for its region on both sides). Rows are asset-centric (snapshots
+  grouped per project and location), `Project · Asset · Location · Incidents ·
+  Fix`; *Action Required* with rows, *Compliant* when incidents met footprints
+  that all had failover, *Informational* when no location-specific incident in
+  a mapped product touched the scanned projects. A note under the table counts
+  the location-specific incidents in products the tool has no footprint for.
+  The briefing's Error is this check's Error; with the briefing off, the check
+  does not exist. An asset's identity is the asset, not its incidents
+  (`changes.EXCLUDED_COLUMNS`): the window slides, the finding stays.
+- **GKE Cluster Resilience** (Reliability & Resilience): the fifth record of
+  the v17.1 cluster listing — a zonal control plane (the location is a zone),
+  each node pool whose nodes are all in one zone; Autopilot skipped. The fix
+  for a pool is the `--node-locations` line; for a control plane, the truth:
+  create a regional cluster and migrate.
+- The Scorecard's Stability line, when Incident Exposure has rows: *N assets
+  without failover in locations that had incidents*.
+- `SERVICE_HEALTH_INCIDENTS` (`on`/`off`): `off` removes the briefing and
+  Incident Exposure; the API calls still run for the coverage check.
+- A record may carry a `Note`, rendered under its table (the briefing's global
+  count, Incident Exposure's unmapped products); the shards' omitted incident
+  IDs are unioned like their rows, so the count is one count.
+- The briefing's rows carry `Scope` (*Global* / *Location-specific*); the
+  incident's second line reads *Global · 46 regions* or names its regions.
+
+### Changed
+
+- **Service Health Incidents**: `SERVICE_HEALTH_RELEVANCE` defaults to
+  `IMPACTED`; whatever the setting, the *Related* incidents confined to
+  specific locations are listed and the global ones are counted in the note
+  (`IMPACTED,RELATED` lists them all, as before). A project's copy with any
+  other relevance never puts that project on the row. The *impacted you* tally
+  is gone from the Scorecard and its Markdown copy; the executive summary's
+  prompt never contains the briefing (`gemini.SUMMARY_EXCLUDED_CHECKS`).
+- **Cloud SQL High Availability** rows gain `Region`, **MIG Resilience
+  (Zonal)** rows gain `Zone` (as a name, whatever the API's URL form): the
+  footprint Incident Exposure reads. Both are *not compared (rows changed)*
+  against a scan by a release before 17.3 (`changes.RESHAPED_CHECKS`).
+- **Lists in cells** (v17.1 bug): GKE Credential Exposure's Roles and Scopes,
+  Service Account Impersonation's Targets and Target Roles and VPC Service
+  Controls Coverage's Projects were Python lists, shown as `['a', 'b']` chips
+  and written to the CSV as such. Joined at the source; the synthetic
+  organization's CSV is now checked for any repr.
+- The **Fix** block's title row says *exact, from the check — Draft fixes
+  covers the findings without one*; README › How to Use explains the two kinds
+  of fixes in one paragraph.
+- README: the Reliability catalogue (the briefing rewritten, the two checks),
+  the *Briefings* design note, the Configuration Reference. `VERSION = "17.3"`.
+  Roadmap: *Forecasts, budgets and spend* becomes v17.4.
+
+### Tests
+
+- `tests/test_exposure.py` (14): product mapping, zone↔region matching, global
+  never matched, the label, asset-centric rows and evidence, Cloud SQL
+  incidents meet instances only, fixes (the owning check's or the mechanical
+  one), five incidents listed then *and N more*, the three statuses and the
+  note, no briefing → no record and Error → Error, idempotence, the derivation
+  through `categorize_findings` for the inline and the sharded path, the
+  footprint columns are the reliability checks' own.
+- `tests/test_gke_security.py`: zones and regions, pool zones, resilience
+  issues (zonal, single-zone pool, regional multi-zone, Autopilot), the
+  listing now writes five findings. `tests/test_service_health.py`: the
+  inclusion rule, the global note across shards, the switch, `Scope`.
+  `tests/test_scorecard.py`: no tally; the exposure sentence with rows only.
+  `tests/test_gemini.py`: the prompt never sees the briefing.
+  `tests/test_synthetic.py`: the two names in the report, no list repr in the
+  CSV. Synthetic world: node pool zones (drawn last), the SQL instance's
+  region. 948 tests.
+
+### Upgrade notes
+
+- Expect the Service Health briefing to shrink (ours: 42 rows → 4) and the
+  Stability line to lose its incident tally; the new sentence appears only when
+  Incident Exposure has rows. `SERVICE_HEALTH_RELEVANCE=IMPACTED,RELATED`
+  restores the full list if a team wants it.
+- The first scan after the upgrade says *rows changed* for Cloud SQL High
+  Availability and MIG Resilience (Zonal), and *new check* for the two new
+  names. Expect Stability to drop where clusters are zonal — that is the point.
+- Nothing to grant and no new API: both new checks read what the scan already
+  reads.
 
 ---
 
@@ -1764,6 +1880,7 @@ performance; modernization; enablement; roadmap and roadblocks).
 | **v17** | History, analytics and FinOps | *Shipped.* **BigQuery export** of every scan (`scans`, `findings`; free load jobs the header accounts for; a backfill for earlier scans), **scheduled scans** (Cloud Scheduler → the worker, as the service account, one scan per scope at a time), the **history page** (pillar scores over time, status flips per scan), the analytics guide (five queries, Looker Studio, Gemini Enterprise); **FinOps** — six more recommenders, cost-allocation labels, storage lifecycle, snapshot sprawl, commitments expiring, a savings total on the Scorecard; **capacity** — reservations and commitments, reservation coverage, stockout and quota signals, accelerator quotas with headroom; Cloud SQL extended support; IAM least privilege. No new organization-level role, nothing on billing accounts. |
 | **v17.1** | The SSRF chain: GKE and identity hardening | *Shipped.* **GKE Credential Exposure** (metadata server, node account, roles, scopes, *one SSRF from roles/editor*), **Service Account Impersonation** (who can become which service account, with reach), **GKE Control Plane Exposure**, **GKE Node Hardening**, **GKE Threat Detection**, **VPC Service Controls Coverage**; the nine `container.managed.*` guardrails in Organization Policies. No new role, no new API. |
 | **v17.2** | Deploy with Terraform | *Shipped.* `terraform/` declares the deployment of `tools/deploy.sh` — the APIs, the account and its roles, the bucket, the queue, the worker and the web service behind IAP, the export, the schedules, and on request the organization-level roles — in two applies around one Cloud Build; the test suite holds it to the script, the README and the app. |
-| **v17.3** | Forecasts, budgets and spend | **Spend-based commitment recommendations** from the organization's **Recommender export to BigQuery** (`RECOMMENDATIONS_EXPORT`; a dataset-level read, no billing-account IAM); **Capacity Planner** forecasts (the spike showed `forecasts:query` works per region for vCPUs by family and GPUs by type: `capacityplanner.googleapis.com`, `roles/capacityplanner.viewer`; reservation usage stays on the Compute API); **budget coverage** (projects and billing accounts without a budget); a **spend briefing** over the billing export; cost anomalies if an API exists. |
+| **v17.3** | Incidents as evidence | *Shipped.* The Service Health briefing off the Scorecard and the executive summary, *Impacted* plus location-specific *Related* by default, switchable; **Incident Exposure** (the customer's zonal assets in the locations and product of each location-specific incident, one row per asset with the incidents as evidence) and **GKE Cluster Resilience** (zonal control planes, single-zone node pools); list cells fixed. No new role, no new API. |
+| **v17.4** | Forecasts, budgets and spend | **Spend-based commitment recommendations** from the organization's **Recommender export to BigQuery** (`RECOMMENDATIONS_EXPORT`; a dataset-level read, no billing-account IAM); **Capacity Planner** forecasts (the spike showed `forecasts:query` works per region for vCPUs by family and GPUs by type: `capacityplanner.googleapis.com`, `roles/capacityplanner.viewer`; reservation usage stays on the Compute API); **budget coverage** (projects and billing accounts without a budget); a **spend briefing** over the billing export; cost anomalies if an API exists. |
 | **v18** | Footprint, support and detection | A **Platform Footprint** page (what runs where: services, regions, versions); **modernization indicators** (legacy runtimes, unmanaged VMs, missing release channels); a **Support cases** briefing; the deprecations recommender; the detective half of the SSRF chain over Cloud Logging — **GKE control-plane activity** (exec, webhooks, RBAC and DaemonSet changes by service accounts or external IPs), **service-account activity signals**, **edge protection** (external load balancers without Cloud Armor). |
 | Later | | VM Manager vulnerability summary, Security Command Center findings summary, SLO coverage, PDF export. |

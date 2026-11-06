@@ -44,6 +44,7 @@ nodes, COS), so the node-pool rows do not apply to them. Every finding reaches a
 verdict or an all-clear row; a listing that fails is the findings' Error.
 """
 import logging
+import re
 
 from google.cloud import asset_v1
 
@@ -55,7 +56,8 @@ CREDENTIAL_EXPOSURE_CHECK = "GKE Credential Exposure"
 CONTROL_PLANE_CHECK = "GKE Control Plane Exposure"
 NODE_HARDENING_CHECK = "GKE Node Hardening"
 THREAT_DETECTION_CHECK = "GKE Threat Detection"
-GKE_SECURITY_CHECKS = (CREDENTIAL_EXPOSURE_CHECK, CONTROL_PLANE_CHECK, NODE_HARDENING_CHECK, THREAT_DETECTION_CHECK)
+CLUSTER_RESILIENCE_CHECK = "GKE Cluster Resilience"  # v17.3: Reliability, from the same listing
+GKE_SECURITY_CHECKS = (CREDENTIAL_EXPOSURE_CHECK, CONTROL_PLANE_CHECK, NODE_HARDENING_CHECK, THREAT_DETECTION_CHECK, CLUSTER_RESILIENCE_CHECK)
 CLUSTER_ASSET = "container.googleapis.com/Cluster"
 # Resource levels whose bindings count as an account's roles.
 RESOURCE_LEVELS = {"cloudresourcemanager.googleapis.com/Project": "project", "cloudresourcemanager.googleapis.com/Folder": "folder",
@@ -72,6 +74,7 @@ PUBLIC_CIDRS = ("0.0.0.0/0", "::/0")
 ENABLED_STATE = "ENABLED"
 LOGGING_COMPONENTS = ("SYSTEM_COMPONENTS", "WORKLOADS")
 KUBERNETES_API = "container.googleapis.com"
+ZONE_PATTERN = re.compile(r"^[a-z]+-[a-z]+\d+-[a-z]$")
 DATA_ACCESS_LOG_TYPES = {"DATA_READ", "DATA_WRITE"}
 
 
@@ -79,6 +82,38 @@ DATA_ACCESS_LOG_TYPES = {"DATA_READ", "DATA_WRITE"}
 
 def is_autopilot(cluster):
     return bool((cluster.get("autopilot") or {}).get("enabled"))
+
+
+def is_zone(location):
+    """``asia-south1-a`` is a zone, ``asia-south1`` a region: a zone has the region's two parts and a one-letter suffix."""
+    return bool(ZONE_PATTERN.match(str(location or "")))
+
+
+def pool_zones(cluster, pool):
+    """The zones a node pool's nodes live in: the pool's ``locations``, else the cluster's, else its own location."""
+    zones = pool.get("locations") or cluster.get("locations") or ([cluster.get("location")] if cluster.get("location") else [])
+    return [str(zone) for zone in zones if zone]
+
+
+def resilience_issues(cluster):
+    """The *GKE Cluster Resilience* issues of a cluster: ``(pool name or None, issue, fix)``. A zonal control plane (the
+    cluster's location is a zone) and each node pool whose nodes are all in one zone: the two shapes one zone's incident
+    takes down. Autopilot clusters are regional with nodes across the region's zones, so they have none (v17.3)."""
+    if is_autopilot(cluster):
+        return []
+    issues, location = [], str(cluster.get("location") or "")
+    if is_zone(location):
+        region = location.rsplit("-", 1)[0]
+        issues.append((None, "Zonal control plane",
+                       f"A zonal control plane cannot be made regional in place: create a regional cluster (gcloud container clusters create "
+                       f"{cluster.get('name')} --region={region} ...) and migrate the workloads."))
+    for pool in cluster.get("nodePools") or []:
+        zones = pool_zones(cluster, pool)
+        if len(zones) == 1:
+            region = zones[0].rsplit("-", 1)[0] if is_zone(zones[0]) else zones[0]
+            issues.append((pool.get("name"), f"Single-zone node pool ({zones[0]})",
+                           f"--node-locations={region}-a,{region}-b,{region}-c  # the region's zones: gcloud compute zones list --filter=region:{region}"))
+    return issues
 
 
 def workload_identity_pool(cluster):
@@ -183,8 +218,8 @@ def credential_rows(fact, roles_by_account):
                          f"--service-account=gke-nodes@{project_id}.iam.gserviceaccount.com; an existing pool's account cannot be changed.")
         rows.append({"Project": project_id, "Cluster": fact["name"], "Node Pool": pool.get("name"), "Metadata": metadata,
                      "Service Account": account + (" (default)" if is_default else ""),
-                     "Roles": sorted(roles) if roles else (["not read"] if roles is None else []),
-                     "Scopes": scopes, "Exposure": text, "Fix": "\n".join(fixes), "_status": status})
+                     "Roles": ", ".join(sorted(roles)) if roles else ("not read" if roles is None else ""),
+                     "Scopes": ", ".join(scopes), "Exposure": text, "Fix": "\n".join(fixes), "_status": status})
     return rows
 
 
@@ -434,3 +469,14 @@ def check_gke_security(scope, scope_id, job_id, *, sink):
     _write_rows(sink, job_id, THREAT_DETECTION_CHECK, rows,
                 "Container and Event Threat Detection cover every cluster; workload and system logs and data-access audit logs are on.")
     skipped.write(sink, job_id)
+
+    # 5. Cluster resilience (Reliability, v17.3): zonal control planes and single-zone node pools, the footprint
+    #    Incident Exposure meets GKE incidents with.
+    rows = []
+    for fact in facts:
+        for pool, issue, fix in resilience_issues(fact["data"]):
+            if pool:
+                fix = f"gcloud container node-pools update {pool} --cluster={fact['name']} --location={fact['location']} --project={fact['project_id']} {fix}"
+            rows.append({"Project": fact["project_id"], "Cluster": fact["name"], "Location": fact["location"], "Node Pool": pool or "(control plane)",
+                         "Issue": issue, "Fix": fix, "_status": "Action Required"})
+    _write_rows(sink, job_id, CLUSTER_RESILIENCE_CHECK, rows, "No zonal control planes or single-zone node pools found.")

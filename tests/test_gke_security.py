@@ -20,6 +20,7 @@ import pytest
 from google.api_core import exceptions as core_exceptions
 
 from app.checks.gke_security import (
+    CLUSTER_RESILIENCE_CHECK,
     CONTROL_PLANE_CHECK,
     CREDENTIAL_EXPOSURE_CHECK,
     GKE_SECURITY_CHECKS,
@@ -32,11 +33,14 @@ from app.checks.gke_security import (
     data_access_logging,
     exposure,
     hardening_issues,
+    is_zone,
     legacy_endpoints_enabled,
     logging_gaps,
     node_service_account,
     pool_metadata_mode,
     pool_scopes,
+    pool_zones,
+    resilience_issues,
 )
 from app.checks.not_checked import NOT_CHECKED
 from fakes import _execute
@@ -146,14 +150,14 @@ def test_credential_rows_per_pool_with_fixes_and_autopilot_skipped():
     rows = credential_rows(fact(data), {'111-compute@developer.gserviceaccount.com': {'roles/editor'}, 'gke-nodes@p1.iam.gserviceaccount.com': set()})
     assert [(r['Node Pool'], r['Metadata'], r['_status']) for r in rows] == [('default-pool', 'GCE', 'Action Required')]
     row = rows[0]
-    assert row['Service Account'] == '111-compute@developer.gserviceaccount.com (default)' and row['Roles'] == ['roles/editor']
-    assert row['Scopes'] == ['devstorage.read_only', 'logging.write'] and row['Exposure'].startswith('One SSRF from roles/editor on p1')
+    assert row['Service Account'] == '111-compute@developer.gserviceaccount.com (default)' and row['Roles'] == 'roles/editor'
+    assert row['Scopes'] == 'devstorage.read_only, logging.write' and row['Exposure'].startswith('One SSRF from roles/editor on p1')
     fixes = row['Fix'].split('\n')
     assert fixes[0] == 'gcloud container clusters update prod-a --location=europe-west1 --project=p1 --workload-pool=p1.svc.id.goog'
     assert fixes[1] == 'gcloud container node-pools update default-pool --cluster=prod-a --location=europe-west1 --project=p1 --workload-metadata=GKE_METADATA'
     assert 'roles/container.defaultNodeServiceAccount' in fixes[2]
     # Roles that could not be read show as such; Autopilot clusters have no pool rows.
-    assert credential_rows(fact(cluster(nodePools=[pool()], workloadIdentityConfig=None)), {})[0]['Roles'] == ['not read']
+    assert credential_rows(fact(cluster(nodePools=[pool()], workloadIdentityConfig=None)), {})[0]['Roles'] == 'not read'
     assert credential_rows(fact(cluster(autopilot={'enabled': True}, nodePools=[pool()])), {}) == []
 
 
@@ -262,12 +266,12 @@ def add_cluster(gcp, data, project_id='p1', project_number='111'):
                          project_number=project_number)
 
 
-def test_the_check_writes_the_four_findings_from_one_listing(gcp):
-    exposed = cluster('legacy', nodePools=[pool(scopes=['https://www.googleapis.com/auth/cloud-platform'])], workloadIdentityConfig=None,
-                      privateClusterConfig={'enablePrivateNodes': True}, masterAuthorizedNetworksConfig={},
+def test_the_check_writes_the_five_findings_from_one_listing(gcp):
+    exposed = cluster('legacy', location='europe-west1-b', nodePools=[pool(scopes=['https://www.googleapis.com/auth/cloud-platform'])],
+                      workloadIdentityConfig=None, privateClusterConfig={'enablePrivateNodes': True}, masterAuthorizedNetworksConfig={},
                       loggingConfig={'componentConfig': {'enableComponents': ['SYSTEM_COMPONENTS']}})
     add_cluster(gcp, exposed)
-    add_cluster(gcp, cluster('hardened'), project_id='p2', project_number='222')
+    add_cluster(gcp, cluster('hardened', locations=['europe-west1-b', 'europe-west1-c']), project_id='p2', project_number='222')
     gcp.assets.add_iam_policy('cloudresourcemanager.googleapis.com/Project', '//cloudresourcemanager.googleapis.com/projects/p1',
                               [('roles/editor', ['serviceAccount:111-compute@developer.gserviceaccount.com', 'user:dev@example.com'])], project_number='111')
     gcp.assets.add_iam_policy('storage.googleapis.com/Bucket', '//storage.googleapis.com/projects/_/buckets/b',  # a bucket binding is not a role of the account
@@ -284,11 +288,11 @@ def test_the_check_writes_the_four_findings_from_one_listing(gcp):
     credential = findings[CREDENTIAL_EXPOSURE_CHECK]
     assert credential['Status'] == 'Action Required' and len(credential['Finding']) == 1
     row = credential['Finding'][0]
-    assert (row['Project'], row['Cluster'], row['Metadata'], row['Roles'], row['Scopes']) == ('p1', 'legacy', 'GCE', ['roles/editor'], ['cloud-platform'])
+    assert (row['Project'], row['Cluster'], row['Metadata'], row['Roles'], row['Scopes']) == ('p1', 'legacy', 'GCE', 'roles/editor', 'cloud-platform')
     assert row['Exposure'].startswith('One SSRF from roles/editor on p1')
     control = findings[CONTROL_PLANE_CHECK]
     assert control['Status'] == 'Action Required' and [r['Cluster'] for r in control['Finding']] == ['legacy']
-    assert control['Finding'][0]['Fix'].startswith('gcloud container clusters update legacy --location=europe-west1 --project=p1 --enable-master-authorized-networks')
+    assert control['Finding'][0]['Fix'].startswith('gcloud container clusters update legacy --location=europe-west1-b --project=p1 --enable-master-authorized-networks')
     assert findings[NODE_HARDENING_CHECK]['Finding'] == [{'Status': 'Every cluster has private, Shielded, COS nodes, network policy enforcement, Binary Authorization, '
                                                                     'posture scanning and secrets encryption.'}]
     threat = findings[THREAT_DETECTION_CHECK]
@@ -297,6 +301,45 @@ def test_the_check_writes_the_four_findings_from_one_listing(gcp):
         ('legacy', 'Container Threat Detection', 'DISABLED'), ('legacy', 'Event Threat Detection', 'DISABLED'),
         ('legacy', 'Cloud Logging', 'missing WORKLOADS'), ('legacy', 'Data-access audit logs', 'off for container.googleapis.com')]
     assert sink.not_checked() == []
+    # v17.3: the fifth record, under Reliability - the zonal cluster (its one pool inherits its zone), not the regional two-zone one.
+    resilience = findings[CLUSTER_RESILIENCE_CHECK]
+    assert resilience['Status'] == 'Action Required'
+    assert [(r['Project'], r['Cluster'], r['Location'], r['Node Pool'], r['Issue']) for r in resilience['Finding']] == [
+        ('p1', 'legacy', 'europe-west1-b', '(control plane)', 'Zonal control plane'),
+        ('p1', 'legacy', 'europe-west1-b', 'default-pool', 'Single-zone node pool (europe-west1-b)')]
+    assert resilience['Finding'][0]['Fix'].startswith('A zonal control plane cannot be made regional in place: create a regional cluster '
+                                                      '(gcloud container clusters create legacy --region=europe-west1 ...)')
+    assert resilience['Finding'][1]['Fix'] == ('gcloud container node-pools update default-pool --cluster=legacy --location=europe-west1-b --project=p1 '
+                                               '--node-locations=europe-west1-a,europe-west1-b,europe-west1-c  # the region\'s zones: '
+                                               'gcloud compute zones list --filter=region:europe-west1')
+
+
+# --- v17.3: GKE Cluster Resilience ---
+
+def test_zones_and_regions_are_told_apart():
+    assert is_zone('asia-south1-a') and is_zone('northamerica-northeast1-b') and is_zone('us-east5-c')
+    assert not is_zone('asia-south1') and not is_zone('us') and not is_zone('') and not is_zone(None)
+
+
+def test_pool_zones_come_from_the_pool_then_the_cluster_then_its_location():
+    assert pool_zones({'location': 'us-east1-b'}, {'locations': ['us-east1-b', 'us-east1-c']}) == ['us-east1-b', 'us-east1-c']
+    assert pool_zones({'location': 'us-east1', 'locations': ['us-east1-b', 'us-east1-c', 'us-east1-d']}, {}) == ['us-east1-b', 'us-east1-c', 'us-east1-d']
+    assert pool_zones({'location': 'us-east1-b'}, {}) == ['us-east1-b']
+    assert pool_zones({}, {}) == []
+
+
+def test_resilience_issues_name_zonal_control_planes_and_single_zone_pools():
+    regional = cluster(locations=['europe-west1-b', 'europe-west1-c'], nodePools=[pool('a'), {**pool('b'), 'locations': ['europe-west1-d']}])
+    assert resilience_issues(regional) == [('b', 'Single-zone node pool (europe-west1-d)',
+                                            '--node-locations=europe-west1-a,europe-west1-b,europe-west1-c  # the region\'s zones: '
+                                            'gcloud compute zones list --filter=region:europe-west1')]
+    zonal = cluster(location='asia-south1-a', nodePools=[{**pool('a'), 'locations': ['asia-south1-a', 'asia-south1-b']}, pool('b')])
+    issues = resilience_issues(zonal)
+    assert [(pool_name, issue) for pool_name, issue, _ in issues] == [(None, 'Zonal control plane'), ('b', 'Single-zone node pool (asia-south1-a)')]
+    assert issues[0][2] == ('A zonal control plane cannot be made regional in place: create a regional cluster (gcloud container clusters create '
+                            'prod-a --region=asia-south1 ...) and migrate the workloads.')
+    assert resilience_issues(cluster(location='asia-south1-a', autopilot={'enabled': True})) == []  # Autopilot: regional, nodes across zones
+    assert resilience_issues(cluster(locations=['europe-west1-b', 'europe-west1-c', 'europe-west1-d'])) == []
 
 
 def test_the_check_reports_a_failed_listing_and_partial_failures(gcp):
@@ -314,7 +357,7 @@ def test_the_check_reports_a_failed_listing_and_partial_failures(gcp):
     sink = Sink()
     check_gke_security('project', 'p1', JOB, sink=sink)
     findings = sink.by_check()
-    assert findings[CREDENTIAL_EXPOSURE_CHECK]['Finding'][0]['Roles'] == ['not read']
+    assert findings[CREDENTIAL_EXPOSURE_CHECK]['Finding'][0]['Roles'] == 'not read'
     assert findings[CREDENTIAL_EXPOSURE_CHECK]['Status'] == 'Investigation Recommended'
     skipped = sink.not_checked()
     assert [(row['Project'], row['Skipped check']) for row in skipped] == [

@@ -39,7 +39,6 @@ import io
 import re
 from dataclasses import dataclass
 
-from app.checks.categories import INCIDENT_STATE
 from app.reporting.changes import ORG_POLICIES_CHECK
 from app.reporting.context import ACTIONABLE_STATUSES, display_rank
 from app.reporting.scoring import NOT_ASSESSED, NOT_ASSESSED_TEXT, plural
@@ -54,8 +53,11 @@ STATE = {"high": "Healthy", "medium": "Needs attention", "low": "At risk", NOT_A
 TOP_ACTIONS = 10
 # Status changes named on the since line before "and N more" (the Overview's Changes card has them all).
 INLINE_STATUS_CHANGES = 3
-# The Stability line adds this check's tally: incidents that affected the scope in the last 90 days.
-INCIDENTS_CHECK = "Service Health Incidents"
+# The Stability line adds this check's count when it has rows (v17.3): the customer's assets without failover in
+# locations that had incidents. Until v17.2 the line tallied the Service Health briefing itself ("42 incidents impacted
+# you in 90 days") - a count of Google's incidents, most of them Related rather than Impacted, on the executive page; a
+# Google-side incident is not the customer's posture and is no longer counted anywhere on this page.
+EXPOSURE_CHECK = "Incident Exposure"
 # The Efficiency line adds the cost rows' estimated monthly savings (v17), summed per currency from this column.
 SAVING_COLUMN = "Est. Monthly Saving"
 SAVING_VALUE = re.compile(r"^\s*(-?[\d,]*\.?\d+)\s*([A-Z]{3})\s*$")
@@ -163,18 +165,15 @@ def since_text(change):
     return " · ".join(bits)
 
 
-def incidents_text(section):
-    """The Stability line's incident tally, from the Service Health briefing (None when the scope has no briefing)."""
-    item = next((check for check in section.checks if check.check_name == INCIDENTS_CHECK), None)
-    if item is None or item.details is None or item.details.kind != "table":
+def exposure_text(section):
+    """The Stability line's Incident Exposure sentence: the exposed assets, when the check has rows; None otherwise."""
+    item = next((check for check in section.checks if check.check_name == EXPOSURE_CHECK), None)
+    if item is None or item.status not in ACTIONABLE_STATUSES or item.details is None or item.details.kind != "table":
         return None
-    headers = list(item.details.headers)
-    state_column = headers.index(INCIDENT_STATE) if INCIDENT_STATE in headers else None
     total = item.details.total_rows
     if not total:
-        return "no incidents impacted you in 90 days"
-    active = sum(1 for row in item.details.rows if state_column is not None and str(row[state_column]).upper() == "ACTIVE")
-    return f"{plural(total, 'incident')} impacted you in 90 days, {active} active"
+        return None
+    return f"{plural(total, 'asset')} without failover in locations that had incidents"
 
 
 def savings_text(section):
@@ -207,9 +206,9 @@ def build_stoplights(context):
         affected = projects_affected(failing)
         if affected:
             evidence.append(f"{plural(affected, 'project')} with findings")
-        incidents = incidents_text(section) if category == "Reliability & Resilience" else None
-        if incidents:
-            evidence.append(incidents)
+        exposure = exposure_text(section) if category == "Reliability & Resilience" else None
+        if exposure:
+            evidence.append(exposure)
         savings = savings_text(section) if category == "Cost Optimization" else None
         if savings:
             evidence.append(savings)

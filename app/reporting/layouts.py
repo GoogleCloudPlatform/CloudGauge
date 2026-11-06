@@ -89,11 +89,15 @@ COLUMN_ROLES = {
     **dict.fromkeys(("Status", "State", "Relevance", "Type", "Finding Type", "Tier", "Category", "Expected Value", "Current Value", "Component",
                      "Kind", "Signal", "Family", "Plan",
                      # v17.1
-                     "Metadata", "Path", "Level"), STATE),
+                     "Metadata", "Path", "Level",
+                     # v17.3
+                     "Scope"), STATE),
     **dict.fromkeys(("Finding", "Issue", "Error", "Reason", "Detail", "Details", "Summary", "Recommendation", "Insight", "Incident",
                      "Notification", "Subject", "Products", "Skipped check", "Missing Categories", "Resources",
                      # v17.1
-                     "Exposure", "Reach"), PROSE),
+                     "Exposure", "Reach",
+                     # v17.3: an exposed asset and the incidents that are its evidence
+                     "Asset", "Incidents"), PROSE),
 }
 # What the items of a resource-list column are called when there are too many to show inline ("37 projects").
 LIST_NOUNS = {"Projects": "projects", "Project IDs": "projects", "Locations": "locations", "VMs Not Reporting": "VMs", "Standalone VMs": "VMs",
@@ -226,7 +230,11 @@ def incident_cells(row):
     """
     started, ended = f"{row.get(categories.INCIDENT_STARTED, '')}", f"{row.get('Ended', '')}"
     when = Cell("stack", lines=(started or "—", f"→ {ended}" if ended else "→ ongoing"), nowrap=True, css=ROLE_CSS[TIME])
-    locations = counted(split_items(row.get("Locations")), "locations")
+    regions = categories.regions_of(row.get("Locations"))
+    if categories.is_global_incident(row.get("Locations")):  # v17.3: a product-wide event lists every region
+        locations = Cell("disclose", text=f"Global · {len(regions)} regions", body=", ".join(regions))
+    else:
+        locations = counted(regions or split_items(row.get("Locations")), "regions")
     incident = Cell("rich", text=f"{row.get('Incident', '')}",
                     secondary=locations.text if locations.kind == "text" else "",
                     more=(locations.text, locations.body) if locations.kind == "disclose" else None,

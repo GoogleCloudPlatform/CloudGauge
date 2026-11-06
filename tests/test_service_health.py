@@ -101,7 +101,7 @@ def test_events_of_several_projects_fold_into_one_incident_row():
     assert rows[0] == {
         'State': 'Active (confirmed)', 'Started': '2026-10-01 08:00', 'Ended': '', 'Incident': 'Incident A', 'Products': 'Cloud Run',
         'Locations': 'us-central1, us-east1', 'Impacted projects': 2, 'Project IDs': 'web-prod, data-lake',
-        'Relevance': 'Impacted', 'Incident ID': 'A',  # the highest relevance of its projects; active if any copy was
+        'Relevance': 'Impacted', 'Scope': 'Location-specific', 'Incident ID': 'A',  # the highest relevance of its projects; active if any copy was
     }
     assert rows[1]['State'] == 'Resolved' and rows[1]['Ended'] == '2026-09-01 03:00' and rows[1]['Relevance'] == 'Related'
     # Every project is named, so the report's filter box finds the incident by project ID.
@@ -156,7 +156,8 @@ def test_check_writes_the_briefing_the_coverage_and_the_skipped_projects(gcp, mo
     briefing = records['Service_Health_Incidents']
     assert briefing['Check'] == INCIDENTS_CHECK and briefing['Status'] == 'Informational'  # never scored
     assert [(r['Incident ID'], r['Project IDs'], r['Relevance'], r['State']) for r in briefing['Finding']] == \
-           [('A', 'web-prod, data-lake', 'Impacted', 'Active (confirmed)')]  # default relevance: Impacted and Related only
+           [('A', 'web-prod, data-lake', 'Impacted', 'Active (confirmed)')]  # default relevance: Impacted (plus location-specific Related)
+    assert briefing[categories.OMITTED_KEY] == []  # no global Related incident was left out
     coverage = records['Personalized_Service_Health_API_Coverage']
     assert coverage['Check'] == COVERAGE_CHECK and coverage['Status'] == 'Action Required'
     assert coverage['Finding'] == [{'Project': 'no-psh',
@@ -171,8 +172,9 @@ def test_nothing_in_the_window_is_a_note_and_full_coverage_is_compliant(gcp, mon
     monkeypatch.setattr(service_health.gcp, 'http_get', FakeServiceHealth({'web-prod': [Response(200, {})], 'data-lake': [Response(200, {'events': []})]}))
     records, writes = run(PROJECTS[:2])
     assert len(writes) == 2  # no "Projects not checked"
-    assert records['Service_Health_Incidents'] == {'Check': INCIDENTS_CHECK, 'Status': 'Informational', 'Finding': [
-        {'Summary': 'No Google Cloud incidents with relevance Impacted or Related to these projects were recorded in the last 90 days.'}]}
+    assert records['Service_Health_Incidents'] == {'Check': INCIDENTS_CHECK, 'Status': 'Informational', 'Omitted': [], 'Finding': [
+        {'Summary': 'No Google Cloud incidents with relevance Impacted, and no Related incident confined to specific locations, '
+                    'touched these projects in the last 90 days.'}]}
     assert records['Personalized_Service_Health_API_Coverage'] == {
         'Check': COVERAGE_CHECK, 'Status': 'Compliant', 'Finding': [{'Status': 'The Service Health API is enabled in every checked project.'}]}
 
@@ -180,14 +182,76 @@ def test_nothing_in_the_window_is_a_note_and_full_coverage_is_compliant(gcp, mon
 def test_window_and_relevance_come_from_the_settings(gcp, monkeypatch):
     monkeypatch.setenv('SERVICE_HEALTH_WINDOW_DAYS', '30')
     monkeypatch.setenv('SERVICE_HEALTH_RELEVANCE', 'impacted, partially_related')
-    fake = FakeServiceHealth({'web-prod': [Response(200, {'events': [event('A', 'web-prod', 'RELATED'), event('P', 'web-prod', 'PARTIALLY_RELATED')]})]})
+    fake = FakeServiceHealth({'web-prod': [Response(200, {'events': [event('A', 'web-prod', 'RELATED', products=GLOBAL),
+                                                                     event('P', 'web-prod', 'PARTIALLY_RELATED')]})]})
     monkeypatch.setattr(service_health.gcp, 'http_get', fake)
     records, _ = run(PROJECTS[:1])
+    # P is wanted by the setting; A is Related and global, so it is counted, not listed.
     assert [r['Incident ID'] for r in records['Service_Health_Incidents']['Finding']] == ['P']
+    assert records['Service_Health_Incidents'][categories.OMITTED_KEY] == ['A']
     since = fake.requests[0][1]['filter']
     assert since.startswith('update_time>="') and since.endswith('Z"')
     with pytest.raises(ValueError, match='SERVICE_HEALTH_RELEVANCE'):
         monkeypatch.setenv('SERVICE_HEALTH_RELEVANCE', 'IMPACTED,SOMETIMES')
+        run(PROJECTS[:1])
+
+
+# A product-wide event: Personalized Service Health lists every region (v17.3: GLOBAL_REGION_COUNT and more make it global).
+GLOBAL = tuple(('Cloud Storage', f'{continent}-{name}{i}') for continent in ('us', 'europe', 'asia', 'australia')
+               for name in ('east', 'west', 'north', 'south', 'central') for i in (1, 2))  # 40 regions
+GLOBAL_TEXT = ', '.join(location for _, location in GLOBAL)
+
+
+def test_related_incidents_are_listed_only_when_confined_to_specific_locations(gcp, monkeypatch):
+    """v17.3: by default the briefing lists the Impacted incidents and the Related ones confined to specific locations
+    (the evidence Incident Exposure reads); a global Related incident is counted in the note, not listed; Not impacted
+    and Partially related never put a project on a row."""
+    monkeypatch.setattr(service_health.gcp, 'http_get', FakeServiceHealth({
+        'web-prod': [Response(200, {'events': [event('I', 'web-prod', 'IMPACTED', products=GLOBAL),  # Impacted: listed, global or not
+                                               event('R', 'web-prod', 'RELATED', products=(('Cloud SQL', 'asia-south1'), ('Cloud SQL', 'asia-south1-a'))),
+                                               event('G', 'web-prod', 'RELATED', products=GLOBAL),
+                                               event('U', 'web-prod', 'RELATED', products=()),  # no location given: nothing to meet
+                                               event('N', 'web-prod', 'NOT_IMPACTED')]})],
+        'data-lake': [Response(200, {'events': [event('R', 'data-lake', 'NOT_IMPACTED'), event('G', 'data-lake', 'RELATED', products=GLOBAL),
+                                               event('V', 'data-lake', 'IMPACTED', products=())]})],
+    }))
+    records, _ = run(PROJECTS[:2])
+    rows = records['Service_Health_Incidents']['Finding']
+    assert [(r['Incident ID'], r['Project IDs'], r['Relevance'], r['Scope']) for r in rows] == [
+        ('I', 'web-prod', 'Impacted', 'Global'), ('R', 'web-prod', 'Related', 'Location-specific'),  # data-lake's Not impacted copy of R is not a project of R
+        ('V', 'data-lake', 'Impacted', 'No location')]  # Impacted is listed whatever its locations
+    assert records['Service_Health_Incidents'][categories.OMITTED_KEY] == ['G', 'U']
+    assert categories.scope_of('') == 'No location' and categories.scope_of('asia-south1-a') == 'Location-specific' and categories.scope_of(GLOBAL_TEXT) == 'Global'
+    assert categories.regions_of(rows[1]['Locations']) == ['asia-south1'] and categories.is_global_incident(rows[0]['Locations'])
+
+
+def test_the_global_note_is_one_count_across_shards():
+    """The same global incident comes back from every shard: the omitted IDs are unioned like the rows, and the note
+    under the merged table counts them once."""
+    shard_a = {'Check': INCIDENTS_CHECK, 'Status': 'Informational', 'Finding': [incident_row(fold_events({'p1': [event('R', 'p1', 'RELATED')]})['R'])],
+               categories.OMITTED_KEY: ['G1', 'G2']}
+    shard_b = {'Check': INCIDENTS_CHECK, 'Status': 'Informational', 'Finding': [incident_row(fold_events({'p2': [event('R', 'p2', 'RELATED')]})['R'])],
+               categories.OMITTED_KEY: ['G2', 'G3']}
+    [merged] = merge_shard_findings([shard_a, shard_b])
+    assert merged[categories.OMITTED_KEY] == ['G1', 'G2', 'G3'] and merged['Finding'][0]['Project IDs'] == 'p1, p2'
+    [finalized] = categories.finalize_briefing_notes([merged])
+    assert categories.OMITTED_KEY not in finalized
+    assert finalized[categories.NOTE_KEY] == ('3 Related incidents without a specific location (global, or none given) are not listed; '
+                                              'SERVICE_HEALTH_RELEVANCE=IMPACTED,RELATED lists them.')
+    assert categories.finalize_briefing_notes([{**shard_a, categories.OMITTED_KEY: []}])[0].get(categories.NOTE_KEY) is None
+    one = categories.finalize_briefing_notes([{**shard_a, categories.OMITTED_KEY: ['G']}])[0][categories.NOTE_KEY]
+    assert one.startswith('1 Related incident without a specific location (global, or none given) is not listed')
+
+
+def test_the_briefing_can_be_switched_off_and_the_coverage_check_still_runs(gcp, monkeypatch):
+    monkeypatch.setenv('SERVICE_HEALTH_INCIDENTS', 'off')
+    monkeypatch.setattr(service_health.gcp, 'http_get', FakeServiceHealth({
+        'web-prod': [Response(200, {'events': [event('A', 'web-prod', 'IMPACTED')]})], 'no-psh': [error_response(403, DISABLED.format(p='no-psh'))]}))
+    records, writes = run([PROJECTS[0], PROJECTS[2]])
+    assert [name for name, _ in writes] == ['Personalized_Service_Health_API_Coverage']
+    assert records['Personalized_Service_Health_API_Coverage']['Status'] == 'Action Required'
+    with pytest.raises(ValueError, match='SERVICE_HEALTH_INCIDENTS'):
+        monkeypatch.setenv('SERVICE_HEALTH_INCIDENTS', 'maybe')
         run(PROJECTS[:1])
 
 

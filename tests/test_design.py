@@ -291,7 +291,9 @@ def test_every_fix_block_has_the_same_copy_control():
     copy_button = '<button type="button" class="btn btn-outline btn-sm copy-btn" onclick="copyFix(this)">Copy</button>'
     report = render({SECURITY: [{'Check': 'Audit Logging', 'Status': 'Action Required', 'Finding': [
         {'Project': 'web-prod', 'Issue': 'Data access logs off', 'Fix': 'gcloud projects set-iam-policy web-prod policy.yaml'}]}]})
-    assert f'<div class="fix-block"><div class="fix-head"><strong>Fix</strong>{copy_button}</div><pre>gcloud projects set-iam-policy web-prod policy.yaml</pre></div>' in report
+    # v17.3: the title row says what the block is, so nobody waits for Draft fixes to produce what is already there.
+    caption = '<span class="attribution">exact, from the check — Draft fixes covers the findings without one</span>'
+    assert f'<div class="fix-block"><div class="fix-head"><strong>Fix</strong>{caption}{copy_button}</div><pre>gcloud projects set-iam-policy web-prod policy.yaml</pre></div>' in report
     # The AI-drafted block is built by the script with the same row (plus its AI-generated pill), and the executive summary's
     # Copy is the same control; all three go through one copyText helper.
     script = report.split('<script>')[-1]

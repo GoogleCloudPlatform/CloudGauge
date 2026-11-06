@@ -705,7 +705,9 @@ class SyntheticGcp:
                       "shieldedInstanceConfig": {"enableSecureBoot": bool(h and h.secure_boot), "enableIntegrityMonitoring": True}}
             if gke_metadata:
                 config["workloadMetadataConfig"] = {"mode": "GKE_METADATA"}
+            zones = (profile.gke_pool_zones.get(cluster.name) or ())
             pools.append({"name": name, "version": version, "config": config, "management": {"autoUpgrade": auto},
+                          **({"locations": list(zones[i])} if i < len(zones) else {}),  # v17.3
                           "networkConfig": {"enablePrivateNodes": bool(h and h.private_nodes)}})
         data = {"name": cluster.name, "location": cluster.location, "status": "RUNNING", "currentMasterVersion": cluster.master_version,
                 "nodePools": pools, "legacyAbac": {"enabled": bool(h and h.legacy_abac)}, "masterAuth": {"clusterCaCertificate": "c3ludGhldGlj"},
@@ -795,7 +797,8 @@ class SyntheticGcp:
 
     @staticmethod
     def _sql_asset(profile, sql):
-        data = {"name": sql.name, "databaseVersion": sql.database_version, "settings": {
+        region = profile.subnets[0][1] if profile.subnets else "us-central1"  # v17.3: the instance's region, as the API reports it
+        data = {"name": sql.name, "databaseVersion": sql.database_version, "region": region, "settings": {
             "availabilityType": "ZONAL" if sql.zonal else "REGIONAL",
             "backupConfiguration": {"enabled": sql.backups, "pointInTimeRecoveryEnabled": sql.pitr, "retainedBackupsCount": sql.retained_backups}}}
         return SimpleNamespace(name=f"//cloudsql.googleapis.com/projects/{profile.project_id}/instances/{sql.name}",

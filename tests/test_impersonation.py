@@ -159,7 +159,7 @@ def test_impersonation_rows_reach_targets_order_and_fixes():
         ('service account', 'user:ops@example.com', 'token creator', '1 of 3 service accounts in projects/p1', 'Investigation Recommended'),
     ]
     chain = rows[3]
-    assert chain['Targets'] == ['a@p1.iam.gserviceaccount.com', 'c@p1.iam.gserviceaccount.com'] and chain['Target Roles'] == ['roles/editor']
+    assert chain['Targets'] == 'a@p1.iam.gserviceaccount.com, c@p1.iam.gserviceaccount.com' and chain['Target Roles'] == 'roles/editor'
     assert chain['Fix'].startswith('Replace the account-to-account chain') and 'remove-iam-policy-binding a@p1.iam.gserviceaccount.com' in chain['Fix']
     assert rows[2]['Fix'].startswith('Remove the project-level binding of roles/iam.serviceAccountTokenCreator')
     assert rows[5]['Fix'].startswith('Bind a dedicated Kubernetes service account')
@@ -298,7 +298,7 @@ def test_perimeter_facts_and_coverage_rows():
     bridge = perimeter('bridge', ['projects/333'], [], regular=False)
     rows = coverage_rows(projects, [enforced, partial, dry, bridge, None], '1')
     assert [(r['Project'], r['Perimeter'], r['Projects']) for r in rows] == [
-        ('(outside)', 'none', ['p3']), ('(inside)', 'data', ['p2']), ('(dry run)', 'staging', ['p3'])]
+        ('(outside)', 'none', 'p3'), ('(inside)', 'data', 'p2'), ('(dry run)', 'staging', 'p3')]
     assert rows[1]['Issue'] == 'Restricts 1 services but not iamcredentials.googleapis.com, secretmanager.googleapis.com, container.googleapis.com, sqladmin.googleapis.com, compute.googleapis.com.'
     assert coverage_rows([('p1', '111')], [enforced], '1') == []
 
@@ -313,7 +313,7 @@ def test_the_vpc_sc_check_against_the_fakes(gcp):
     check_vpc_sc_coverage('organization', '987654321', JOB, sink=sink)
     record = sink.by_check()[VPC_SC_CHECK]
     assert record['Status'] == 'Investigation Recommended'
-    assert [(r['Project'], r['Perimeter'], r['Projects']) for r in record['Finding']] == [('(outside)', 'none', ['p2']), ('(dry run)', 'scoped dry', ['p2'])]
+    assert [(r['Project'], r['Perimeter'], r['Projects']) for r in record['Finding']] == [('(outside)', 'none', 'p2'), ('(dry run)', 'scoped dry', 'p2')]
     # The organization's policies (scoped ones included) and each policy's perimeters, one call each.
     assert acm.parents == ['organizations/987654321', 'accessPolicies/1', 'accessPolicies/2']
     # A folder scan reads the perimeters at the projects' organization; no access policy at all means no perimeter.
@@ -321,7 +321,7 @@ def test_the_vpc_sc_check_against_the_fakes(gcp):
     sink = Sink()
     check_vpc_sc_coverage('folder', '42', JOB, sink=sink)
     record = sink.by_check()[VPC_SC_CHECK]
-    assert record['Status'] == 'Investigation Recommended' and record['Finding'][0]['Perimeter'] == 'none' and record['Finding'][0]['Projects'] == ['p1', 'p2']
+    assert record['Status'] == 'Investigation Recommended' and record['Finding'][0]['Perimeter'] == 'none' and record['Finding'][0]['Projects'] == 'p1, p2'
     assert gcp.discovery.apis['accesscontextmanager'].parents == ['organizations/987654321']
     # An API that cannot be called is the check's Error, naming the API to enable.
     gcp.discovery.apis['accesscontextmanager'] = FakeAcm(error=core_exceptions.PermissionDenied('Access Context Manager API has not been used in project x'))

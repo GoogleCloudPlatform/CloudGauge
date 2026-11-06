@@ -264,6 +264,7 @@ class ProjectProfile:
     custom_role_bindings: tuple = ()  # (role name, member): a custom role on the project that carries token permissions
     etd_enabled: bool = True  # Event Threat Detection, effective state in the project
     data_access_logs: bool = False  # DATA_READ/DATA_WRITE audit logs for container.googleapis.com
+    gke_pool_zones: dict = field(default_factory=dict)  # v17.3: cluster name -> per node pool, the zones its nodes live in
 
     @property
     def project_number(self):
@@ -544,6 +545,14 @@ class SyntheticOrg:
                     (sql.name, "CHANGE_MACHINE_TYPE", f"Cloud SQL instance '{sql.name}' is overprovisioned: move to a smaller tier.", rng.randint(40, 400)))
         cost_recommendations = {**cost_recommendations, **extra_recommendations}
 
+        # v17.3 (drawn last, so earlier seeds keep their organizations): the zones of each node pool. Synthetic clusters
+        # are zonal (their location is a zone); a pool spans the region's three zones or sits in the cluster's one.
+        gke_pool_zones = {}
+        for cluster in gke_clusters:
+            region = "-".join(cluster.location.split("-")[:-1])
+            gke_pool_zones[cluster.name] = tuple(
+                (cluster.location,) if _chance(rng, 0.4) else (f"{region}-a", f"{region}-b", f"{region}-c") for _ in cluster.node_pools)
+
         return ProjectProfile(
             index=index, project_id=project_id, display_name=f"Synthetic Project {index}",
             folder_id=self.folder_of(index), denied=denied, osconfig_disabled=osconfig_disabled,
@@ -561,7 +570,7 @@ class SyntheticOrg:
             commitments=commitments, capacity_events=capacity_events, iam_recommendations=iam_recommendations,
             gpu_quota=gpu_quota, quota_recommendation=quota_recommendation, future_reservation=future_reservation,
             gke_hardening=gke_hardening, impersonation_bindings=tuple(impersonation_bindings), custom_role_bindings=custom_role_bindings,
-            etd_enabled=etd_enabled, data_access_logs=data_access_logs,
+            etd_enabled=etd_enabled, data_access_logs=data_access_logs, gke_pool_zones=gke_pool_zones,
         )
 
     # --- organization-level data ---

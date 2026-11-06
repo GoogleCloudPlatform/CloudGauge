@@ -95,7 +95,7 @@ INLINE_STATUS_CHANGES = 3
 ORG_POLICIES_CHECK = "Organization Policies"
 # Columns that never enter an identity: the fix is derived from the row, and a version is a measurement
 # of its component (GKE Supported Versions), not what the finding is about.
-EXCLUDED_COLUMNS = (FIX_COLUMN, "Version")
+EXCLUDED_COLUMNS = (FIX_COLUMN, "Version", "Incidents")  # v17.3: an exposed asset is the finding, its incidents the evidence
 # Checks whose rows cannot be compared with a previous scan by an older release → (the release that drew the line,
 # why). Against such a scan the rows are not compared (module docstring); the status still is. The reasons:
 ROWS_CHANGED = "rows changed"  # the rows changed shape, and with them every row's identity
@@ -106,6 +106,9 @@ RESHAPED_CHECKS = {
     "Disk Snapshot Resilience": ("16.1", RULE_CHANGED),
     # v17: the rows gained Family and Headroom (rows changed), and 80–95 % is Investigation Recommended now.
     "Quota Utilization (>80%)": ("17", ROWS_CHANGED),
+    # v17.3: the rows gained the instance's Region and the group's Zone (rows changed): the footprint Incident Exposure reads.
+    "Cloud SQL High Availability": ("17.3", ROWS_CHANGED),
+    "MIG Resilience (Zonal)": ("17.3", ROWS_CHANGED),
 }
 
 DIGITS = re.compile(r"\d[\d,]*(?:\.\d+)?")

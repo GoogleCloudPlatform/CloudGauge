@@ -42,7 +42,9 @@ APP_ENV_VARS = (*fakes.TEST_ENV, 'K_SERVICE', 'WORKER_URL', 'WORKER_AUDIENCE', '
                 'SERVICE_HEALTH_WINDOW_DAYS', 'SERVICE_HEALTH_RELEVANCE', 'ADVISORY_WINDOW_DAYS',
                 # v17
                 'COST_ALLOCATION_LABELS', 'SNAPSHOT_MAX_AGE_DAYS', 'RESERVATION_COVERAGE_MIN_VCPUS', 'BIGQUERY_DATASET',
-                'BIGQUERY_EXPORT_WAIT_SECONDS')
+                'BIGQUERY_EXPORT_WAIT_SECONDS',
+                # v17.3
+                'SERVICE_HEALTH_INCIDENTS')
 # What a deployed Cloud Run revision sees: the five required variables plus K_SERVICE.
 DEPLOYED_ENV = {**fakes.TEST_ENV, 'K_SERVICE': fakes.K_SERVICE}
 

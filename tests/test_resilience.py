@@ -47,10 +47,10 @@ class Sink:
         return {finding['Check']: finding for _, _, finding in self.findings}
 
 
-def sql_instance(project, name, *, zonal=False, backups=True, pitr=True, retained=30):
+def sql_instance(project, name, *, zonal=False, backups=True, pitr=True, retained=30, region='asia-south1'):
     settings = {'availabilityType': 'ZONAL' if zonal else 'REGIONAL',
                 'backupConfiguration': {'enabled': backups, 'pointInTimeRecoveryEnabled': pitr, 'retainedBackupsCount': retained}}
-    return SQL, f'//cloudsql.googleapis.com/projects/{project}/instances/{name}', {'name': name, 'settings': settings}
+    return SQL, f'//cloudsql.googleapis.com/projects/{project}/instances/{name}', {'name': name, 'region': region, 'settings': settings}
 
 
 def mig(project, name, *, zone=None, region='us-central1'):
@@ -106,11 +106,13 @@ def test_findings_keep_their_rows_and_name_each_snapshot(gcp):
         gcp.assets.add_asset(*asset)
     checks = run().by_check
     assert {name: f['Status'] for name, f in checks.items()} == {check: 'Action Required' for check in RESILIENCE_CHECKS}
-    assert checks['Cloud SQL High Availability']['Finding'] == [{'Project': 'p1', 'Instance': 'db-a'}]
+    # v17.3: the zonal instance's Region and the zonal group's Zone (as a name, whatever the API's URL form), the footprint
+    # Incident Exposure reads; the other Cloud SQL rows are as before.
+    assert checks['Cloud SQL High Availability']['Finding'] == [{'Project': 'p1', 'Instance': 'db-a', 'Region': 'asia-south1'}]
     assert checks['Cloud SQL Automated Backups']['Finding'] == [{'Project': 'p1', 'Instance': 'db-a'}]
     assert checks['Cloud SQL Backup Retention']['Finding'] == [{'Project': 'p1', 'Instance': 'db-a', 'Retention': 7}]
     assert checks['Cloud SQL PITR']['Finding'] == [{'Project': 'p1', 'Instance': 'db-b'}]
-    assert checks[MIG_RESILIENCE_CHECK]['Finding'] == [{'Project': 'p1', 'MIG Name': 'web-mig'}]
+    assert checks[MIG_RESILIENCE_CHECK]['Finding'] == [{'Project': 'p1', 'MIG Name': 'web-mig', 'Zone': 'us-central1-a'}]
     # v15.6: one row per single-region snapshot (a count row before), so the report and the action plan name it.
     # v16.1: 'weekly' is absent because its location is a multi-region (until then: because it listed two).
     assert checks[SNAPSHOT_RESILIENCE_CHECK]['Finding'] == [{'Project': 'p1', 'Snapshot': 'nightly', 'Location': 'us-central1'},

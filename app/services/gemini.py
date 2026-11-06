@@ -55,6 +55,9 @@ FALLBACK_CACHE_TTL_SECONDS = 10 * 60  # retry the lookup sooner after a failure
 _STABLE_FLASH_MODEL = re.compile(r"^gemini-(\d+(?:\.\d+)*)-flash$")
 
 SUMMARY_ROWS_PER_CHECK = 25
+# Rows the executive summary never sees (v17.3): the Service Health briefing is Google's incidents, not the customer's
+# posture; the summary speaks of what the customer can change (Incident Exposure, when it has rows, is in the data).
+SUMMARY_EXCLUDED_CHECKS = ("Service Health Incidents",)
 SUMMARY_MAX_CHARS = 400_000  # ~100k tokens; well inside the model's window, bounded in cost and latency
 REMEDIATION_MAX_CHARS = 12_000
 
@@ -244,6 +247,9 @@ def condense_csv_for_prompt(csv_data, rows_per_check=SUMMARY_ROWS_PER_CHECK, max
             elif len(row) <= 1:  # a title or a spacer: the next data rows need a header first
                 header = None
             writer.writerow(row)
+            continue
+        if row[0] in SUMMARY_EXCLUDED_CHECKS:
+            changed = True
             continue
         status, seen, projects = checks.setdefault(row[0], [row[1] if len(row) > 1 else "", 0, set() if project_column is not None else None])
         checks[row[0]][1] = seen + 1

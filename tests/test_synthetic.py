@@ -296,7 +296,9 @@ def test_organization_scan_covers_every_section_and_org_check(gcp):
                   # v17: FinOps, capacity, quota and IAM
                   'Cost Allocation Labels', 'Cloud Storage Lifecycle', 'Snapshot Sprawl',
                   'Resource-Based Commitment Recommendations', 'Idle Images', 'Cloud SQL Extended Support', 'Capacity Commitments',
-                  'Reservation Coverage', 'Commitments Expiring', 'Capacity Signals', 'Quota Increase Recommendations', 'IAM Least Privilege'):
+                  'Reservation Coverage', 'Commitments Expiring', 'Capacity Signals', 'Quota Increase Recommendations', 'IAM Least Privilege',
+                  # v17.3: the derived check and the fifth GKE record
+                  'Incident Exposure', 'GKE Cluster Resilience'):
         assert check in html, check
     assert 'Action Required' in html and 'Compliant' in html and 'Informational' in html
     # The v17 facts the synthetic world draws reach the report: a saving total on the Scorecard, an unconfigured
@@ -304,6 +306,11 @@ def test_organization_scan_covers_every_section_and_org_check(gcp):
     assert 'USD/month in identified savings' in html
     assert 'Not configured: set COST_ALLOCATION_LABELS' in html
     assert 'Accelerator' in html and 'Headroom' in html
+    # Every cell is text (v17.2.1): a list left in a row reaches the page and the CSV as Python's repr — "['a', 'b']"
+    # in the chips, "[]" for an empty one. The CSV is the raw cells, so it is where such a slip shows first.
+    csv = store.read_report('syn-job', scope_id, 'csv')
+    reprs = [cell for line in csv.splitlines() for cell in line.split(',') if cell.strip().startswith(("['", '["', '[]', "('", '{"', "{'"))]
+    assert reprs == [], reprs[:5]
 
 
 def test_denied_projects_and_quota_errors_do_not_break_the_scan(gcp):
