@@ -9,8 +9,14 @@ venv/
 .ruff_cache/
 *.md
 !RELEASE_NOTES.md
+!README.md
+!terraform/README.md
 LICENSE
 assets/
+terraform/.terraform/
+terraform/terraform.tfvars
+*.tfstate
+*.tfstate.*
 .DS_Store
 .env
 *.log

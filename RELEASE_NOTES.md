@@ -8,7 +8,117 @@ the test suite running inside the image, a zero-traffic canary revision scanned
 against a real organization, promotion, and a production scan compared fact for
 fact with the previous version's report.
 
-Versions are the image tags (`v5` … `v17.1`); the commit is the one that shipped.
+Versions are the image tags (`v5` … `v17.2`); the commit is the one that shipped.
+
+---
+
+## v17.2 — Deploy with Terraform
+
+The deployment, declared. `terraform/` creates what `tools/deploy.sh` creates —
+the 25 APIs, the service account with its project roles and its self-binding,
+the results bucket, the Cloud Tasks queue, the worker behind internal ingress
+and invoked by the account alone, the web service behind Identity-Aware Proxy
+with IAP's agent as its invoker and each operator let in, and on request the
+BigQuery export dataset, the Cloud Scheduler jobs and the organization-level
+roles of the prerequisites, custom role included — for teams whose
+infrastructure lives in Terraform. Terraform builds no image, and the build
+runs as the account Terraform creates, so a first deployment is two applies
+around one Cloud Build: the foundation, the image, the services; the outputs
+say what comes next at each point. A second description of a deployment rots
+unless something ties it to the first, so the test suite now reads both: the
+APIs, roles, variables, limits and scheduler job in `terraform/` must be the
+script's, the README's and the app's own.
+
+### Added
+
+- `terraform/`: `versions.tf` (Terraform ≥ 1.5, `hashicorp/google` ≥ 7 < 9,
+  locked at 8.10), `variables.tf` (the script's knobs with its defaults:
+  `project_id`, `region`, the names, `image` and `image_tag`, `operators`,
+  `extra_env`, `cost_allocation_labels`, `bigquery_dataset`, `schedules`,
+  `organization_id` and `advisory_role_id`, `programmatic_access_principals`,
+  `scan_max_concurrent_shards`, `task_max_attempts`, `deletion_protection`,
+  `force_destroy`; validated where the script validates), `main.tf` (the
+  foundation), `services.tf` (the services, IAP, access, schedules),
+  `outputs.tf` (`web_url`, `worker_url`, `service_account_email`,
+  `build_command`, `next_step`), `terraform.tfvars.example`, a short
+  `README.md`, the provider lock file.
+- Nothing is deployed without an image: with `image_tag` empty the first apply
+  creates the foundation and `build_command` prints the Cloud Build line (as
+  the new account, with the test suite); the second apply, with the tag,
+  creates the services.
+- The ownership contract: Terraform owns the services' image, variables,
+  resources, identity, ingress and IAP; `lifecycle.ignore_changes` leaves
+  traffic splits and tags to the operator, so the canary runbook of *Updating
+  an Existing Deployment* works on a Terraform-managed deployment and its
+  finalize step is `terraform apply` with the tested tag.
+- The Cloud Tasks queue is declared, with the limits the services expect
+  (`scan_max_concurrent_shards`, `task_max_attempts`, 30 s–10 min back-off),
+  and the services are told the same two numbers; the script still leaves the
+  queue to the services.
+- Safety by default: `deletion_protection` on the services, `force_destroy`
+  off for the bucket and the dataset, APIs never disabled on destroy, public
+  access prevention on the bucket, never `invoker_iam_disabled`.
+- With `organization_id`: the twelve read-only roles and the
+  `CloudGaugeAdvisoryViewer` custom role (importable if it already exists),
+  bound to the account — the prerequisites' manual step, done.
+
+### Changed
+
+- README: *Method 3: Deploy with Terraform* (the three commands, the variables,
+  the contract), the Project Structure, the prerequisites (Terraform can do the
+  organization step), *Updating an Existing Deployment* (step 7 on a
+  Terraform-managed deployment). `tools/deploy.sh`'s header names the
+  alternative.
+- `.gcloudignore` and both build contexts leave `terraform/` out; `.gitignore`
+  keeps providers, state and the real variables local.
+- `VERSION = "17.2"`; the report's footer names it. No check changed. Roadmap:
+  *Forecasts, budgets and spend* becomes v17.3.
+
+### Tests
+
+- `tests/test_terraform.py` (19 tests, no Terraform binary needed): the APIs
+  equal the script's and the README's; the organization roles and the custom
+  role (ID, title, description, permissions) equal README step 2; the project
+  roles equal the script's loop; every role Terraform grants is one the script
+  or the README grants, never Owner or Editor; the self-binding is Service
+  Account User only; the services get the required variables and only known
+  ones (`config.REQUIRED_ENV_VARS`, `helpers.APP_ENV_VARS`, the script's
+  `COMMON_ENV`); worker and web timeout, concurrency, memory, ingress and IAP
+  equal the script's flags; the deterministic worker URL; the lifecycle rule
+  and the image reference; nothing deployed without an image; the queue limits
+  equal `app.config`; the export's description and WRITER; the scheduler job's
+  URI, audience, time zone, deadline, retries and body; the folder as root and
+  as module (no provider block, every resource names its project); every
+  variable described, the example consistent with the declarations; the folder
+  documented and out of the build; `terraform fmt -check` when terraform is
+  installed. 926 tests.
+
+### Upgrade notes
+
+- Nothing changes for a deployment made with `tools/deploy.sh`: the image is
+  the same application. A new deployment can be made with Terraform; moving an
+  existing one under Terraform means importing its resources and is not
+  described.
+- Verified as a customer would do it: in a project that had never run
+  CloudGauge or Cloud Build, the folder called as a module with its own names
+  — first apply (51 resources: APIs, account, roles on the project and the
+  organization, custom role, bucket, queue, dataset), the `build_command`
+  output run as printed (the image built and tested as the new account),
+  second apply (7 resources: the two services, IAP's invoker, the operator,
+  programmatic access, one schedule). An organization scan through the new
+  web URL, its report, CSV, history page and BigQuery rows; the schedule run
+  once by hand and accepted by the worker (*Requested by schedule: …*). Then
+  the runbook's canary deploy on the Terraform-managed worker: the plan showed
+  the two variables and nothing about traffic, the apply put them back, the
+  plan after it was empty; `--to-latest` moved the traffic — the apply's
+  revision serves nothing until it does, which the README now says. Then
+  `terraform destroy`: 58 resources gone, and a listing of the project and the
+  organization afterwards found nothing (the custom role in its seven-day
+  deleted state, as Google keeps them). Two things changed on the way: the
+  web URL output names Cloud Run's deterministic URL rather than the service's
+  older hash URL, and the scheduler job declares no retry block — the API
+  returns none for the no-retries default, so a declared one was a diff on
+  every plan.
 
 ---
 
@@ -1653,6 +1763,7 @@ performance; modernization; enablement; roadmap and roadblocks).
 | **v16.1** | Multi-region snapshots pass, downloads behind the sign-in | *Shipped.* *Disk Snapshot Resilience* reads the kind of a snapshot's storage location: a multi-region (`asia`, `eu`, `us`) is geo-redundant and compliant, a single region is flagged — the first scan after the upgrade says *rule changed* instead of listing the snapshots as resolved. The status page's **Download CSV** is the web service's own route, streamed, so a report's downloads — like its pages — exist only for someone IAP let in; the service account no longer needs Token Creator on itself. |
 | **v17** | History, analytics and FinOps | *Shipped.* **BigQuery export** of every scan (`scans`, `findings`; free load jobs the header accounts for; a backfill for earlier scans), **scheduled scans** (Cloud Scheduler → the worker, as the service account, one scan per scope at a time), the **history page** (pillar scores over time, status flips per scan), the analytics guide (five queries, Looker Studio, Gemini Enterprise); **FinOps** — six more recommenders, cost-allocation labels, storage lifecycle, snapshot sprawl, commitments expiring, a savings total on the Scorecard; **capacity** — reservations and commitments, reservation coverage, stockout and quota signals, accelerator quotas with headroom; Cloud SQL extended support; IAM least privilege. No new organization-level role, nothing on billing accounts. |
 | **v17.1** | The SSRF chain: GKE and identity hardening | *Shipped.* **GKE Credential Exposure** (metadata server, node account, roles, scopes, *one SSRF from roles/editor*), **Service Account Impersonation** (who can become which service account, with reach), **GKE Control Plane Exposure**, **GKE Node Hardening**, **GKE Threat Detection**, **VPC Service Controls Coverage**; the nine `container.managed.*` guardrails in Organization Policies. No new role, no new API. |
-| **v17.2** | Forecasts, budgets and spend | **Spend-based commitment recommendations** from the organization's **Recommender export to BigQuery** (`RECOMMENDATIONS_EXPORT`; a dataset-level read, no billing-account IAM); **Capacity Planner** forecasts (the spike showed `forecasts:query` works per region for vCPUs by family and GPUs by type: `capacityplanner.googleapis.com`, `roles/capacityplanner.viewer`; reservation usage stays on the Compute API); **budget coverage** (projects and billing accounts without a budget); a **spend briefing** over the billing export; cost anomalies if an API exists. |
+| **v17.2** | Deploy with Terraform | *Shipped.* `terraform/` declares the deployment of `tools/deploy.sh` — the APIs, the account and its roles, the bucket, the queue, the worker and the web service behind IAP, the export, the schedules, and on request the organization-level roles — in two applies around one Cloud Build; the test suite holds it to the script, the README and the app. |
+| **v17.3** | Forecasts, budgets and spend | **Spend-based commitment recommendations** from the organization's **Recommender export to BigQuery** (`RECOMMENDATIONS_EXPORT`; a dataset-level read, no billing-account IAM); **Capacity Planner** forecasts (the spike showed `forecasts:query` works per region for vCPUs by family and GPUs by type: `capacityplanner.googleapis.com`, `roles/capacityplanner.viewer`; reservation usage stays on the Compute API); **budget coverage** (projects and billing accounts without a budget); a **spend briefing** over the billing export; cost anomalies if an API exists. |
 | **v18** | Footprint, support and detection | A **Platform Footprint** page (what runs where: services, regions, versions); **modernization indicators** (legacy runtimes, unmanaged VMs, missing release channels); a **Support cases** briefing; the deprecations recommender; the detective half of the SSRF chain over Cloud Logging — **GKE control-plane activity** (exec, webhooks, RBAC and DaemonSet changes by service accounts or external IPs), **service-account activity signals**, **edge protection** (external load balancers without Cloud Armor). |
 | Later | | VM Manager vulnerability summary, Security Command Center findings summary, SLO coverage, PDF export. |

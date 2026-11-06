@@ -1,0 +1,29 @@
+# terraform/terraform.tfvars.example — copy to terraform.tfvars and edit. Only project_id is required;
+# the other defaults are those of tools/deploy.sh.
+
+project_id = "my-project"
+region     = "asia-south1"
+
+# Who may sign in (user:, group: or domain:).
+operators = ["group:cloud-team@example.com", "user:alice@example.com"]
+
+# Set it to let Terraform grant the organization-level scan roles (needs an account that can grant roles
+# on the organization); leave it out to do README › Common Prerequisites, step 2, by hand.
+# organization_id = "123456789012"
+
+# Export every finished scan to BigQuery (README › History and analytics).
+# bigquery_dataset = "cloudgauge"
+
+# The label keys every project must carry (the Cost Allocation Labels check).
+# cost_allocation_labels = ["cost-center", "environment", "owner"]
+
+# Scheduled scans, cron in UTC.
+# schedules = {
+#   weekly-org = { scope = "organization", scope_id = "123456789012", cron = "30 0 * * 1" }
+# }
+
+# More settings for both services (README › Configuration Reference).
+# extra_env = { GEMINI_MODEL = "gemini-2.5-flash" }
+
+# The image: leave image_tag out for the first apply (foundation only), then set it to the tag you built.
+# image_tag = "abc1234"

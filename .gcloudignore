@@ -1,6 +1,6 @@
 # Files `gcloud builds submit` leaves out of the uploaded source (without this
-# file it would upload .venv/).
-.gcloudignore
+# file it would upload .venv/). The file itself is uploaded: the test image copies it
+# for tests/test_terraform.py.
 .venv/
 **/__pycache__/
 **/*.pyc
@@ -9,3 +9,7 @@
 .git/
 .DS_Store
 *.log
+terraform/.terraform/
+terraform/terraform.tfvars
+*.tfstate
+*.tfstate.*

@@ -3,6 +3,7 @@
 #
 # Two Cloud Run services from one image: the web service people open sits behind
 # Identity-Aware Proxy (IAP); the worker that runs the scans accepts Cloud Tasks only.
+# The same deployment, declared in Terraform: terraform/ (README › Method 3).
 #
 #   PROJECT_ID=my-project OPERATORS=group:cloud-team@example.com tools/deploy.sh
 #

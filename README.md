@@ -23,6 +23,7 @@ Final results are delivered as an interactive **HTML report** (an Overview, a on
   * [Common Prerequisites (Required for all methods)](#common-prerequisites-required-for-all-methods)
   * [Method 1: Deploy with `tools/deploy.sh` (Recommended)](#method-1-deploy-with-toolsdeploysh-recommended)
   * [Method 2: Deploy from the Console](#method-2-deploy-from-the-console)
+  * [Method 3: Deploy with Terraform](#method-3-deploy-with-terraform)
   * [Who can use it](#who-can-use-it)
   * [A public deployment (discouraged)](#a-public-deployment-discouraged)
 * [Configuration Reference](#configuration-reference)
@@ -69,7 +70,7 @@ CloudGauge scans an organization, a folder or a project across several key domai
 
 * **Idle Resources**: Finds idle Cloud SQL instances, VMs, persistent disks, unassociated IP addresses and, since v17, idle custom images.
 * **Rightsizing**: Identifies overprovisioned VMs and underutilized reservations and, since v17, overprovisioned Cloud SQL instances and Cloud Run services whose CPU allocation could change.
-* **Commitments** *(v17)*: **Resource-Based Commitment Recommendations** (Compute Engine committed use discounts, per project and region); **BigQuery Slot Commitments**; **Commitments Expiring** — active commitments that end within 90 days without renewing, with the `--auto-renew` line. Spend-based commitments live on billing accounts, whose access is centralised in most organizations: CloudGauge never asks for a billing-account role — v17.2 reads them from the organization's Recommender export to BigQuery instead.
+* **Commitments** *(v17)*: **Resource-Based Commitment Recommendations** (Compute Engine committed use discounts, per project and region); **BigQuery Slot Commitments**; **Commitments Expiring** — active commitments that end within 90 days without renewing, with the `--auto-renew` line. Spend-based commitments live on billing accounts, whose access is centralised in most organizations: CloudGauge never asks for a billing-account role — v17.3 reads them from the organization's Recommender export to BigQuery instead.
 * **Cost Allocation Labels** *(v17)*: The projects missing one of the label keys named in `COST_ALLOCATION_LABELS` (`cost-center,environment,owner`, say), with the `gcloud projects update --update-labels` line. Unset, the check is *Informational* and says how to configure it — it never moves the Efficiency score until it is.
 * **Cloud Storage Lifecycle** *(v17)*: Buckets with neither lifecycle rules nor Autoclass, whose objects never move to a colder class or expire (*Investigation Recommended*), plus the **Cloud Storage Soft Delete** recommender.
 * **Snapshot Sprawl** *(v17)*: Disk snapshots older than `SNAPSHOT_MAX_AGE_DAYS` (90) or whose source disk no longer exists, under the scanned scope, with their age and size.
@@ -323,6 +324,7 @@ tools/demo_gif.py        # Records the README's demo GIF from a scan on a deploy
 tools/deploy.sh          # Deploys or updates the two services (worker, web behind IAP), the export dataset and the schedules, and grants access; see Deployment
 tools/iap_token.py       # A token that passes IAP, for curl, scripts and demo_gif.py (service-account signed JWT)
 tools/backfill_export.py # Loads the scans made before the BigQuery export existed, from their summaries and CSVs (v17)
+terraform/               # The same deployment declared in Terraform (v17.2): the two services, IAP, the account and its roles, the bucket, the queue, the export, the schedules; see Method 3
 Dockerfile               # Production image
 Dockerfile.test          # Runs the test suite inside the production image
 cloudbuild.yaml          # Cloud Build: build -> test -> push
@@ -343,7 +345,7 @@ CloudGauge runs as **two Cloud Run services from one image**, in a project of yo
 
 No load balancer, domain, certificate or OAuth client is involved: IAP on Cloud Run needs the `iap.googleapis.com` API and the `--iap` flag. A project that belongs to an organization needs no console step; gcloud warns that a project without one may need a one-time setup in the console the first time IAP is enabled.
 
-Do the **Common Prerequisites** once, then deploy with **Method 1** (the script; recommended, and also the way to update) or **Method 2** (the console), and grant access: [Who can use it](#who-can-use-it). The single public service that releases before v16 deployed is still possible: [A public deployment (discouraged)](#a-public-deployment-discouraged).
+Do the **Common Prerequisites** once, then deploy with **Method 1** (the script; recommended, and also the way to update), **Method 2** (the console) or **Method 3** (Terraform, for teams that keep their infrastructure declared; it can do the organization step of the prerequisites too), and grant access: [Who can use it](#who-can-use-it). The single public service that releases before v16 deployed is still possible: [A public deployment (discouraged)](#a-public-deployment-discouraged).
 
 ### **Common Prerequisites (Required for all methods)** 
 
@@ -389,7 +391,7 @@ Do the **Common Prerequisites** once, then deploy with **Method 1** (the script;
 
 2. **Create Service Account & Grant Permissions**:  
    * This SA is the identity of both services: it scans the organization, creates the tasks and invokes the worker.
-   * `tools/deploy.sh` creates it and grants the **project-level** roles (2 and 3 below) if they are missing. The **organization-level** roles (1 and 1b) are the one manual step, for an account that can grant roles on the organization. **v17 adds no organization-level role**: the new checks read through roles the account already holds — `roles/iam.securityReviewer` lists every Recommender (the commitment, IAM and quota recommenders included), `roles/compute.networkViewer` the reservations, commitments and quotas, `roles/logging.viewer` the capacity signals, `roles/cloudasset.viewer` the snapshots, disks and Cloud SQL versions. The BigQuery export, when configured, adds two **project-level** grants in the project CloudGauge runs in (step 2c), nothing on the organization. Nothing on any **billing account** either: billing access is centralised in most organizations, so CloudGauge does not read billing accounts; spend-based commitments arrive in v17.2 through the organization's Recommender export to BigQuery. **v17.1 adds no role either**: the cluster listing and the IAM searches go through `roles/cloudasset.viewer`, the access policies and perimeters and the custom roles through `roles/iam.securityReviewer`, the threat-detection settings through `roles/securitycenter.settingsViewer`. It enables one API in the project CloudGauge runs in, `accesscontextmanager.googleapis.com`, for read-only calls.
+   * `tools/deploy.sh` creates it and grants the **project-level** roles (2 and 3 below) if they are missing. The **organization-level** roles (1 and 1b) are the one manual step, for an account that can grant roles on the organization — unless you deploy with Terraform and set `organization_id` ([Method 3](#method-3-deploy-with-terraform)), which grants them. **v17 adds no organization-level role**: the new checks read through roles the account already holds — `roles/iam.securityReviewer` lists every Recommender (the commitment, IAM and quota recommenders included), `roles/compute.networkViewer` the reservations, commitments and quotas, `roles/logging.viewer` the capacity signals, `roles/cloudasset.viewer` the snapshots, disks and Cloud SQL versions. The BigQuery export, when configured, adds two **project-level** grants in the project CloudGauge runs in (step 2c), nothing on the organization. Nothing on any **billing account** either: billing access is centralised in most organizations, so CloudGauge does not read billing accounts; spend-based commitments arrive in v17.3 through the organization's Recommender export to BigQuery. **v17.1 adds no role either**: the cluster listing and the IAM searches go through `roles/cloudasset.viewer`, the access policies and perimeters and the custom roles through `roles/iam.securityReviewer`, the threat-detection settings through `roles/securitycenter.settingsViewer`. It enables one API in the project CloudGauge runs in, `accesscontextmanager.googleapis.com`, for read-only calls.
 ```
    # Set your Organization ID
    export ORG_ID="<your-org-id>"
@@ -580,6 +582,38 @@ Then grant access ([Who can use it](#who-can-use-it); in the console, **Security
 
 ---
 
+### **Method 3: Deploy with Terraform**
+
+The deployment of Method 1, declared in [`terraform/`](terraform/) *(v17.2)*: the 25 APIs, `cloudgauge-sa` with its project roles and its self-binding, the bucket, the Cloud Tasks queue (with the limits the services expect), the worker (internal ingress, invoked by the account only), the web service (IAP enabled, IAP's service agent as invoker, each operator granted `roles/iap.httpsResourceAccessor`), and — when asked — the BigQuery export dataset, the Cloud Scheduler jobs and the organization-level roles of the prerequisites, custom role included. Terraform builds no image, and the build runs as the account Terraform creates, so a first deployment is two applies around one build:
+
+```
+git clone https://github.com/GoogleCloudPlatform/CloudGauge
+cd CloudGauge/terraform
+cp terraform.tfvars.example terraform.tfvars        # project_id, operators, …
+terraform init
+terraform apply                                      # 1. the foundation: APIs, account, roles, bucket, queue, dataset
+cd .. && $(terraform -chdir=terraform output -raw build_command)   # 2. the image, built and tested by Cloud Build as the account
+terraform -chdir=terraform apply -var image_tag=$(git rev-parse --short HEAD)   # 3. the services, IAP, access, schedules
+```
+
+`terraform output next_step` says what comes next at each point, and `web_url` is the page to open. Credentials are Application Default Credentials (`gcloud auth application-default login`) of an account that can create the resources in the project — and grant roles on the organization if `organization_id` is set. Put `image_tag` in `terraform.tfvars` once it is known; a release is the same build command followed by `terraform apply` with the new tag.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `project_id` | *required* | The project CloudGauge runs in. |
+| `region`, `service_name`, `worker_service_name`, `service_account_name`, `bucket_name`, `queue_name`, `image` | as in Method 1 | The names. `image` is the repository without a tag. |
+| `image_tag` | – | The tag to deploy. Empty: the foundation only (first apply). |
+| `operators` | `[]` | Who may sign in: `user:`, `group:`, `domain:` principals. |
+| `organization_id` | – | Set it to grant the organization-level roles (prerequisites step 2, 1 and 1b) and create the `CloudGaugeAdvisoryViewer` role (`advisory_role_id`). If that role already exists, `terraform import` it or choose another ID. |
+| `bigquery_dataset`, `cost_allocation_labels`, `schedules`, `extra_env` | – | As in Method 1; `schedules` is a map of name → `{ scope, scope_id, cron }`, cron in UTC. |
+| `scan_max_concurrent_shards`, `task_max_attempts` | `25`, `3` | The queue's limits and the services' `SCAN_MAX_CONCURRENT_SHARDS` / `TASK_MAX_ATTEMPTS`, kept equal. |
+| `programmatic_access_principals` | `[]` | What `PROGRAMMATIC_ACCESS=1` does: the account through IAP, and these principals allowed to mint its tokens (`tools/iap_token.py`). |
+| `deletion_protection`, `force_destroy` | `true`, `false` | A `terraform destroy` refuses the services and keeps the bucket and dataset until both are flipped. |
+
+**Terraform and the runbook.** Terraform owns the services' shape — image, variables, resources, identity, ingress, IAP — and ignores traffic splits and tags, so [Updating an Existing Deployment](#updating-an-existing-deployment-zero-downtime) works on a Terraform-managed deployment too: its finalize step is `terraform apply` with the tested tag (which also puts `WORKER_URL` / `WORKER_AUDIENCE` back), then `update-traffic --to-latest --remove-tags canary` — not optional: a `--no-traffic` deploy pins the traffic to the revision that was serving, and since Terraform never touches traffic, the revision its apply creates serves nothing until `--to-latest`. A `terraform plan` after a canary deploy shows those two variables (and the image, if it changed), never the traffic. Use `tools/deploy.sh` or Terraform for a deployment, not both. Cloud Tasks reserves a deleted queue's name for 3 days: a redeploy within that time needs another `queue_name`. The folder has no provider block and names its project everywhere, so it can also be called as a module from your own configuration (`source = "github.com/GoogleCloudPlatform/CloudGauge//terraform?ref=<commit>"`). More in [`terraform/README.md`](terraform/README.md).
+
+---
+
 ### **Who can use it**
 
 Access to the pages is the `roles/iap.httpsResourceAccessor` binding on the web service — for a person, a Google group or a whole domain:
@@ -736,7 +770,7 @@ gcloud run services update-traffic ${SERVICE} --region ${REGION} --to-revisions 
 * `WORKER_URL`: the web canary must send its scans to the worker *canary*, and the worker canary must send its own shard, aggregation and sweep tasks to itself, not to the revision serving the worker's main URL.
 * `WORKER_AUDIENCE`: by default a task's OIDC token is issued for the task URL, which is now the tag URL. Cloud Run rejects that with HTTP 401, and the scan never starts. A token issued for the worker's main URL is accepted on any of its tag URLs.
 
-A canary does not touch the pages' access: the IAP bindings belong to the service, so the same people can open the tag URL.
+A canary does not touch the pages' access: the IAP bindings belong to the service, so the same people can open the tag URL. On a deployment made with Terraform ([Method 3](#method-3-deploy-with-terraform)), step 7 is `terraform apply -var image_tag=${TAG}` instead of `tools/deploy.sh`, and the `--to-latest` / `--remove-tags` loop that follows it is what moves the traffic to the revision Terraform created; the rest is the same.
 
 ## **How to Use** 
 

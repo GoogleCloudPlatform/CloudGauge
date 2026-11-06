@@ -16,3 +16,10 @@ htmlcov/
 # Local configuration
 .env
 *.log
+
+# Terraform (terraform/): providers, state and the real variables stay local; the lock file is committed
+.terraform/
+*.tfstate
+*.tfstate.*
+terraform.tfvars
+*.auto.tfvars

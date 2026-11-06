@@ -31,6 +31,7 @@ cloudbuild.yaml
 *.md
 LICENSE
 assets/
+terraform/
 
 # Editors, OS, local configuration
 .DS_Store
