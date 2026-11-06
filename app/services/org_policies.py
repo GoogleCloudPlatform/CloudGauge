@@ -18,7 +18,6 @@ is split into ``fetch_best_practices`` (the download, which now has a timeout)
 and the pure ``parse_best_practices_csv``.
 """
 import csv
-import logging
 import traceback
 
 
@@ -27,10 +26,18 @@ from app.services import gcp
 from app.utils import call_api_with_backoff, find_col_index
 
 
+BOOLEAN, LIST = "Boolean", "List"
+
+
 def parse_best_practices_csv(csv_text):
     """
-    Parses the best-practices CSV into boolean organization policies grouped by category.
+    Parses the best-practices CSV into organization policies grouped by category.
     This is the parsing half of the legacy ``get_best_practices_from_gcs``; it does no I/O.
+
+    v18: each policy carries its ``type`` — ``Boolean`` or ``List``, from the CSV's *Type*
+    column (``Boolean`` when the column is missing or blank). The report evaluates the two
+    kinds differently (``app.reporting.context.evaluate_org_policies``); before v18 every
+    row was evaluated as boolean, which 62 list constraints could never satisfy.
 
     Args:
         csv_text (str): The contents of the CSV file.
@@ -47,6 +54,7 @@ def parse_best_practices_csv(csv_text):
     id_col = find_col_index(header_map, ['id', 'constraint'])
     name_col = find_col_index(header_map, ['display name', 'policy', 'policy name', 'name', 'policy display name', 'displayname'])
     rec_col = find_col_index(header_map, ['recommended to set *'])
+    type_col = header_map.get('type')
 
     best_practices_by_category = {}
     current_category = "Uncategorized"
@@ -75,15 +83,17 @@ def parse_best_practices_csv(csv_text):
                 if current_category not in best_practices_by_category: 
                     best_practices_by_category[current_category] = []
                 
+                kind = row[type_col].strip().capitalize() if type_col is not None and len(row) > type_col else ""
                 best_practices_by_category[current_category].append({
                     "policyId": row[id_col].strip(), 
                     "displayName": row[name_col].strip(), 
-                    "expectedValue": expected_value
+                    "expectedValue": expected_value,
+                    "type": LIST if kind == LIST else BOOLEAN,
                 })
                 policies_added += 1
             
 
-    print(f"✅ CSV parsing complete. Loaded {policies_added} boolean policies into the checker.")
+    print(f"✅ CSV parsing complete. Loaded {policies_added} policies into the checker.")
     return best_practices_by_category
 
 
@@ -141,18 +151,21 @@ def get_effective_org_policies(scope, scope_id):
         # --- END OF MODIFICATION ---
 
         def list_policies_for_resource(resource_str):
-            """Helper to fetch and format policies for a given resource string."""
-            policies = {}
-            try:
-                api_call = lambda: crm_service.organizations().listOrgPolicies(resource=resource_str, body={}).execute() if resource_str.startswith('organizations/') else \
-                                 crm_service.folders().listOrgPolicies(resource=resource_str, body={}).execute() if resource_str.startswith('folders/') else \
-                                 crm_service.projects().listOrgPolicies(resource=resource_str, body={}).execute()
-                response = call_api_with_backoff(api_call, context_message=f"listOrgPolicies for {resource_str}")
-                for policy in response.get('policies', []):
-                    if full_path := policy.get('constraint'):
-                        policies[full_path.split('/')[-1]] = policy
-            except Exception as e:
-                logging.warning(f"Could not list policies for {resource_str}: {e}")
+            """The policies set on one resource, keyed by constraint ID.
+
+            v18: a level that cannot be listed (a 403, say) stops the calculation with an error — every
+            policy would otherwise read as *Not Configured* with nothing in the report to say why.
+            """
+            policies, errors = {}, []
+            api_call = lambda: crm_service.organizations().listOrgPolicies(resource=resource_str, body={}).execute() if resource_str.startswith('organizations/') else \
+                             crm_service.folders().listOrgPolicies(resource=resource_str, body={}).execute() if resource_str.startswith('folders/') else \
+                             crm_service.projects().listOrgPolicies(resource=resource_str, body={}).execute()
+            response = call_api_with_backoff(api_call, context_message=f"listOrgPolicies for {resource_str}", on_error=errors.append)
+            if errors:
+                raise RuntimeError(f"could not list the policies set on {resource_str}: {errors[0]}")
+            for policy in (response or {}).get('policies', []):
+                if full_path := policy.get('constraint'):
+                    policies[full_path.split('/')[-1]] = policy
             return policies
 
         # The walk is top-down - organization, folders, then the resource itself - and a

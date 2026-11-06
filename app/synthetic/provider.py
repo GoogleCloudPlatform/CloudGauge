@@ -393,16 +393,26 @@ class SyntheticGcp:
     def _h_compute_instances_aggregatedList(self, kw, project_id):
         self.call("compute", "instances.aggregatedList", project_id=project_id, style="http")
         profile, items = self.world.project(project_id), {}
-        for vm in profile.vms:
+        running_only = 'RUNNING' in str(kw.get("filter", ""))
+        for index, vm in enumerate(profile.vms):
+            stopped = vm.name in profile.stopped_vms  # v18: a stopped VM keeps its access config, not its ephemeral address
+            if stopped and running_only:
+                continue
+            access = [{"name": "External NAT", "type": "ONE_TO_ONE_NAT", **({} if stopped else {"natIP": "203.0.113.10"})}] if vm.external_ip else None
             instance = {
-                "name": vm.name, "status": "RUNNING",
+                "name": vm.name, "id": str(self._instance_id(profile, index)), "status": "TERMINATED" if stopped else "RUNNING",
                 "zone": f"https://www.googleapis.com/compute/v1/projects/{project_id}/zones/{vm.zone}",
                 "machineType": MACHINE_TYPE_URL.format(project=project_id, zone=vm.zone, machine_type=vm.machine_type),
-                "networkInterfaces": [{"network": "vpc-main", **({"accessConfigs": [{"natIP": "203.0.113.10"}]} if vm.external_ip else {})}],
-                "labels": {}, "metadata": {"items": ([{"key": "created-by", "value": f"mig-{vm.zone}"}] if vm.in_mig else [])},
+                "networkInterfaces": [{"name": "nic0", "network": "vpc-main", **({"accessConfigs": access} if access else {})}],
+                "labels": {}, "metadata": {"items": ([{"key": "created-by", "value": f"projects/{project_id}/zones/{vm.zone}/instanceGroupManagers/mig-{vm.zone}"}] if vm.in_mig else [])},
             }
             items.setdefault(f"zones/{vm.zone}", {"instances": []})["instances"].append(instance)
         return {"items": items}
+
+    @staticmethod
+    def _instance_id(profile, index):
+        """A VM's numeric ID, as Compute Engine and the OS inventory name it."""
+        return 7000000000000000000 + int(profile.project_number) * 1000 + index
 
     # --- v17: reservations, commitments and the capacity log ---
 
@@ -471,9 +481,14 @@ class SyntheticGcp:
     def _h_compute_firewalls_list(self, kw, project_id):
         self.call("compute", "firewalls.list", project_id=project_id, style="http")
         profile = self.world.project(project_id)
-        return {"items": [{"name": name, "network": f"projects/{project_id}/global/networks/vpc-main",
-                           "sourceRanges": ["0.0.0.0/0"] if open_rule else ["10.0.0.0/8"], "disabled": disabled}
-                          for name, open_rule, disabled in profile.firewall_rules]}
+        rules = [{"name": name, "network": f"projects/{project_id}/global/networks/vpc-main", "direction": "INGRESS", "priority": 1000,
+                  "sourceRanges": ["0.0.0.0/0"] if open_rule else ["10.0.0.0/8"], "disabled": disabled,
+                  "allowed": [{"IPProtocol": "tcp", "ports": ["22"]}] if open_rule else [{"IPProtocol": "tcp", "ports": ["8080"]}]}
+                 for name, open_rule, disabled in profile.firewall_rules]
+        # v18: the hardening pattern every network should have — a deny-all from the internet — is never a finding.
+        rules.append({"name": "deny-all-ingress", "network": f"projects/{project_id}/global/networks/vpc-main", "direction": "INGRESS", "priority": 65000,
+                      "sourceRanges": ["0.0.0.0/0"], "disabled": False, "denied": [{"IPProtocol": "all"}]})
+        return {"items": rules}
 
     def _h_compute_networks_list(self, kw, project_id):
         self.call("compute", "networks.list", project_id=project_id, style="http")
@@ -482,15 +497,21 @@ class SyntheticGcp:
 
     def _h_compute_regions_list(self, kw, project_id):
         self.call("compute", "regions.list", project_id=project_id, style="http")
-        return {"items": [{"name": region} for region in REGIONS]}
+        profile = self.world.project(project_id)
+        return {"items": [{"name": region, "quotas": self._region_quotas(profile, region)} for region in REGIONS]}
+
+    @staticmethod
+    def _region_quotas(profile, region):
+        hot = {metric: (usage, limit) for r, metric, usage, limit in profile.hot_quotas if r == region}
+        quotas = [{"metric": m, "usage": float(hot.get(m, (3, 100))[0]), "limit": float(hot.get(m, (3, 100))[1])} for m in QUOTA_METRICS]
+        quotas += [{"metric": metric, "usage": float(usage), "limit": float(limit)} for r, metric, usage, limit in profile.gpu_quota if r == region]
+        quotas.append({"metric": "COMMITTED_CPUS", "usage": 64.0, "limit": 64.0})  # v18: consumed by the commitments, never a row
+        return quotas
 
     def _h_compute_regions_get(self, kw, project_id):
         self.call("compute", "regions.get", project_id=project_id, style="http")
         profile, region = self.world.project(project_id), kw["region"]
-        hot = {metric: (usage, limit) for r, metric, usage, limit in profile.hot_quotas if r == region}
-        quotas = [{"metric": m, "usage": float(hot.get(m, (3, 100))[0]), "limit": float(hot.get(m, (3, 100))[1])} for m in QUOTA_METRICS]
-        quotas += [{"metric": metric, "usage": float(usage), "limit": float(limit)} for r, metric, usage, limit in profile.gpu_quota if r == region]
-        return {"name": region, "quotas": quotas}
+        return {"name": region, "quotas": self._region_quotas(profile, region)}
 
     def _h_compute_subnetworks_list(self, kw, project_id):
         self.call("compute", "subnetworks.list", project_id=project_id, style="http")
@@ -509,14 +530,21 @@ class SyntheticGcp:
         profile, email = self.world.project(project_id), kw["name"].rsplit("/", 1)[-1]
         for sa in profile.service_accounts:
             if sa.email == email:
-                return {"keys": [{"name": f"{kw['name']}/keys/{i}", "validAfterTime": _iso(age), "keyType": "USER_MANAGED"}
+                oldest = max(sa.key_ages_days) if sa.key_ages_days else None
+                return {"keys": [{"name": f"{kw['name']}/keys/{i}", "validAfterTime": _iso(age), "validBeforeTime": "9999-12-31T23:59:59Z",
+                                  "keyType": "USER_MANAGED", "keyOrigin": "GOOGLE_PROVIDED",
+                                  **({"disabled": True} if (age == oldest and email in profile.disabled_key_accounts) else {})}
                                  for i, age in enumerate(sa.key_ages_days)]}
         return {"keys": []}
 
     def _h_sqladmin_instances_list(self, kw, project_id):
         self.call("sqladmin", "instances.list", project_id=project_id, style="http")
         profile = self.world.project(project_id)
-        return {"items": [{"name": sql.name, "settings": {"ipConfiguration": {"ipv4Enabled": sql.public_ip, "requireSsl": sql.require_ssl}}}
+        return {"items": [{"name": sql.name, "databaseVersion": sql.database_version, "instanceType": "CLOUD_SQL_INSTANCE",
+                           "settings": {"ipConfiguration": {
+                               "ipv4Enabled": sql.public_ip, "requireSsl": False,
+                               "sslMode": "ENCRYPTED_ONLY" if sql.require_ssl else "ALLOW_UNENCRYPTED_AND_ENCRYPTED",  # v18: the field that decides
+                               "authorizedNetworks": [{"value": "0.0.0.0/0", "name": "everywhere"}] if sql.name in profile.sql_open_networks else []}}}
                           for sql in profile.sql_instances]}
 
     def _h_container_projects_locations_clusters_list(self, kw, project_id):
@@ -545,7 +573,8 @@ class SyntheticGcp:
         project_id = _project_of(parent)
         self.call("recommender", "recommendations.list(rest)", project_id=project_id, style="http")
         profile, location = self.world.project(project_id), parent.split("/locations/")[1].split("/")[0]
-        recos = [{"name": f"{parent}/recommendations/{i}", "description": text}
+        recos = [{"name": f"{parent}/recommendations/{i}", "description": text, "stateInfo": {"state": "ACTIVE"},
+                  "targetResources": [f"//container.googleapis.com/projects/{project_id}/locations/{location}/clusters/{cluster.name}"]}
                  for cluster in profile.gke_clusters if cluster.location == location
                  for i, text in enumerate(cluster.recommendations)]
         return {"recommendations": recos}
@@ -553,7 +582,12 @@ class SyntheticGcp:
     def _h_monitoring_projects_alertPolicies_list(self, kw, project_id):
         self.call("monitoring", "alertPolicies.list", project_id=project_id, style="http")
         profile = self.world.project(project_id)
-        return {"alertPolicies": [{"displayName": f"alert-{i}", "conditions": [{"conditionThreshold": {"filter": f'metric.type="{f}"'}}]}
+        # v18: filters as Cloud Monitoring writes them (the legacy world's filters contained the check's own needles).
+        filters = {"serviceruntime.googleapis.com/quota": 'metric.type="serviceruntime.googleapis.com/quota/allocation/usage" AND resource.type="consumer_quota"',
+                   "cloud_sql": 'metric.type="cloudsql.googleapis.com/database/cpu/utilization" AND resource.type="cloudsql_database"',
+                   "gke_cluster": 'metric.type="kubernetes.io/container/restart_count" AND resource.type="k8s_container"'}
+        return {"alertPolicies": [{"displayName": f"alert-{i}", "enabled": True,
+                                   "conditions": [{"conditionThreshold": {"filter": filters.get(f, f'metric.type="{f}"')}}]}
                                   for i, f in enumerate(profile.alert_filters)]}
 
     def _h_logging_organizations_sinks_list(self, kw, project_id):
@@ -594,7 +628,21 @@ class SyntheticGcp:
 
     def _h_securitycenter_organizations_getOrganizationSettings(self, kw, project_id):
         self.call("securitycenter", "getOrganizationSettings", style="http")
-        return {"name": kw["name"], "tier": "STANDARD"}
+        return {"name": kw["name"], "enableAssetDiscovery": False, "assetDiscoveryConfig": {}}  # no tier here (v18)
+
+    def _h_securitycenter_organizations_getSubscription(self, kw, project_id):
+        """``v1beta2 organizations.getSubscription``: the organization's tier (v18)."""
+        self.call("securitycenter", "getSubscription", style="http")
+        return {"name": kw["name"], "tier": "STANDARD", "details": {"type": "STANDARD"}}
+
+    def _h_cloudresourcemanager_organizations_get(self, kw, project_id):
+        self.call("cloudresourcemanager", "organizations.get", style="http")
+        return {"name": kw["name"], "displayName": "example.com", "lifecycleState": "ACTIVE"}
+
+    def _h_cloudresourcemanager_projects_getEffectiveOrgPolicy(self, kw, project_id):
+        """The effective policy of one constraint on a project (v18: storage.publicAccessPrevention, read for public buckets)."""
+        self.call("cloudresourcemanager", "projects.getEffectiveOrgPolicy", project_id=project_id, style="http")
+        return {"constraint": (kw.get("body") or {}).get("constraint", ""), "booleanPolicy": {"enforced": False}}
 
     def _h_essentialcontacts_organizations_contacts_list(self, kw, project_id):
         self.call("essentialcontacts", "contacts.list", style="http")
@@ -806,7 +854,8 @@ class SyntheticGcp:
 
     # --- Recommender (gRPC) ---
 
-    def list_recommendations(self, parent):
+    def list_recommendations(self, parent=None, filter=None, request=None):
+        parent = parent or (request or {}).get("parent")
         project_id = _project_of(parent)
         self.call("recommender", "recommendations.list", project_id=project_id)
         recommender_id = parent.rsplit("/recommenders/", 1)[-1]
@@ -816,8 +865,9 @@ class SyntheticGcp:
             if recommender_id != UNATTENDED_RECOMMENDER:
                 return []
             return [recommender_v1.Recommendation({
-                "name": f"{parent}/recommendations/{i}", "recommender_subtype": "CLEANUP_PROJECT",
+                "name": f"{parent}/recommendations/{i}", "recommender_subtype": "CLEANUP_PROJECT", "state_info": {"state": "ACTIVE"},
                 "description": f"Project `{pid}` has been unattended for 90 days. Consider cleaning it up.",
+                "target_resources": [f"//cloudresourcemanager.googleapis.com/projects/{pid}"],
                 "content": {"operation_groups": [{"operations": [{"action": "remove", "resource": f"//cloudresourcemanager.googleapis.com/projects/{pid}"}]}]},
             }) for i, pid in enumerate(self.world.unattended_project_ids())]
         profile = self.world.project(project_id)
@@ -863,7 +913,8 @@ class SyntheticGcp:
                 "description": description, "content": {"operation_groups": [{"operations": operations}]}}))
         return recommendations
 
-    def list_insights(self, parent):
+    def list_insights(self, parent=None, filter=None, request=None):
+        parent = parent or (request or {}).get("parent")
         project_id = _project_of(parent)
         self.call("recommender", "insights.list", project_id=project_id)
         insight_type = parent.rsplit("/insightTypes/", 1)[-1]
@@ -881,19 +932,35 @@ class SyntheticGcp:
             if kind == "ip":
                 insights.append(recommender_v1.Insight({
                     "name": f"{parent}/insights/{i}", "description": f"Subnet range {payload['prefix']} is {payload['ratio']:.0%} allocated.",
+                    "severity": "HIGH" if payload["ratio"] >= 0.9 else "MEDIUM", "state_info": {"state": "ACTIVE"},
                     "target_resources": [f"//compute.googleapis.com/{payload['subnet']}"],
                     "content": {"ipUtilizationSummaryInfo": [{"networkStats": [{"networkUri": payload["network"], "subnetStats": [
                         {"subnetUri": payload["subnet"], "subnetRangeStats": [{"subnetRangePrefix": payload["prefix"], "allocationRatio": payload["ratio"]}]}]}]}]}}))
             elif kind == "sa":
                 insights.append(recommender_v1.Insight({
-                    "name": f"{parent}/insights/{i}", "description": "GKE node service account has the Editor role.",
+                    "name": f"{parent}/insights/{i}", "description": "GKE node service account has the Editor role.", "severity": "MEDIUM", "state_info": {"state": "ACTIVE"},
                     "target_resources": [f"//container.googleapis.com/{payload['cluster_uri']}"],
                     "content": {"nodeServiceAccountInsight": {"clusterUri": payload["cluster_uri"], "serviceAccount": "default"}}}))
             else:
-                insights.append(recommender_v1.Insight({"name": f"{parent}/insights/{i}", "description": payload["description"]}))
+                insights.append(recommender_v1.Insight({"name": f"{parent}/insights/{i}", "description": payload["description"], "severity": "LOW", "state_info": {"state": "ACTIVE"}}))
         return insights
 
     # --- OS Config ---
+
+    def list_inventories(self, request):
+        """``OsConfigZonalServiceClient.list_inventories`` (v18): the inventories of one zone, named by instance ID; FailedPrecondition
+        when the project has OS inventory management off."""
+        parent = request["parent"]
+        if not parent.endswith("/instances/-"):  # the API's pattern: projects/{project}/locations/{zone}/instances/-
+            raise core_exceptions.InvalidArgument("Violation in ListInventoriesRequest.parent: The 'parent' field does not match the expected pattern.")
+        project_id, zone = _project_of(parent), parent.rsplit("/locations/", 1)[-1].split("/", 1)[0]
+        self.call("osconfig", "listInventories", project_id=project_id)
+        profile = self.world.project(project_id)
+        if profile.osconfig_disabled:
+            raise core_exceptions.FailedPrecondition("OS inventory management has been disabled in this project.")
+        return [SimpleNamespace(name=f"projects/{profile.project_number}/locations/{zone}/instances/{self._instance_id(profile, index)}/inventory",
+                                os_info=SimpleNamespace(hostname=vm.name))
+                for index, vm in enumerate(profile.vms) if vm.zone == zone and vm.os_reporting and vm.name not in profile.stopped_vms]
 
     def get_inventory(self, request):
         name = request["name"]
@@ -981,11 +1048,11 @@ class _RecommenderStub:
     def __init__(self, provider):
         self._p = provider
 
-    def list_recommendations(self, parent):
-        return self._p.list_recommendations(parent)
+    def list_recommendations(self, parent=None, filter=None, request=None):
+        return self._p.list_recommendations(parent, filter=filter, request=request)
 
-    def list_insights(self, parent):
-        return self._p.list_insights(parent)
+    def list_insights(self, parent=None, filter=None, request=None):
+        return self._p.list_insights(parent, filter=filter, request=request)
 
 
 class _OsConfigStub:
@@ -994,6 +1061,9 @@ class _OsConfigStub:
 
     def get_inventory(self, request):
         return self._p.get_inventory(request)
+
+    def list_inventories(self, request):
+        return self._p.list_inventories(request)
 
 
 class _StorageStub:
@@ -1009,7 +1079,8 @@ class _BucketStub:
         self._p, self._project, self._bucket = provider, project_id, bucket
         self.name = bucket.name
         self.versioning_enabled = bucket.versioning
-        self.iam_configuration = SimpleNamespace(uniform_bucket_level_access_enabled=bucket.ubla)
+        self.iam_configuration = SimpleNamespace(uniform_bucket_level_access_enabled=bucket.ubla,
+                                                 public_access_prevention="enforced" if bucket.name in provider.world.project(project_id).pap_enforced_buckets else "inherited")
         # v17: lifecycle rules and Autoclass, as google-cloud-storage exposes them
         self.lifecycle_rules = [{"action": {"type": "SetStorageClass", "storageClass": "NEARLINE"}, "condition": {"age": 30}}] if bucket.lifecycle else []
         self.autoclass_enabled = bucket.autoclass

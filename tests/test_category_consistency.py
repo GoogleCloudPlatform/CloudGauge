@@ -24,7 +24,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.checks import capacity, categories, cost, gke_security, network, registry, reliability, runner
+from app.checks import capacity, categories, cost, gke_security, network, registry, reliability, runner, security
 from app.checks.categories import CATEGORY_MAP, categorize_findings
 
 CHECKS_DIR = pathlib.Path(categories.__file__).parent
@@ -36,6 +36,7 @@ DYNAMIC_NAMES = {
     ('gke_security.py', 'check'): gke_security.GKE_SECURITY_CHECKS,  # v17.1: four findings from one listing
     ('network.py', 'check_name'): network.NETWORK_INSIGHT_TYPES,
     ('reliability.py', 'check'): reliability.RESILIENCE_CHECKS,  # v15.6: a verdict or an Error per name
+    ('security.py', 'check_name'): security.REVALIDATED_CHECKS,  # v18: the revalidated legacy checks share one writer
     ('runner.py', 'check_name'): None,  # the registry display names (test_registry_names_...)
     ('not_checked.py', 'NOT_CHECKED'): None,  # carries its own "Category" (test_not_checked_record_...)
 }

@@ -82,8 +82,11 @@ CATEGORY_MAP = {
     # (Resilience of Critical Assets reported its failures under "Resilience Asset
     # Checks" until v15.6; it now writes an Error row under each of its six names.)
     "Organization Policies": "Security & Identity",  # policy data couldn't be fetched
+    # Retired in v18 (the checks write their errors under their own names now); kept for the scan
+    # summaries older releases stored, which the Changes card still reads.
     "Organization IAM Policy Check": "Security & Identity",
     "Log Sink Check": "Operational Excellence & Observability",
+    "Idle Load Balancers": "Cost Optimization",  # v18: the recommender never existed; "No longer checked" in the Changes card
 
     # B2: display names from app.checks.registry. When a check raises, the runner
     # records the error under this name. Names already mapped above aren't repeated;
@@ -137,6 +140,11 @@ def categorize_findings(findings):
     return categorized_results
 
 
+# The verdict statuses, worst first: shards' records of one check under either are joined into one (v18).
+VERDICT_STATUSES = ("Action Required", "Investigation Recommended")
+VERDICT_KEY = "verdict"
+
+
 def merge_shard_findings(findings):
     """
     Merges the finding records of several shards into what one scan would have written.
@@ -165,6 +173,12 @@ def merge_shard_findings(findings):
     (``ROW_FOLDS``): an incident is listed by every project it impacted, so the
     Service Health Incidents rows of one incident become one row naming all the
     projects, as in one scan.
+
+    v18: a check whose rows carry different verdicts (Action Required for some,
+    Investigation Recommended for others) writes one record under the worst in a
+    single scan; shards whose projects happen to split the two write two. The merge
+    joins the verdict records of a check into one under the worst status, as the
+    single scan would have written it.
     """
     checks_with_findings = {f.get("Check") for f in findings if f.get("Status") != "Compliant"}
     merged, by_key, seen = [], {}, set()
@@ -176,10 +190,12 @@ def merge_shard_findings(findings):
         if identity in seen:
             continue
         seen.add(identity)
-        key = (check_name, status, finding.get("Category"))
+        key = (check_name, VERDICT_KEY if status in VERDICT_STATUSES else status, finding.get("Category"))
         rows, first = finding.get("Finding"), by_key.get(key)
         if first is not None and isinstance(rows, list) and isinstance(first.get("Finding"), list):
             first["Finding"].extend(rows)
+            if status in VERDICT_STATUSES and VERDICT_STATUSES.index(status) < VERDICT_STATUSES.index(first["Status"]):
+                first["Status"] = status  # the worst verdict among the shards
             if OMITTED_KEY in finding:  # the briefing's global incidents, by ID: the same one comes back from several shards
                 first[OMITTED_KEY] = sorted(set(first.get(OMITTED_KEY) or ()) | set(finding[OMITTED_KEY]))
             continue
@@ -353,4 +369,4 @@ def fold_note_rows(rows):
 
 
 ROW_FOLDS = {"Service Health Incidents": fold_incident_rows, "Advisory Notifications": fold_advisory_rows,
-             "Capacity Commitments": fold_note_rows}
+             "Capacity Commitments": fold_note_rows, "Recent Changes (Org & Project)": fold_note_rows}  # v18: the empty-briefing note

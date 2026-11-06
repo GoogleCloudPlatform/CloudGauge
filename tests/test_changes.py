@@ -223,18 +223,23 @@ def test_rows_are_not_comparable_with_a_previous_scan_by_an_older_release(previo
     """v16.1 changed the rule (a multi-region snapshot passes): against any older scan the rows are not compared, for
     that reason — the v15.6 reshape is behind the same line, so one entry per check is enough."""
     assert rows_reshaped_since(RESHAPED, summary('job-1', {}, {}, release=previous_release)) == reason
-    assert rows_reshaped_since('Public GCS Buckets', summary('job-1', {}, {}, release=previous_release)) is None
-    # v17: Quota Utilization's rows gained Family and Headroom; against any scan before v17 they are not compared.
+    assert rows_reshaped_since('Public GCS Buckets', summary('job-1', {}, {}, release=previous_release)) == \
+        (None if release_tuple(previous_release) >= (18,) else RULE_CHANGED)
+    # v17: Quota Utilization's rows gained Family and Headroom; v18 excluded the COMMITTED_* quotas (rule changed), which
+    # is the line that matters now: against any scan before v18 the rows are not compared.
     quota = 'Quota Utilization (>80%)'
     assert rows_reshaped_since(quota, summary('job-1', {}, {}, release=previous_release)) == \
-        (None if release_tuple(previous_release) >= (17,) else ROWS_CHANGED)
+        (None if release_tuple(previous_release) >= (18,) else RULE_CHANGED)
     # v17.3: Cloud SQL High Availability's rows gained Region and MIG Resilience (Zonal)'s Zone; against any scan before v17.3
     # they are not compared.
     for check in ('Cloud SQL High Availability', 'MIG Resilience (Zonal)'):
         assert rows_reshaped_since(check, summary('job-1', {}, {}, release=previous_release)) == \
             (None if release_tuple(previous_release) >= (17, 3) else ROWS_CHANGED)
-    assert RESHAPED_CHECKS == {RESHAPED: ('16.1', RULE_CHANGED), quota: ('17', ROWS_CHANGED),
-                               'Cloud SQL High Availability': ('17.3', ROWS_CHANGED), 'MIG Resilience (Zonal)': ('17.3', ROWS_CHANGED)}
+    assert {name: line for name, line in RESHAPED_CHECKS.items() if line[0] != '18'} == {
+        RESHAPED: ('16.1', RULE_CHANGED), 'Cloud SQL High Availability': ('17.3', ROWS_CHANGED), 'MIG Resilience (Zonal)': ('17.3', ROWS_CHANGED)}
+    # v18: the legacy checks revalidated (tests/test_revalidated_checks.py pins the list); against any earlier scan their rows are not compared.
+    assert {line for name, line in RESHAPED_CHECKS.items() if line[0] == '18'} == {('18', RULE_CHANGED), ('18', ROWS_CHANGED)}
+    assert rows_reshaped_since('Public GCS Buckets', summary('job-1', {}, {}, release='18')) is None
     assert (ROWS_CHANGED, RULE_CHANGED) == ('rows changed', 'rule changed')
 
 
@@ -787,7 +792,8 @@ def test_across_releases_a_new_check_is_not_compared_and_a_missing_one_is_no_lon
     assert chip(pitr) == (NOT_COMPARED, 'Rows not compared: new check')
     assert new_rows(pitr) == []
     _, rows, feet = changes_card(html)
-    assert rows[RELIABILITY]['status_changes'] == ['Cloud SQL PITR not compared (new check)']
+    # v18 redrew GKE Hygiene's rule: against a scan by an older release its rows are not compared either.
+    assert rows[RELIABILITY]['status_changes'] == ['Cloud SQL PITR not compared (new check)', 'GKE Hygiene not compared (rule changed)']
     assert (rows[RELIABILITY]['new'], rows[RELIABILITY]['resolved']) == (DASH, DASH)
     assert feet[0] == 'No longer checked: VM Rightsizing.'
     assert csv_new_flags(csv_text, RELIABILITY, 'Cloud SQL PITR') == {'web-prod · orders-db': ''}

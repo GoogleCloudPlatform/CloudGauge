@@ -331,7 +331,7 @@ class FakeQuotaCompute:
 
         def get_region(project, region):
             return _execute({'name': region, 'quotas': fake.quotas[project][region]})
-        return SimpleNamespace(list=list_regions, get=get_region)
+        return SimpleNamespace(list=list_regions, list_next=lambda previous_request, previous_response: None, get=get_region)
 
 
 def test_quota_check_is_action_required_only_over_the_critical_threshold(gcp):

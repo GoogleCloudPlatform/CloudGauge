@@ -110,17 +110,26 @@ ORG_POLICY_CONSTRAINTS = {
     "sql.restrictPublicIp": True,
     "compute.skipDefaultNetworkCreation": False,
 }
-BEST_PRACTICES_CSV = """Category,ID,Policy Display Name,Recommended to set *
-Networking,,,
-,compute.vmExternalIpAccess,Define allowed external IPs for VM instances,Should have
-,compute.skipDefaultNetworkCreation,Skip default network creation,Should have
-Identity,,,
-,iam.disableServiceAccountKeyCreation,Disable service account key creation,Must have
-,compute.requireOsLogin,Require OS Login,Should have
-Storage and Data,,,
-,storage.uniformBucketLevelAccess,Enforce uniform bucket-level access,Should have
-,sql.restrictPublicIp,Restrict Public IP access on Cloud SQL instances,Should have
+# v18: the table carries the constraint's Type, and two list constraints — one the organization configures
+# (allowed domains), one nobody sets (resource locations) — so the report's list-policy evaluation is exercised.
+BEST_PRACTICES_CSV = """Category,ID,Type,Policy Display Name,Recommended to set *
+Networking,,,,
+,compute.vmExternalIpAccess,List,Define allowed external IPs for VM instances,Should have
+,compute.skipDefaultNetworkCreation,Boolean,Skip default network creation,Should have
+Identity,,,,
+,iam.disableServiceAccountKeyCreation,Boolean,Disable service account key creation,Must have
+,compute.requireOsLogin,Boolean,Require OS Login,Should have
+,iam.allowedPolicyMemberDomains,List,Domain restricted sharing,Should have
+Storage and Data,,,,
+,storage.uniformBucketLevelAccess,Boolean,Enforce uniform bucket-level access,Should have
+,sql.restrictPublicIp,Boolean,Restrict Public IP access on Cloud SQL instances,Should have
+,gcp.resourceLocations,List,Resource location restriction,Should have
 """
+# The list policies the synthetic organization sets (``org_policies``): the external-IP allow list and the domain restriction.
+ORG_LIST_POLICIES = {
+    "compute.vmExternalIpAccess": {"allValues": "DENY"},
+    "iam.allowedPolicyMemberDomains": {"allowedValues": ["C0synthetic"]},
+}
 # v17: the FinOps and capacity facts. Label keys every synthetic project may carry (COST_ALLOCATION_LABELS names
 # them in a synthetic deployment); the machine types the VMs run; the Cloud SQL versions (some in extended
 # support); the organization-level IAM recommendation.
@@ -265,6 +274,11 @@ class ProjectProfile:
     etd_enabled: bool = True  # Event Threat Detection, effective state in the project
     data_access_logs: bool = False  # DATA_READ/DATA_WRITE audit logs for container.googleapis.com
     gke_pool_zones: dict = field(default_factory=dict)  # v17.3: cluster name -> per node pool, the zones its nodes live in
+    # v18: the facts the revalidated legacy checks read
+    stopped_vms: tuple = ()  # VMs that are TERMINATED: their access config stays, the ephemeral address is released
+    disabled_key_accounts: tuple = ()  # service accounts whose oldest user-managed key is disabled
+    sql_open_networks: tuple = ()  # Cloud SQL instances with 0.0.0.0/0 among their authorized networks
+    pap_enforced_buckets: tuple = ()  # public buckets whose Public Access Prevention is enforced (the binding is dormant)
 
     @property
     def project_number(self):
@@ -553,6 +567,12 @@ class SyntheticOrg:
             gke_pool_zones[cluster.name] = tuple(
                 (cluster.location,) if _chance(rng, 0.4) else (f"{region}-a", f"{region}-b", f"{region}-c") for _ in cluster.node_pools)
 
+        # v18 (drawn last, for the same reason): what the revalidated legacy checks read.
+        stopped_vms = tuple(vm.name for vm in vms if vm.external_ip and _chance(rng, 0.3))
+        disabled_key_accounts = tuple(sa.email for sa in service_accounts if sa.key_ages_days and _chance(rng, 0.3))
+        sql_open_networks = tuple(sql.name for sql in sql_instances if sql.public_ip and _chance(rng, 0.3))
+        pap_enforced_buckets = tuple(bucket.name for bucket in buckets if bucket.public and _chance(rng, 0.4))
+
         return ProjectProfile(
             index=index, project_id=project_id, display_name=f"Synthetic Project {index}",
             folder_id=self.folder_of(index), denied=denied, osconfig_disabled=osconfig_disabled,
@@ -571,6 +591,8 @@ class SyntheticOrg:
             gpu_quota=gpu_quota, quota_recommendation=quota_recommendation, future_reservation=future_reservation,
             gke_hardening=gke_hardening, impersonation_bindings=tuple(impersonation_bindings), custom_role_bindings=custom_role_bindings,
             etd_enabled=etd_enabled, data_access_logs=data_access_logs, gke_pool_zones=gke_pool_zones,
+            stopped_vms=stopped_vms, disabled_key_accounts=disabled_key_accounts, sql_open_networks=sql_open_networks,
+            pap_enforced_buckets=pap_enforced_buckets,
         )
 
     # --- organization-level data ---
@@ -578,18 +600,22 @@ class SyntheticOrg:
     def org_iam_bindings(self):
         return [
             {"role": "roles/owner", "members": ["user:cto@example.com", "group:cloud-admins@example.com"]},
-            {"role": "roles/resourcemanager.organizationAdmin", "members": ["group:cloud-admins@example.com"]},
+            {"role": "roles/resourcemanager.organizationAdmin", "members": ["group:cloud-admins@example.com",
+                                                                             "serviceAccount:org-automation@system.gserviceaccount.com"]},  # v18: a Google-managed agent, not a row
             {"role": "roles/viewer", "members": ["domain:example.com"]},
         ]
 
     def org_policies(self, resource):
         """``listOrgPolicies`` for ``organizations/...``, ``folders/...`` or ``projects/...``."""
         if resource.startswith("organizations/"):
-            return [{"constraint": f"constraints/{cid}", "booleanPolicy": {"enforced": enforced}}
-                    for cid, enforced in ORG_POLICY_CONSTRAINTS.items()]
+            return ([{"constraint": f"constraints/{cid}", "booleanPolicy": {"enforced": enforced}}
+                     for cid, enforced in ORG_POLICY_CONSTRAINTS.items() if cid != "compute.vmExternalIpAccess"]
+                    + [{"constraint": f"constraints/{cid}", "listPolicy": dict(policy)} for cid, policy in ORG_LIST_POLICIES.items()])
         rng = _rng(self.seed, "orgpolicy", resource)
         if _chance(rng, 0.3):  # some folders/projects override one constraint
             cid = rng.choice(list(ORG_POLICY_CONSTRAINTS))
+            if cid in ORG_LIST_POLICIES:  # v18: the external-IP constraint is a list constraint; an override allows everything
+                return [{"constraint": f"constraints/{cid}", "listPolicy": {"allValues": "ALLOW"}}]
             return [{"constraint": f"constraints/{cid}", "booleanPolicy": {"enforced": not ORG_POLICY_CONSTRAINTS[cid]}}]
         return []
 

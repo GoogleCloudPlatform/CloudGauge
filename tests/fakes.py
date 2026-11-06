@@ -575,11 +575,11 @@ class FakeRecommender:
                     raise error
                 return list(by_id.get(type_id, []))
 
-            def list_insights(self, parent):
-                return self._answer(parent, recommender.insights)
+            def list_insights(self, parent=None, filter=None, request=None):
+                return self._answer(parent or request['parent'], recommender.insights)
 
-            def list_recommendations(self, parent):
-                return self._answer(parent, recommender.recommendations)
+            def list_recommendations(self, parent=None, filter=None, request=None):
+                return self._answer(parent or request['parent'], recommender.recommendations)
 
         return FakeRecommenderClient
 

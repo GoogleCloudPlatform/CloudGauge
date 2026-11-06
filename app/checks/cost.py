@@ -53,12 +53,13 @@ from app.utils import call_api_with_backoff, days_between, parse_timestamp, utcn
 # multi-regions plus the active regions (v17: slot commitments).
 GLOBAL, BIGQUERY = "global", "bigquery"
 BIGQUERY_MULTI_REGIONS = ("US", "EU")
+# v18: *Idle Load Balancers* (``google.compute.loadBalancer.IdleResourceRecommender``) is gone — no such recommender
+# exists, so it never reached a verdict; the Changes card reads it as "No longer checked".
 COST_RECOMMENDERS = {
     "Idle Cloud SQL Instances": ("google.cloudsql.instance.IdleRecommender", "region"),
     "Low Utilization VMs": ("google.compute.instance.IdleResourceRecommender", "zone"),
     "VM Rightsizing": ("google.compute.instance.MachineTypeRecommender", "zone"),
     "Unassociated IPs": ("google.compute.address.IdleResourceRecommender", "region"),
-    "Idle Load Balancers": ("google.compute.loadBalancer.IdleResourceRecommender", "region"),
     "Idle Persistent Disks": ("google.compute.disk.IdleResourceRecommender", "zone"),
     "Underutilized Reservations": ("google.compute.RightSizeResourceRecommender", "zone"),
     "Idle Reservations": ("google.compute.IdleResourceRecommender", "zone"),
@@ -78,7 +79,6 @@ NOTHING_FOUND = {
     "Low Utilization VMs": "No low-utilization VMs found.",
     "VM Rightsizing": "No VM rightsizing recommendations found.",
     "Unassociated IPs": "No unassociated IP addresses found.",
-    "Idle Load Balancers": "No idle load balancers found.",
     "Idle Persistent Disks": "No idle persistent disks found.",
     "Underutilized Reservations": "No underutilized reservations found.",
     "Idle Reservations": "No idle reservations found.",
@@ -97,6 +97,15 @@ SNAPSHOT_SPRAWL_CHECK = "Snapshot Sprawl"
 FINOPS_CHECKS = (LABELS_CHECK, LIFECYCLE_CHECK, SNAPSHOT_SPRAWL_CHECK)
 # The cost rows' saving column, as parse_recommendation writes it ("1,234.56 USD"); the Scorecard sums it.
 SAVING_COLUMN = "Est. Monthly Saving"
+# v18: the listings ask for the recommendations still standing; an applied or dismissed one stays in the API for a while
+# and is not a finding. (The Diagnosis recommender of GKE Hygiene always filtered; the cost recommenders did not.)
+ACTIVE_RECOMMENDATIONS = "stateInfo.state = ACTIVE"
+
+
+def is_active(reco):
+    """Whether a recommendation is ACTIVE (a client that ignores the server filter still gets the rule)."""
+    state = getattr(getattr(reco, "state_info", None), "state", None)
+    return str(getattr(state, "name", state) or "ACTIVE").upper() in ("ACTIVE", "STATE_UNSPECIFIED", "0")
 
 
 def recommender_locations(loc_type, active_zones, active_regions):
@@ -155,11 +164,15 @@ def parse_recommendation(reco, project_id):
         logging.warning(f"Failed to parse resource name for {reco.name}: {e}")
         pass # If any error, resource_name remains "N/A"
 
-    # Safely get cost savings
+    # Safely get cost savings. v18: a recommendation that costs money (an upsize for performance) is not a saving —
+    # the column says so instead of carrying a negative number the Scorecard would subtract from the total.
     try:
         cost = reco.primary_impact.cost_projection.cost
         savings_value = -cost.units - (cost.nanos / 1e9)
-        cost_savings = f"{savings_value:,.2f} {cost.currency_code}"
+        if savings_value < 0:
+            cost_savings = f"none (costs {abs(savings_value):,.2f} {cost.currency_code} more)"
+        else:
+            cost_savings = f"{savings_value:,.2f} {cost.currency_code}"
     except AttributeError:
         pass
 
@@ -223,8 +236,7 @@ def run_cost_recommendations(scope_id, all_projects, active_zones, active_region
 
         def note_failure(check, error):
             # An invalid argument or not-found means the recommender is not offered in
-            # that location (asia-south1 answers 400 for Idle Load Balancers), not that
-            # the project could not be checked.
+            # that location, not that the project could not be checked.
             if not is_request_error(error):
                 failed.setdefault(check, error)
 
@@ -237,10 +249,12 @@ def run_cost_recommendations(scope_id, all_projects, active_zones, active_region
                     parent = f"projects/{project_id}/locations/{loc}/recommenders/{rec_id}"
                     try:
                         errors = []
-                        api_call = lambda: client.list_recommendations(parent=parent)
+                        api_call = lambda: client.list_recommendations(parent=parent, filter=ACTIVE_RECOMMENDATIONS)
                         context = f"'{check}' in {project_id} at {loc}"
                         on_error = lambda error, name=check: (errors.append(error), note_failure(name, error))
                         for reco in call_api_with_backoff(api_call, context_message=context, on_error=on_error):
+                            if not is_active(reco):
+                                continue
                             finding = parse_recommendation(reco, project_id)
                             if check not in findings_map:
                                 findings_map[check] = []

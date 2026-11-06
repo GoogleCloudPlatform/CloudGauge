@@ -104,11 +104,29 @@ RESHAPED_CHECKS = {
     # v15.6: one row counting the snapshots → one row per single-region snapshot (rows changed);
     # v16.1: a snapshot in a multi-region passes (rule changed). The newest line is the one that matters.
     "Disk Snapshot Resilience": ("16.1", RULE_CHANGED),
-    # v17: the rows gained Family and Headroom (rows changed), and 80–95 % is Investigation Recommended now.
-    "Quota Utilization (>80%)": ("17", ROWS_CHANGED),
+    # v17: the rows gained Family and Headroom (rows changed), and 80–95 % is Investigation Recommended now (superseded by v18 below).
     # v17.3: the rows gained the instance's Region and the group's Zone (rows changed): the footprint Incident Exposure reads.
     "Cloud SQL High Availability": ("17.3", ROWS_CHANGED),
     "MIG Resilience (Zonal)": ("17.3", ROWS_CHANGED),
+    # v18 (legacy checks revalidated): rows that vanish were never true, rows that appear were always there — rule changed.
+    "Organization Policies": ("18", RULE_CHANGED),  # list constraints evaluate; "won't have" booleans pass when unset
+    "Security Command Center Status": ("18", RULE_CHANGED),  # the real tier, Tier/Subscription/Note row (the old row was a constant)
+    "Primitive Roles (Owner or Editor)": ("18", RULE_CHANGED),  # Google-managed agents out; kind, condition, fix
+    "Critical Org-Level Roles": ("18", RULE_CHANGED),  # groups are the practice; more roles; kind, condition, fix
+    "Service Account Key Rotation": ("18", RULE_CHANGED),  # disabled and expired keys out; key ID, age, origin, fix
+    "Public GCS Buckets": ("18", RULE_CHANGED),  # Public Access Prevention read; principal, roles, fix
+    "Open Firewall Rules": ("18", RULE_CHANGED),  # allow rules only, ::/0, ports, targets, fix
+    "Cloud SQL Security": ("18", RULE_CHANGED),  # sslMode, authorized networks, kind, fix
+    "VM External IPs": ("18", RULE_CHANGED),  # addresses held, not access configs; one row per instance
+    "OS Config Agent Coverage": ("18", RULE_CHANGED),  # one row per VM; errors routed; Autopilot and worker fleets out
+    "Monitoring Alert Coverage": ("18", RULE_CHANGED),  # real filter matching across every condition kind
+    "GKE Hygiene": ("18", RULE_CHANGED),  # recommendations attributed to their cluster; fixes
+    "Unattended Projects": ("18", ROWS_CHANGED),  # the project ID instead of its number
+    "Quota Utilization (>80%)": ("18", RULE_CHANGED),  # COMMITTED_* quotas excluded (supersedes the v17 line)
+    "VPC IP Address Utilization": ("18", RULE_CHANGED), "VPC Connectivity": ("18", RULE_CHANGED),  # Network Insights: Severity column,
+    "Load Balancer Health": ("18", RULE_CHANGED), "GKE IP Address Utilization": ("18", RULE_CHANGED),  # verdict by severity
+    "GKE Connectivity": ("18", RULE_CHANGED), "GKE Service Account": ("18", RULE_CHANGED),
+    "Dynamic Route Health": ("18", RULE_CHANGED), "Cloud SQL Connectivity": ("18", RULE_CHANGED),
 }
 
 DIGITS = re.compile(r"\d[\d,]*(?:\.\d+)?")

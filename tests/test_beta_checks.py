@@ -11,14 +11,20 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""The four Security checks ported from upstream beta v1 (``tests/legacy/cloudgauge_beta_v1.py``).
+"""The Security checks ported from upstream beta v1 (``tests/legacy/cloudgauge_beta_v1.py``).
 
-Each check runs in the frozen beta v1 module and in ``app.checks.security``
-against the same fake Cloud SQL Admin, Compute, and Storage APIs, and both
-must write the same finding. Explicit expectations document what they report.
-The one intended difference: a project the check could not read is also
-written as a "Projects not checked" record (``app.checks.not_checked``), where
-beta v1 only logged it.
+VPC Configuration and Uniform Bucket-Level Access run in the frozen beta v1 module
+and in ``app.checks.security`` against the same fake Compute and Storage APIs, and
+both must write the same finding. Explicit expectations document what they report.
+The one intended difference: a project the check could not read is also written as
+a "Projects not checked" record (``app.checks.not_checked``), where beta v1 only
+logged it.
+
+Cloud SQL Security and VM External IPs left the parity in v18: beta v1 read the
+deprecated ``requireSsl`` and counted access configs rather than addresses, and
+the parity tests pinned those defects. Their rules are tested on their own in
+``tests/test_revalidated_checks.py``; here the two checks keep only the
+"skipped project" contract they share with the others.
 """
 from types import SimpleNamespace
 
@@ -31,10 +37,12 @@ from fakes import _execute
 JOB_ID = 'job-42'
 SCOPE_ID = '123456789'
 WEB, LAKE, BROKEN = ({'projectId': 'web-prod'}, {'projectId': 'data-lake'}, {'projectId': 'locked-down'})
-CHECKS = {  # function name -> (check name, finding file name)
-    'check_cloud_sql_security': ('Cloud SQL Security', 'Cloud_SQL_Security'),
+CHECKS = {  # function name -> (check name, finding file name): the checks still at parity with beta v1
     'check_vpc_configuration': ('VPC Configuration', 'VPC_Configuration'),
     'check_storage_ubla': ('GCS Uniform Bucket-Level Access', 'GCS_Uniform_Bucket-Level_Access'),
+}
+REVALIDATED = {  # v18: the same contract for skipped projects, the rules tested elsewhere
+    'check_cloud_sql_security': ('Cloud SQL Security', 'Cloud_SQL_Security'),
     'check_vm_external_ips': ('VM External IPs', 'VM_External_IPs'),
 }
 DENIED = RuntimeError('403 The caller does not have permission')
@@ -87,10 +95,10 @@ BUCKETS = {
 
 
 class FakeSqlAdmin:
-    """``sqladmin v1beta4``: instances().list()."""
+    """``sqladmin v1``: instances().list(), one page."""
 
     def instances(self):
-        return SimpleNamespace(list=lambda project: _execute(SQL_INSTANCES.get(project, {})))
+        return SimpleNamespace(list=lambda project: _execute(SQL_INSTANCES.get(project, {})), list_next=lambda previous_request, previous_response: None)
 
 
 class FakeCompute:
@@ -173,17 +181,15 @@ def findings_of(name, projects=(WEB, LAKE, BROKEN)):
     return finding['Finding']
 
 
-def test_cloud_sql_security_findings(apis):
-    assert findings_of('check_cloud_sql_security') == [
-        {'Project': 'web-prod', 'Instance': 'db-public', 'Issue': 'Public IP enabled.'},
-        {'Project': 'web-prod', 'Instance': 'db-no-ssl', 'Issue': 'SSL not enforced.'},
-        {'Project': 'web-prod', 'Instance': 'db-both', 'Issue': 'Public IP enabled.'},
-        {'Project': 'web-prod', 'Instance': 'db-both', 'Issue': 'SSL not enforced.'},
-        {'Project': 'web-prod', 'Instance': 'db-bare', 'Issue': 'SSL not enforced.'},
-    ]
+def test_cloud_sql_security_left_the_parity_in_v18(apis):
+    """beta v1 flagged ``db-no-ssl`` (no public IP, ``requireSsl`` absent) and ``db-bare`` (no settings); v18 reads ``sslMode``
+    first and skips an instance without settings — the rows differ by design (``tests/test_revalidated_checks.py``)."""
+    rows = findings_of('check_cloud_sql_security')
+    assert [(r['Instance'], r['Issue'].split(':')[0]) for r in rows] == [
+        ('db-public', 'Public IP enabled.'), ('db-no-ssl', 'TLS not enforced'), ('db-both', 'TLS not enforced'), ('db-both', 'Public IP enabled.')]
     assert findings_of('check_cloud_sql_security', [LAKE]) == [
-        {'Status': 'All Cloud SQL instances have Public IP disabled and SSL enforced.'}]
-    assert ('sqladmin', 'v1beta4') in apis.discovery.calls
+        {'Status': 'Every Cloud SQL instance enforces TLS, has no public IP, and authorizes no internet range.'}]
+    assert ('sqladmin', 'v1') in apis.discovery.calls and ('sqladmin', 'v1beta4') not in apis.discovery.calls
 
 
 def test_vpc_configuration_findings(apis):
@@ -204,19 +210,17 @@ def test_storage_ubla_findings(apis):
     assert findings_of('check_storage_ubla', [LAKE]) == [{'Status': 'All buckets have Uniform Bucket-Level Access enabled.'}]
 
 
-def test_vm_external_ips_findings_across_pages(apis):
-    assert findings_of('check_vm_external_ips') == [
-        {'Project': 'web-prod', 'VM': 'web-1', 'Issue': 'Has external IP address.'},
-        {'Project': 'web-prod', 'VM': 'web-3', 'Issue': 'Has external IP address.'},  # second page
-    ]
-    assert findings_of('check_vm_external_ips', [LAKE]) == [{'Status': 'No VMs with external IP addresses found.'}]
+def test_vm_external_ips_left_the_parity_in_v18(apis):
+    """beta v1 counted ``web-3`` for an empty ``accessConfigs`` key; v18 counts addresses held, so only ``web-1`` is a row."""
+    assert [(r['VM'], r['External IPs'], r['Kind']) for r in findings_of('check_vm_external_ips')] == [('web-1', '203.0.113.7', 'standalone')]
+    assert findings_of('check_vm_external_ips', [LAKE]) == [{'Status': 'No VM instance holds an external IP address.'}]
 
 
-@pytest.mark.parametrize('name', CHECKS)
+@pytest.mark.parametrize('name', {**CHECKS, **REVALIDATED})
 def test_a_project_that_fails_is_logged_skipped_and_reported(name, apis, caplog):
     """As in beta v1, the error is logged and the other projects' results still count;
     unlike beta v1, the skipped project is reported instead of passing as compliant."""
-    check_name, _ = CHECKS[name]
+    check_name, _ = {**CHECKS, **REVALIDATED}[name]
     assert findings_of(name, [BROKEN, LAKE]) == findings_of(name, [LAKE])
     assert f'Could not check {check_name} for locked-down: 403 The caller does not have permission' in caplog.text
     _, skipped = split_not_checked(run_new(name, [BROKEN, LAKE]))
@@ -225,8 +229,8 @@ def test_a_project_that_fails_is_logged_skipped_and_reported(name, apis, caplog)
 
 def test_findings_are_reported_under_security():
     """Beta v1 left these names out of its category map, so its reports dropped the findings."""
-    for check_name, _ in CHECKS.values():
+    for check_name, _ in {**CHECKS, **REVALIDATED}.values():
         assert CATEGORY_MAP[check_name] == 'Security & Identity'
     assert CATEGORY_ORDER[0] == 'Security & Identity'
-    findings = [{'Check': check_name, 'Status': 'Compliant', 'Finding': []} for check_name, _ in CHECKS.values()]
+    findings = [{'Check': check_name, 'Status': 'Compliant', 'Finding': []} for check_name, _ in {**CHECKS, **REVALIDATED}.values()]
     assert categorize_findings(findings)['Security & Identity'] == findings

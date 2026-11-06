@@ -552,11 +552,37 @@ def summarize_details(details, status, total_projects=None, check_name=None):
     return text
 
 
+def evaluate_list_policy(policy_details, expected_true):
+    """``(status, current value)`` of a list constraint's effective policy (v18).
+
+    A list constraint is *configured* when its policy denies all values or names allowed or denied
+    values; ``allValues: ALLOW`` is the explicit "anything goes" and ``restoreDefault`` the
+    constraint's default — neither is a configuration. ``expected_true`` ("should have") asks
+    for a configuration; "won't have" asks for none.
+    """
+    list_policy = policy_details.get('listPolicy') or {}
+    if 'restoreDefault' in policy_details or not list_policy:
+        return ("Not Configured" if expected_true else "Compliant"), ("Default restored" if 'restoreDefault' in policy_details else "Not configured")
+    all_values = list_policy.get('allValues')
+    if all_values == 'ALLOW':
+        return ("Non-compliant" if expected_true else "Compliant"), "Allows all values"
+    if all_values == 'DENY':
+        value = "Configured (denies all values)"
+    else:
+        allowed, denied = len(list_policy.get('allowedValues') or []), len(list_policy.get('deniedValues') or [])
+        value = f"Configured ({allowed} allowed, {denied} denied)"
+    return ("Compliant" if expected_true else "Non-compliant"), value
+
+
 def evaluate_org_policies(best_practices, current_policies):
     """
     Compares every best-practice policy with the effective organization policy.
 
     Shared by the HTML and CSV reports (the legacy code had one copy in each).
+
+    v18: list constraints are evaluated as configured or not (``evaluate_list_policy``) instead
+    of reading *Unsupported*, a boolean constraint the table says to leave unset ("won't have")
+    is Compliant when it is unset, and ``restoreDefault`` reads as *Not Configured*.
 
     Returns:
         list: ``(category, [PolicyResult, ...])`` pairs, sorted by category;
@@ -568,13 +594,18 @@ def evaluate_org_policies(best_practices, current_policies):
         results = []
         for policy in policies:
             policy_id, details = policy['policyId'], policy
-            status, current_value_str = "Not Configured", "N/A"
+            expected_true = details['expectedValue'].lower() == "true"
+            status, current_value_str = ("Not Configured" if expected_true else "Compliant"), ("N/A" if expected_true else "Not configured")
             if policy_id in current_policies:
                 policy_details = current_policies[policy_id]
-                if 'booleanPolicy' in policy_details:
+                if details.get('type') == "List":
+                    status, current_value_str = evaluate_list_policy(policy_details, expected_true)
+                elif 'booleanPolicy' in policy_details:
                     current_value = policy_details['booleanPolicy'].get('enforced', False)
                     current_value_str = str(current_value)
                     status = "Compliant" if current_value_str.lower() == details['expectedValue'].lower() else "Non-compliant"
+                elif 'restoreDefault' in policy_details:
+                    status, current_value_str = ("Not Configured" if expected_true else "Compliant"), "Default restored"
                 else:
                     status, current_value_str = "Unsupported", "List Policy/Other"
             results.append(PolicyResult(policy_id, details['displayName'], details['expectedValue'], current_value_str, status))

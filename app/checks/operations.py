@@ -17,6 +17,11 @@ Moved from ``cloudgauge.py`` (Phase 2) with mechanical changes only: each
 check takes a keyword-only ``sink`` (a ``GcsResultsStore``) and writes
 through ``sink.write_finding(...)``, and GCP auth and discovery calls go
 through ``app.services.gcp``.
+
+v18 revalidated the legacy checks of this module (see RELEASE_NOTES.md): the
+rules are pure functions over the APIs' own JSON, errors reach *Projects not
+checked* or an Error row instead of becoming findings, and a check that answered
+and found nothing says so.
 """
 import concurrent.futures
 import re
@@ -24,37 +29,99 @@ import re
 from google.api_core import exceptions as core_exceptions
 
 from app.config import SCOPES
-from app.checks.not_checked import NotChecked, is_request_error
+from app.checks.not_checked import NotChecked, disabled_api, is_request_error
 from app.services import gcp
 from app.utils import call_api_with_backoff
 
 
+ACTION_REQUIRED, INVESTIGATION, INFORMATIONAL, COMPLIANT = "Action Required", "Investigation Recommended", "Informational", "Compliant"
+# Recommender listings ask for the recommendations still standing (v18): a dismissed or applied one is not a finding.
+ACTIVE_RECOMMENDATIONS = "stateInfo.state = ACTIVE"
+
+
 # --- Operational Excellence Checks ---
+
+LOG_SINK_CHECK = "Organization Log Sink"
+
 
 def check_audit_logging(org_id, job_id, *, sink):
     """
     Verifies if an organization-level log sink is configured for centralized audit logging.
 
+    v18: a failure is an Error row under the check's own name (``Log Sink Check`` is retired).
+
     Args:
         org_id (str): The organization ID.
-
-    Returns:
-        list: A list of finding dictionaries.
     """
-    CHECK_NAME = "Organization Log Sink"
-    print(f"📜 [{job_id}] Checking for {CHECK_NAME}...")
+    print(f"📜 [{job_id}] Checking for {LOG_SINK_CHECK}...")
     try:
         credentials, _ = gcp.auth_default(scopes=SCOPES)
         service = gcp.api_build('logging', 'v2', credentials=credentials)
         sinks = service.organizations().sinks().list(parent=f'organizations/{org_id}').execute().get('sinks', [])
         if sinks:
             finding_data = [{"Sink Name": s['name'], "Destination": s['destination']} for s in sinks]
-            result = {"Check": CHECK_NAME, "Finding": finding_data, "Status": "Compliant"}
+            result = {"Check": LOG_SINK_CHECK, "Finding": finding_data, "Status": "Compliant"}
         else:
-            result = {"Check": CHECK_NAME, "Finding": [{"Issue": "No organization-level log sink configured."}], "Status": "Action Required"}
+            result = {"Check": LOG_SINK_CHECK, "Finding": [{"Issue": "No organization-level log sink configured.",
+                                                              "Fix": f"gcloud logging sinks create <sink> <destination> --organization={org_id} --include-children --log-filter='logName:\"cloudaudit.googleapis.com\"'"}],
+                      "Status": "Action Required"}
     except Exception as e:
-        result = {"Check": "Log Sink Check", "Finding": [{"Error": str(e)}], "Status": "Error"}
-    sink.write_finding(job_id, CHECK_NAME.replace(" ", "_"), result)
+        result = {"Check": LOG_SINK_CHECK, "Finding": [{"Error": f"Could not list the organization's log sinks: {e}"}], "Status": "Error"}
+    sink.write_finding(job_id, LOG_SINK_CHECK.replace(" ", "_"), result)
+
+
+# OS Config Agent Coverage (v18): the running VMs without an OS inventory, from one inventory listing per zone.
+OS_CONFIG_CHECK = "OS Config Agent Coverage"
+# Fleets that never run VM Manager by design: GKE and Autopilot nodes, Dataproc, Dataflow and Batch workers.
+MANAGED_FLEET_PREFIXES = ("gke-", "gk3-")
+MANAGED_FLEET_LABELS = ("goog-dataproc-cluster-name", "dataflow_job_id", "goog-dataflow-job-id", "batch-job-id", "goog-batch-job-id")
+OS_CONFIG_ALL_CLEAR = "Every running VM outside the managed fleets (GKE, Dataproc, Dataflow, Batch) reports an OS inventory."
+OS_INVENTORY_DISABLED = ("OS inventory management is disabled in this project: no VM reports to VM Manager "
+                         "(patching, inventory and vulnerability reports are off).")
+
+
+def is_managed_fleet_vm(instance):
+    """Whether a VM belongs to a fleet that does not run the OS Config agent by design (``MANAGED_FLEET_*``)."""
+    name, labels = str(instance.get("name", "")), instance.get("labels") or {}
+    metadata = {item.get("key") for item in (instance.get("metadata") or {}).get("items", [])}
+    return (name.startswith(MANAGED_FLEET_PREFIXES) or any(label in labels for label in MANAGED_FLEET_LABELS)
+            or "cluster-name" in metadata)
+
+
+def inventory_instance_ids(inventories):
+    """The instance IDs (and hostnames) an inventory listing covers: ``.../instances/<id>/inventory`` plus ``osInfo.hostname``."""
+    covered = set()
+    for inventory in inventories:
+        name = str(getattr(inventory, "name", "") or (inventory.get("name", "") if isinstance(inventory, dict) else ""))
+        if "/instances/" in name:
+            covered.add(name.split("/instances/", 1)[1].split("/", 1)[0])
+        os_info = getattr(inventory, "os_info", None) or (inventory.get("osInfo") if isinstance(inventory, dict) else None)
+        hostname = getattr(os_info, "hostname", None) or (os_info.get("hostname") if isinstance(os_info, dict) else None)
+        if hostname:
+            covered.add(str(hostname))
+    return covered
+
+
+def os_config_fix(project_id, instance=None):
+    """The metadata line that turns the OS Config agent on: for one VM, or project-wide when VM Manager is off."""
+    if instance is None:
+        return (f"gcloud services enable osconfig.googleapis.com --project={project_id} && "
+                f"gcloud compute project-info add-metadata --project={project_id} --metadata=enable-osconfig=TRUE,enable-guest-attributes=TRUE")
+    zone = str(instance.get("zone", "")).rsplit("/", 1)[-1]
+    return f"gcloud compute instances add-metadata {instance.get('name')} --zone={zone} --project={project_id} --metadata=enable-osconfig=TRUE"
+
+
+def os_config_rows(project_id, instances, covered):
+    """One row per running VM outside the managed fleets whose ID or hostname is not in ``covered`` (the inventories' IDs)."""
+    rows = []
+    for instance in instances:
+        if is_managed_fleet_vm(instance) or str(instance.get("status", "RUNNING")) != "RUNNING":
+            continue
+        if str(instance.get("id", "")) in covered or str(instance.get("name", "")) in covered:
+            continue
+        rows.append({"Project": project_id, "VM": instance.get("name"), "Zone": str(instance.get("zone", "")).rsplit("/", 1)[-1],
+                     "Issue": "No OS inventory: the OS Config agent is not reporting.", "Fix": os_config_fix(project_id, instance)})
+    return rows
 
 
 def check_os_config_coverage(scope_id, all_projects, job_id, *, sink):
@@ -62,17 +129,20 @@ def check_os_config_coverage(scope_id, all_projects, job_id, *, sink):
     Checks VM instances across all projects to identify those not reporting to OS Config.
     This helps ensure patch management and inventory visibility. Excludes GKE and Dataproc VMs.
 
-    Args:
-        org_id (str): The organization ID.
-        all_projects (list): A list of project dictionaries.
+    v18: one ``list_inventories`` per zone with candidate VMs instead of one ``get_inventory`` per VM
+    (``osconfig.inventories.list`` is what ``roles/iam.securityReviewer`` grants; ``.get`` is not), and
+    the errors are routed: ``FailedPrecondition`` is the project's one *OS inventory management is
+    disabled* row, a permission or API error puts the project under *Projects not checked* — before
+    v18 both listed every VM as not reporting. Autopilot nodes (``gk3-``), Dataflow and Batch workers
+    are excluded like GKE and Dataproc; the rows are one per VM, with the zone and the fix.
 
-    Returns:
-        list: A list of finding dictionaries listing VMs without OS Config agent coverage.
+    Args:
+        scope_id (str): The scope ID.
+        all_projects (list): A list of project dictionaries.
     """
-    CHECK_NAME = "OS Config Agent Coverage"
-    print(f"🤖 [{job_id}] Checking for {CHECK_NAME} in parallel...")
+    print(f"🤖 [{job_id}] Checking for {OS_CONFIG_CHECK} in parallel...")
     if not all_projects: return []
-    skipped = NotChecked(CHECK_NAME, resource_apis=("compute.googleapis.com",))
+    skipped = NotChecked(OS_CONFIG_CHECK, resource_apis=("compute.googleapis.com",))
 
     def check_single_project(project):
         project_id = project['projectId']
@@ -85,97 +155,145 @@ def check_os_config_coverage(scope_id, all_projects, job_id, *, sink):
                 resp = req.execute(); req = compute.instances().aggregatedList_next(previous_request=req, previous_response=resp)
                 for res in resp.get('items', {}).values():
                     if 'instances' in res: vms.extend(res['instances'])
-            if not vms: return None
-
-            # --- FIX: Added a filter to exclude Dataproc VMs by label ---
-            missing = [
-                vm['name'] for vm in vms
-                if not vm['name'].startswith('gke-')
-                and 'goog-dataproc-cluster-name' not in vm.get('labels', {})
-                and not any(item.get('key') == 'gke-cluster-name' for item in vm.get('metadata', {}).get('items', []))
-                and not _is_os_reporting(osconfig, project_id, vm)
-            ]
-
-            if missing: return {"Project": project_id, "VMs Not Reporting": ", ".join(sorted(missing))}
-        except core_exceptions.FailedPrecondition:
-            return {"Project": project_id, "Issue": "OS inventory management disabled."}
-        except Exception as e: skipped.add(project_id, e)
-        return None
-
-    def _is_os_reporting(client, project, vm):
-        try:
-            path = f"projects/{project}/locations/{vm['zone'].split('/')[-1]}/instances/{vm['name']}/inventory"
-            client.get_inventory(request={"name": path})
-            return True
-        except core_exceptions.NotFound:
-            return False
-        except Exception:
-            return False
+            candidates = [vm for vm in vms if not is_managed_fleet_vm(vm)]
+            if not candidates:
+                return []
+        except Exception as e:
+            skipped.add(project_id, e)
+            return []
+        covered = set()
+        for zone in sorted({str(vm.get("zone", "")).rsplit("/", 1)[-1] for vm in candidates}):
+            try:
+                # The inventories of every instance of the zone: the parent names the instance collection with the wildcard.
+                inventories = osconfig.list_inventories(request={"parent": f"projects/{project_id}/locations/{zone}/instances/-", "view": "BASIC"})
+                covered |= inventory_instance_ids(inventories)
+            except core_exceptions.FailedPrecondition:
+                return [{"Project": project_id, "Issue": OS_INVENTORY_DISABLED, "Fix": os_config_fix(project_id)}]
+            except Exception as e:
+                if disabled_api(e) in ("osconfig.googleapis.com", ""):  # the API itself is off: VM Manager cannot run
+                    return [{"Project": project_id, "Issue": "The OS Config API is not enabled in this project: " + OS_INVENTORY_DISABLED,
+                             "Fix": os_config_fix(project_id)}]
+                skipped.add(project_id, e, resource_apis=())  # a 403, a 429: the project was not checked
+                return []
+        return os_config_rows(project_id, candidates, covered)
 
     results = []
     for project in all_projects:
-        # check_single_project returns a single dictionary or None
-        finding = check_single_project(project)
-        if finding:
-            # We append the single dictionary to our list of results
-            results.append(finding)
+        results.extend(check_single_project(project))
 
     if not results:
-        result = {"Check": CHECK_NAME, "Finding": [{"Status": "All unmanaged VMs appear to have OS Config agent."}], "Status": "Compliant"}
+        result = {"Check": OS_CONFIG_CHECK, "Finding": [{"Status": OS_CONFIG_ALL_CLEAR}], "Status": "Compliant"}
     else:
-        result = {"Check": CHECK_NAME, "Finding": results, "Status": "Action Required"}
-    sink.write_finding(job_id, CHECK_NAME.replace(" ", "_"), result)
+        result = {"Check": OS_CONFIG_CHECK, "Finding": results, "Status": "Action Required"}
+    sink.write_finding(job_id, OS_CONFIG_CHECK.replace(" ", "_"), result)
     skipped.write(sink, job_id)
+
+
+# Monitoring Alert Coverage (v18): whether a project that runs Cloud SQL, GKE or load balancers has an enabled alert
+# policy about them — matched on what Cloud Monitoring filters actually say, across every kind of condition.
+MONITORING_CHECK = "Monitoring Alert Coverage"
+MONITORED_ASSETS = {'sqladmin.googleapis.com/Instance': 'Cloud SQL', 'container.googleapis.com/Cluster': 'GKE Cluster',
+                    'compute.googleapis.com/ForwardingRule': 'Load Balancer'}
+ALERT_NEEDLES = {
+    'Cloud SQL': ("cloudsql_database", "cloudsql.googleapis.com"),
+    'GKE Cluster': ("k8s_", "kubernetes.io/", "gke_", "container.googleapis.com", "prometheus"),
+    'Load Balancer': ("loadbalancing.googleapis.com", "_lb_rule"),
+    'Quota': ("serviceruntime.googleapis.com/quota", "consumer_quota"),
+}
+ALERT_CONDITION_FIELDS = (("conditionThreshold", "filter"), ("conditionAbsent", "filter"), ("conditionMatchedLog", "filter"),
+                          ("conditionMonitoringQueryLanguage", "query"), ("conditionPrometheusQueryLanguage", "query"), ("conditionSql", "query"))
+MONITORING_ALL_CLEAR = "Every project running Cloud SQL, GKE or load balancers has an enabled alert policy about them, and one about quota."
+ALERT_FIX = {
+    'Cloud SQL': 'metric.type="cloudsql.googleapis.com/database/cpu/utilization" AND resource.type="cloudsql_database"',
+    'GKE Cluster': 'metric.type="kubernetes.io/container/restart_count" AND resource.type="k8s_container"',
+    'Load Balancer': 'metric.type="loadbalancing.googleapis.com/https/backend_request_count" AND resource.type="https_lb_rule" AND metric.labels.response_code_class="500"',
+    'Quota': 'metric.type="serviceruntime.googleapis.com/quota/allocation/usage" AND resource.type="consumer_quota"',
+}
+
+
+def alert_policy_text(policies):
+    """The condition filters and queries of the *enabled* policies, lower-cased and joined, plus a marker per PromQL condition."""
+    parts = []
+    for policy in policies:
+        if policy.get("enabled") is False:
+            continue
+        for condition in policy.get("conditions", []):
+            for kind, field in ALERT_CONDITION_FIELDS:
+                text = (condition.get(kind) or {}).get(field)
+                if text:
+                    parts.append(str(text).lower())
+            if condition.get("conditionPrometheusQueryLanguage"):
+                parts.append("prometheus")  # Managed Prometheus alerting is GKE alerting
+    return " ".join(parts)
+
+
+def missing_alert_rows(project_id, present_assets, policy_text):
+    """The rows of a project: one per asset family it runs without an alert policy about it, plus quota when it runs any.
+
+    *Investigation Recommended*: alerting is operational readiness, not a posture fact.
+    """
+    rows = []
+    families = [name for asset_type, name in MONITORED_ASSETS.items() if asset_type in present_assets]
+    for name in families + (['Quota'] if families else []):
+        if any(needle in policy_text for needle in ALERT_NEEDLES[name]):
+            continue
+        rows.append({"Project": project_id, "Issue": f"No enabled alert policy for {name.lower() if name == 'Quota' else name}.",
+                     "Fix": f"gcloud alpha monitoring policies create --project={project_id} --policy-from-file=<policy.json>  "
+                            f"# a condition on {ALERT_FIX[name]}"})
+    return rows
 
 
 def check_monitoring_coverage(scope_id, all_projects, job_id, *, sink):
     """
-    Scans projects for key monitoring alert policies (e.g., for Cloud SQL, GKE, Quotas).
+    Scans projects for alert policies about the critical resources they run (Cloud SQL, GKE, load balancers) and quota.
+
+    v18: the match is on what Monitoring filters say (``ALERT_NEEDLES``: ``cloudsql_database``,
+    ``k8s_``, ``_lb_rule`` …) across every kind of condition — threshold, absence, log match, MQL,
+    PromQL, SQL — over the enabled policies, every page; the legacy needles (``cloud_sql``,
+    ``gke_cluster``, ``load_balancer``) never occur in a real filter, so every project with those
+    assets was flagged on every scan. The verdict is *Investigation Recommended*; the quota row
+    only for projects running one of the three asset families. Alert policies kept in a metrics
+    scoping project are not seen (the row says the project itself has none).
 
     Args:
-        org_id (str): The organization ID.
+        scope_id (str): The scope ID.
         all_projects (list): A list of project dictionaries.
-
-    Returns:
-        list: A list of finding dictionaries for projects missing essential alerts.
     """
-    CHECK_NAME = "Monitoring Alert Coverage"
-    print(f"📊 [{job_id}] Checking {CHECK_NAME} in parallel...")
+    print(f"📊 [{job_id}] Checking {MONITORING_CHECK} in parallel...")
     if not all_projects: return []
-    skipped = NotChecked(CHECK_NAME)
-    
+    skipped = NotChecked(MONITORING_CHECK)
+
     def check_project(project):
-        project_id, issues = project['projectId'], []
+        project_id = project['projectId']
         try:
             credentials, _ = gcp.auth_default(scopes=SCOPES)
             monitor = gcp.api_build('monitoring', 'v3', credentials=credentials)
             asset = gcp.asset_client(credentials)
-            policies = monitor.projects().alertPolicies().list(name=f"projects/{project_id}").execute().get('alertPolicies', [])
-            filters = " ".join(c.get('conditionThreshold', {}).get('filter', '') for p in policies for c in p.get('conditions', [])).lower()
-            
-            asset_map = {'sqladmin.googleapis.com/Instance': 'Cloud SQL', 'container.googleapis.com/Cluster': 'GKE Cluster', 'compute.googleapis.com/ForwardingRule': 'Load Balancer'}
-            for asset_type, name in asset_map.items():
-                if list(asset.list_assets(request={"parent": f"projects/{project_id}", "asset_types": [asset_type]})) and name.lower().replace(" ", "_") not in filters:
-                    issues.append({"Project": project_id, "Issue": f"Missing alert policy for {name}"})
-            if "serviceruntime.googleapis.com/quota" not in filters:
-                issues.append({"Project": project_id, "Issue": "Missing Quota alerting policy"})
-        except Exception as e: skipped.add(project_id, e)
-        return issues
-        
+            policies, request = [], monitor.projects().alertPolicies().list(name=f"projects/{project_id}")
+            while request:
+                response = request.execute()
+                policies.extend(response.get('alertPolicies', []))
+                request = monitor.projects().alertPolicies().list_next(previous_request=request, previous_response=response)
+            present = {asset_type for asset_type in MONITORED_ASSETS
+                       if list(asset.list_assets(request={"parent": f"projects/{project_id}", "asset_types": [asset_type]}))}
+            return missing_alert_rows(project_id, present, alert_policy_text(policies))
+        except Exception as e:
+            skipped.add(project_id, e)
+            return []
+
     results = []
     for project in all_projects:
-        # check_project returns a list of findings for the project
-        findings = check_project(project)
-        if findings:
-            # We extend the main results list with the items from the findings list
-            results.extend(findings)
+        results.extend(check_project(project))
 
     if not results:
-        result = {"Check": CHECK_NAME, "Finding": [{"Status": "All projects appear to have key alert policies."}], "Status": "Compliant"}
+        result = {"Check": MONITORING_CHECK, "Finding": [{"Status": MONITORING_ALL_CLEAR}], "Status": "Compliant"}
     else:
-        result = {"Check": CHECK_NAME, "Finding": results, "Status": "Action Required"}
-    sink.write_finding(job_id, CHECK_NAME.replace(" ", "_"), result)
+        result = {"Check": MONITORING_CHECK, "Finding": results, "Status": INVESTIGATION}
+    sink.write_finding(job_id, MONITORING_CHECK.replace(" ", "_"), result)
     skipped.write(sink, job_id)
+
+
+STANDALONE_VMS_CHECK = "Standalone VMs (Not in MIGs)"
 
 
 def check_standalone_vms(scope_id, all_projects, job_id, *, sink):
@@ -183,16 +301,15 @@ def check_standalone_vms(scope_id, all_projects, job_id, *, sink):
     Identifies standalone VMs that are not managed by a Managed Instance Group (MIG).
     Excludes GKE and Dataproc VMs.
 
-    Args:
-        org_id (str): The organization ID.
-        all_projects (list): A list of project dictionaries.
+    v18: *Informational* — a standalone VM is a design choice (a bastion, a licence-bound
+    database, a workstation), so the list is an inventory for review, outside the score.
 
-    Returns:
-        list: A list of finding dictionaries for standalone VMs.
+    Args:
+        scope_id (str): The scope ID.
+        all_projects (list): A list of project dictionaries.
     """
-    CHECK_NAME = "Standalone VMs (Not in MIGs)"
-    print(f"🖥️  [{job_id}] Checking for {CHECK_NAME}...")
-    skipped = NotChecked(CHECK_NAME, resource_apis=("compute.googleapis.com",))
+    print(f"🖥️  [{job_id}] Checking for {STANDALONE_VMS_CHECK}...")
+    skipped = NotChecked(STANDALONE_VMS_CHECK, resource_apis=("compute.googleapis.com",))
 
     def check_project(p):
         project_id = p['projectId']
@@ -205,11 +322,10 @@ def check_standalone_vms(scope_id, all_projects, job_id, *, sink):
                 for res in resp.get('items', {}).values():
                     if 'instances' in res: vms.extend(res['instances'])
 
-            # --- FIX: Added a filter to exclude Dataproc VMs by label and GKE by name ---
             standalone = [
                 vm['name'] for vm in vms
                 if not any(item.get('key') == 'created-by' for item in vm.get('metadata', {}).get('items', []))
-                and not vm['name'].startswith('gke-')
+                and not vm['name'].startswith(MANAGED_FLEET_PREFIXES)
                 and 'goog-dataproc-cluster-name' not in vm.get('labels', {})
             ]
             
@@ -225,11 +341,48 @@ def check_standalone_vms(scope_id, all_projects, job_id, *, sink):
             all_findings.append(finding)
 
     if all_findings:
-        result = {"Check": CHECK_NAME, "Finding": all_findings, "Status": "Investigation Recommended"}
+        result = {"Check": STANDALONE_VMS_CHECK, "Finding": all_findings, "Status": INFORMATIONAL}
     else:
-        result = {"Check": CHECK_NAME, "Finding": [{"Status": "No running standalone, unmanaged VMs found."}], "Status": "Compliant"}
-    sink.write_finding(job_id, CHECK_NAME.replace(" ", "_"), result)
+        result = {"Check": STANDALONE_VMS_CHECK, "Finding": [{"Status": "No running standalone, unmanaged VMs found."}], "Status": "Compliant"}
+    sink.write_finding(job_id, STANDALONE_VMS_CHECK.replace(" ", "_"), result)
     skipped.write(sink, job_id)
+
+
+# Miscellaneous (v18): the three names it writes, each with a verdict or a note; errors as Error rows or Projects not checked.
+FIREWALL_COMPLEXITY_CHECK = "VPC Firewall Complexity (>150 Rules)"
+RECENT_CHANGES_CHECK = "Recent Changes (Org & Project)"
+UNATTENDED_CHECK = "Unattended Projects"
+FIREWALL_RULE_LIMIT = 150
+RECENT_CHANGE_INSIGHT = "google.cloud.RecentChangeInsight"
+UNATTENDED_RECOMMENDER = "google.resourcemanager.projectUtilization.Recommender"
+NO_RECENT_CHANGES = "No recent-change insights (IAM policy, firewall or organization changes Active Assist flags) in the scanned scope."
+
+
+def active_recommendations(recommendations):
+    """The recommendations (or insights) still ACTIVE: the server filter asks for them, this keeps a client that ignores it honest."""
+    kept = []
+    for item in recommendations:
+        state = getattr(getattr(item, "state_info", None), "state", None)
+        name = getattr(state, "name", state)
+        if name in (None, "", 0, "ACTIVE", "STATE_UNSPECIFIED"):
+            kept.append(item)
+    return kept
+
+
+def unattended_project(reco):
+    """The project an unattended-project recommendation is about: its ``target_resources`` (a project ID or number),
+    else the resource of its first operation, else the project named in its description."""
+    targets = list(getattr(reco, "target_resources", None) or [])
+    if targets:
+        return str(targets[0]).rsplit("/", 1)[-1]
+    try:
+        operation = reco.content.operation_groups[0].operations[0]
+        if operation.resource:
+            return str(operation.resource).rsplit("/", 1)[-1]
+    except (AttributeError, IndexError):
+        pass
+    match = re.search(r"Project `([^`]+)`", getattr(reco, "description", "") or "")
+    return match.group(1) if match else "Unknown"
 
 
 def run_miscellaneous_checks_refactored(scope, scope_id, all_projects, job_id, *, sink, org_insights=True, project_checks=True):
@@ -241,29 +394,40 @@ def run_miscellaneous_checks_refactored(scope, scope_id, all_projects, job_id, *
     insights are fetched once rather than once per shard: project shards call
     this with ``org_insights=False``, the scope shard with ``project_checks=False``
     (and no projects). With both flags on (the default) the behavior is the legacy one.
+
+    v18: firewall complexity reads every page and writes its all-clear row; the
+    organization-level insights' failures are Error rows under their own names (before,
+    one error row was appended to both records, and *Unattended Projects* read Action
+    Required with an error as its only row); a project whose recent changes could not be
+    read is under *Projects not checked*; unattended projects are *Investigation Recommended*
+    (a hygiene prompt), named by the recommendation's target project, ACTIVE ones only; the
+    recent-changes briefing says when there were none.
     """
     print("🔍 Performing Miscellaneous checks...")
     if project_checks and not all_projects:
         return []
 
-    # Initialize lists to hold structured data for each finding type
-    firewall_findings = []
-    recent_change_findings = []
-    unattended_findings = []
-
+    recent_change_findings, unattended_findings = [], []
+    org_errors = {}  # check name -> the error that stopped its organization-level listing
 
     # --- Check 1: Firewall Rules (Runs for all scopes) ---
-    FIREWALL_CHECK_NAME = "VPC Firewall Complexity (>150 Rules)"
-    firewall_skipped = NotChecked(FIREWALL_CHECK_NAME, resource_apis=("compute.googleapis.com",))
+    firewall_skipped = NotChecked(FIREWALL_COMPLEXITY_CHECK, resource_apis=("compute.googleapis.com",))
+    answered = False
 
     def check_firewall_rules_count(project):
+        nonlocal answered
         project_id = project['projectId']
         try:
             credentials, _ = gcp.auth_default(scopes=SCOPES)
             compute_service = gcp.api_build('compute', 'v1', credentials=credentials)
-            rules = compute_service.firewalls().list(project=project_id).execute().get('items', [])
-            if len(rules) > 150:
-                return {"Project": project_id, "Rule Count": len(rules), "Recommendation": f"Project has {len(rules)} firewall rules."}
+            count, request = 0, compute_service.firewalls().list(project=project_id)
+            while request:
+                response = request.execute()
+                count += len(response.get('items', []))
+                request = compute_service.firewalls().list_next(previous_request=request, previous_response=response)
+            answered = True
+            if count > FIREWALL_RULE_LIMIT:
+                return {"Project": project_id, "Rule Count": count, "Recommendation": f"Project has {count} firewall rules."}
         except Exception as e: firewall_skipped.add(project_id, e)
         return None
 
@@ -274,7 +438,10 @@ def run_miscellaneous_checks_refactored(scope, scope_id, all_projects, job_id, *
             firewall_findings.append(finding)
 
     if firewall_findings:
-        result = {"Check": FIREWALL_CHECK_NAME, "Finding": firewall_findings, "Status": "Investigation Recommended"}
+        result = {"Check": FIREWALL_COMPLEXITY_CHECK, "Finding": firewall_findings, "Status": INVESTIGATION}
+        sink.write_finding(job_id, "VPC_Firewall_Complexity", result)
+    elif answered:
+        result = {"Check": FIREWALL_COMPLEXITY_CHECK, "Finding": [{"Status": f"No project has more than {FIREWALL_RULE_LIMIT} VPC firewall rules."}], "Status": "Compliant"}
         sink.write_finding(job_id, "VPC_Firewall_Complexity", result)
     firewall_skipped.write(sink, job_id)
 
@@ -283,61 +450,42 @@ def run_miscellaneous_checks_refactored(scope, scope_id, all_projects, job_id, *
         print("   -> Checking for organization-level insights...")
         try:
             recommender_client = gcp.recommender_client()
-            
-            # Check for Org-Level Recent Changes
-            parent_recent = f"organizations/{scope_id}/locations/global/insightTypes/google.cloud.RecentChangeInsight"
-            api_call_recent = lambda: recommender_client.list_insights(parent=parent_recent)
-            for insight in call_api_with_backoff(api_call_recent, context_message="Org-Level Recent Changes"):
-                recent_change_findings.append({
-                    "Project": f"Org-Level ({scope_id})",
-                    "Insight": insight.description
-                })
-
-            # Check for Unattended Project Recommendations
-            parent_unattended = f"organizations/{scope_id}/locations/global/recommenders/google.resourcemanager.projectUtilization.Recommender"
-            api_call_unattended = lambda: recommender_client.list_recommendations(parent=parent_unattended)
-            for reco in call_api_with_backoff(api_call_unattended, context_message="Unattended Projects"):
-                project_id_from_reco = "Unknown"
-                # Method 1: Try the structured targetResources field (camelCase)
-                if hasattr(reco, 'targetResources') and reco.targetResources:
-                    project_id_from_reco = reco.targetResources[0].split('/')[-1]
-
-                # Method 2: Try the operation_groups field (snake_case)
-                elif (hasattr(reco.content, 'operation_groups') and reco.content.operation_groups and
-                      reco.content.operation_groups[0].operations and reco.content.operation_groups[0].operations[0].resource):
-                    project_id_from_reco = reco.content.operation_groups[0].operations[0].resource.split('/')[-1]
-
-                # Method 3: As a final fallback, parse the description string
-                elif reco.description:
-                    match = re.search(r"Project `([^`]+)`", reco.description)
-                    if match:
-                        project_id_from_reco = match.group(1)
-                        
-                unattended_findings.append({"Project": project_id_from_reco, "Recommendation": reco.description})
         except Exception as e:
-            # Add a single error message if the org-level API calls fail
-            error_finding = {"Project": scope_id, "Insight": f"Could not retrieve organization-level insights. Error: {e}"}
-            recent_change_findings.append(error_finding)
-            unattended_findings.append(error_finding)
+            org_errors[RECENT_CHANGES_CHECK] = org_errors[UNATTENDED_CHECK] = e
+        else:
+            parent_recent = f"organizations/{scope_id}/locations/global/insightTypes/{RECENT_CHANGE_INSIGHT}"
+            errors = []
+            insights = call_api_with_backoff(lambda: recommender_client.list_insights(request={"parent": parent_recent, "filter": ACTIVE_RECOMMENDATIONS}),
+                                             context_message="Org-Level Recent Changes", on_error=errors.append)
+            if errors:
+                org_errors[RECENT_CHANGES_CHECK] = errors[0]
+            for insight in active_recommendations(insights):
+                recent_change_findings.append({"Project": f"Org-Level ({scope_id})", "Insight": insight.description})
 
+            parent_unattended = f"organizations/{scope_id}/locations/global/recommenders/{UNATTENDED_RECOMMENDER}"
+            errors = []
+            recommendations = call_api_with_backoff(lambda: recommender_client.list_recommendations(parent=parent_unattended, filter=ACTIVE_RECOMMENDATIONS),
+                                                    context_message="Unattended Projects", on_error=errors.append)
+            if errors:
+                org_errors[UNATTENDED_CHECK] = errors[0]
+            for reco in active_recommendations(recommendations):
+                unattended_findings.append({"Project": unattended_project(reco), "Recommendation": reco.description})
 
     # --- Project-Level Recent Changes Check (Runs for all scopes) ---
     print("   -> Checking for project-level recent changes...")
+    recent_skipped = NotChecked(RECENT_CHANGES_CHECK)
+
     def check_project_for_iam_changes(project):
         project_id = project['projectId']
-        project_findings_list = []
         try:
             recommender_client = gcp.recommender_client()
-            parent = f"projects/{project_id}/locations/global/insightTypes/google.cloud.RecentChangeInsight"
-            insights = recommender_client.list_insights(parent=parent)
-            for insight in insights:
-                project_findings_list.append({
-                    "Project": project_id,
-                    "Insight": insight.description
-                })
-        except Exception:
-            pass 
-        return project_findings_list
+            parent = f"projects/{project_id}/locations/global/insightTypes/{RECENT_CHANGE_INSIGHT}"
+            insights = recommender_client.list_insights(request={"parent": parent, "filter": ACTIVE_RECOMMENDATIONS})
+            return [{"Project": project_id, "Insight": insight.description} for insight in active_recommendations(insights)]
+        except Exception as e:
+            if not is_request_error(e):
+                recent_skipped.add(project_id, e)
+            return []
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
         results = executor.map(check_project_for_iam_changes, all_projects if project_checks else [])
@@ -345,12 +493,23 @@ def run_miscellaneous_checks_refactored(scope, scope_id, all_projects, job_id, *
             recent_change_findings.extend(res_list)
 
     # --- Final Assembly ---
-    if recent_change_findings:
-        result = {"Check": "Recent Changes (Org & Project)", "Finding": recent_change_findings, "Status": "Informational"}
-        sink.write_finding(job_id, "Recent_Changes", result)
-    
-    if unattended_findings:
-        result = {"Check": "Unattended Projects", "Finding": unattended_findings, "Status": "Action Required"}
+    if RECENT_CHANGES_CHECK in org_errors:
+        result = {"Check": RECENT_CHANGES_CHECK, "Finding": [{"Error": f"Could not list the organization's recent-change insights: {org_errors[RECENT_CHANGES_CHECK]}"}], "Status": "Error"}
+    elif recent_change_findings:
+        result = {"Check": RECENT_CHANGES_CHECK, "Finding": recent_change_findings, "Status": INFORMATIONAL}
+    else:
+        result = {"Check": RECENT_CHANGES_CHECK, "Finding": [{"Summary": NO_RECENT_CHANGES}], "Status": INFORMATIONAL}
+    sink.write_finding(job_id, "Recent_Changes", result)
+    recent_skipped.write(sink, job_id)
+
+    if UNATTENDED_CHECK in org_errors:
+        result = {"Check": UNATTENDED_CHECK, "Finding": [{"Error": f"Could not list the unattended-project recommendations: {org_errors[UNATTENDED_CHECK]}"}], "Status": "Error"}
+        sink.write_finding(job_id, "Unattended_Projects", result)
+    elif unattended_findings:
+        result = {"Check": UNATTENDED_CHECK, "Finding": unattended_findings, "Status": INVESTIGATION}
+        sink.write_finding(job_id, "Unattended_Projects", result)
+    elif scope == 'organization' and org_insights:
+        result = {"Check": UNATTENDED_CHECK, "Finding": [{"Status": "Active Assist flags no project as unattended."}], "Status": "Compliant"}
         sink.write_finding(job_id, "Unattended_Projects", result)
 
     print("✅ Miscellaneous checks complete.")
@@ -384,12 +543,18 @@ def run_service_limit_checks_refactored(scope_id, all_projects, job_id, *, sink)
         try:
             credentials, _ = gcp.auth_default(scopes=SCOPES)
             compute_service = gcp.api_build('compute', 'v1', credentials=credentials)
-            regions = [r['name'] for r in compute_service.regions().list(project=project_id).execute().get('items', [])]
-            
+            # v18: regions.list already carries every region's quotas; one call instead of one per region.
+            regions, request = [], compute_service.regions().list(project=project_id)
+            while request:
+                response = request.execute()
+                regions.extend(response.get('items', []))
+                request = compute_service.regions().list_next(previous_request=request, previous_response=response)
             for region in regions:
-                quotas = compute_service.regions().get(project=project_id, region=region).execute().get('quotas', [])
+                quotas = region.get('quotas')
+                if quotas is None:  # a client that lists names only (the fakes of older tests): ask for the region
+                    quotas = compute_service.regions().get(project=project_id, region=region['name']).execute().get('quotas', [])
                 for quota in quotas:
-                    row = quota_row(project_id, region, quota)
+                    row = quota_row(project_id, region['name'], quota)
                     if row:
                         exceeded_quotas.append(row)
         except Exception as e:
@@ -423,6 +588,9 @@ QUOTA_WARN_RATIO = 0.80
 QUOTA_CRITICAL_RATIO = 0.95
 ACCELERATOR, COMPUTE_FAMILY = "Accelerator", "Compute"
 ACCELERATOR_METRIC = re.compile(r"GPU|TPU|NVIDIA|AMD_|_VWS_", re.I)
+# v18: COMMITTED_* quotas are consumed by the commitments themselves — a project that committed exactly its quota sits at
+# 100 % by construction, with nothing to fix; the commitment side is Capacity Commitments' and the recommender's.
+EXCLUDED_QUOTA_PREFIXES = ("COMMITTED_",)
 QUOTA_RECOMMENDATIONS_CHECK = "Quota Increase Recommendations"
 QUOTA_RECOMMENDER = "google.resourcemanager.serviceLimit.Recommender"
 
@@ -433,8 +601,10 @@ def quota_family(metric):
 
 
 def quota_row(project_id, region, quota):
-    """The row of a regional quota at or over ``QUOTA_WARN_RATIO`` (with its ``_status``), or ``None`` below it."""
+    """The row of a regional quota at or over ``QUOTA_WARN_RATIO`` (with its ``_status``), or ``None`` below it or for an excluded metric."""
     usage, limit = float(quota.get('usage', 0.0) or 0), float(quota.get('limit', 0.0) or 0)
+    if str(quota.get('metric', '')).startswith(EXCLUDED_QUOTA_PREFIXES):
+        return None
     if limit <= 0 or usage / limit <= QUOTA_WARN_RATIO:  # over 80 %, as the check's name says
         return None
     ratio = usage / limit

@@ -331,10 +331,10 @@ def test_denied_projects_and_quota_errors_do_not_break_the_scan(gcp):
     # than passing as compliant. Network Insights always queries 'global', so its queries fail.
     assert {'Open Firewall Rules', 'GKE Hygiene', 'Network Insights (all 8 insight types)', 'Quota Utilization (>80%)',
             # v17: the global and BigQuery recommenders are asked regardless of discovered locations, and fail on their own
-            'Cost-Saving Recommendations (11 of 14 recommenders: Idle Cloud SQL Instances, Low Utilization VMs, VM Rightsizing, Unassociated IPs, '
-            'Idle Load Balancers, Idle Persistent Disks, Underutilized Reservations, Idle Reservations, Resource-Based Commitment Recommendations, '
+            'Cost-Saving Recommendations (10 of 13 recommenders: Idle Cloud SQL Instances, Low Utilization VMs, VM Rightsizing, Unassociated IPs, '
+            'Idle Persistent Disks, Underutilized Reservations, Idle Reservations, Resource-Based Commitment Recommendations, '
             'Overprovisioned Cloud SQL Instances, Cloud Run Cost: no zones or regions were discovered to query)',
-            'Cost-Saving Recommendations (3 of 14 recommenders: BigQuery Slot Commitments, Idle Images, Cloud Storage Soft Delete)',
+            'Cost-Saving Recommendations (3 of 13 recommenders: BigQuery Slot Commitments, Idle Images, Cloud Storage Soft Delete)',
             'Reservation Coverage', 'Commitments Expiring', 'Capacity Signals', 'Cloud Storage Lifecycle', 'IAM Least Privilege',
             'Quota Increase Recommendations'} <= {row[3] for row in rows}
     assert all('(synthetic)' in row[4] for row in rows)  # the reason is the API's message

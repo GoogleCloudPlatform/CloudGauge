@@ -126,59 +126,102 @@ def check_storage_versioning(scope_id, all_projects, job_id, *, sink):
     skipped.write(sink, job_id)
 
 
+GKE_HYGIENE_CHECK = "GKE Hygiene"
+GKE_DIAGNOSIS_RECOMMENDER = "google.container.DiagnosisRecommender"
+GKE_ACTIVE_FILTER = 'stateInfo.state="ACTIVE"'  # the REST form the check has always sent
+GKE_HYGIENE_ALL_CLEAR = "Every GKE cluster is on a release channel with auto-upgrades on, and Active Assist has no diagnosis for it."
+
+
+def cluster_channel(cluster):
+    """The cluster's release channel name, or ``""`` for a static-version cluster (``releaseChannel`` absent, empty or UNSPECIFIED)."""
+    channel = str((cluster.get('releaseChannel') or {}).get('channel') or "")
+    return "" if channel.upper() in ("", "UNSPECIFIED") else channel
+
+
+def gke_hygiene_rows(project_id, cluster):
+    """A cluster's own rows: no release channel, node pools without auto-upgrade — each with its fix and ``_status``."""
+    name, location = cluster.get('name'), cluster.get('location')
+    rows = []
+    if not cluster_channel(cluster):
+        rows.append({"Project": project_id, "Cluster": name, "Issue": "Not on a release channel.",
+                     "Fix": f"gcloud container clusters update {name} --location={location} --project={project_id} --release-channel=regular", "_status": "Action Required"})
+    for pool in cluster.get('nodePools', []):
+        if not (pool.get('management') or {}).get('autoUpgrade', False):
+            rows.append({"Project": project_id, "Cluster": name, "Node Pool": pool.get('name'), "Issue": "Auto-upgrades disabled.",
+                         "Fix": f"gcloud container node-pools update {pool.get('name')} --cluster={name} --location={location} --project={project_id} --enable-autoupgrade",
+                         "_status": "Action Required"})
+    return rows
+
+
+def recommendation_rows(project_id, location, clusters, recommendations):
+    """The diagnosis recommendations of one location attributed to their clusters by ``targetResources`` (v18: before, every
+    recommendation of the location was listed under every cluster of it); one not naming a cluster is ``(location-wide)``."""
+    names = {c.get('name') for c in clusters}
+    rows = []
+    for reco in recommendations:
+        targets = [str(t).rsplit('/', 1)[-1] for t in (reco.get('targetResources') or [])]
+        matched = [t for t in targets if t in names] or ["(location-wide)"]
+        for cluster in matched:
+            rows.append({"Project": project_id, "Cluster": cluster, "Recommendation": reco.get('description'), "_status": "Investigation Recommended"})
+    return rows
+
+
 def check_gke_hygiene(scope_id, all_projects, job_id, *, sink):
     """
     Checks GKE clusters for best practices like using release channels and auto-upgrades.
     Also fetches active recommendations for the clusters.
 
-    Args:
-        org_id (str): The organization ID.
-        all_projects (list): A list of project dictionaries.
+    v18: the Diagnosis recommender is asked once per location and its recommendations are
+    attributed by ``targetResources`` (``recommendation_rows``); a Recommender failure costs the
+    project its recommendation rows, not its cluster rows; recommendations are *Investigation
+    Recommended*; the channel test treats ``UNSPECIFIED`` as no channel; the rows carry fixes.
 
-    Returns:
-        list: A list of finding dictionaries for GKE hygiene issues.
+    Args:
+        scope_id (str): The scope ID.
+        all_projects (list): A list of project dictionaries.
     """
-    CHECK_NAME = "GKE Hygiene"
-    print(f"🚢 [{job_id}] Checking {CHECK_NAME} in parallel...")
-    skipped = NotChecked(CHECK_NAME, resource_apis=("container.googleapis.com",))
-    
+    print(f"🚢 [{job_id}] Checking {GKE_HYGIENE_CHECK} in parallel...")
+    skipped = NotChecked(GKE_HYGIENE_CHECK, resource_apis=("container.googleapis.com",))
+
     def check_project(p):
-        project_id, issues = p['projectId'], []
+        project_id, rows = p['projectId'], []
         try:
             credentials, _ = gcp.auth_default(scopes=SCOPES)
             container = gcp.api_build('container', 'v1', credentials=credentials)
-            recommender = gcp.api_build('recommender', 'v1', credentials=credentials)
-            
-            for cluster in container.projects().locations().clusters().list(parent=f"projects/{project_id}/locations/-").execute().get('clusters', []):
-                name, location = cluster.get('name'), cluster.get('location')
-
-                if not cluster.get('releaseChannel'):
-                    issues.append({"Project": project_id, "Cluster": name, "Issue": "Not on a release channel."})
-                
-                for pool in cluster.get('nodePools', []):
-                    if not pool.get('management', {}).get('autoUpgrade', False):
-                        issues.append({"Project": project_id, "Cluster": name, "Node Pool": pool.get('name'), "Issue": "Auto-upgrades disabled."})
-
-                
-                reco_parent = f"projects/{project_id}/locations/{location}/recommenders/google.container.DiagnosisRecommender"
-                reco_req = recommender.projects().locations().recommenders().recommendations().list(parent=reco_parent, filter='stateInfo.state="ACTIVE"')
-                for reco in reco_req.execute().get('recommendations', []):
-                    issues.append({"Project": project_id, "Cluster": name, "Recommendation": reco.get('description')})
+            clusters = container.projects().locations().clusters().list(parent=f"projects/{project_id}/locations/-").execute().get('clusters', [])
         except Exception as e:
             skipped.add(project_id, e)
-        return issues
+            return []
+        for cluster in clusters:
+            rows.extend(gke_hygiene_rows(project_id, cluster))
+        by_location = {}
+        for cluster in clusters:
+            by_location.setdefault(cluster.get('location'), []).append(cluster)
+        try:
+            recommender = gcp.api_build('recommender', 'v1', credentials=credentials)
+            for location, located in by_location.items():
+                reco_parent = f"projects/{project_id}/locations/{location}/recommenders/{GKE_DIAGNOSIS_RECOMMENDER}"
+                recommendations, request = [], recommender.projects().locations().recommenders().recommendations().list(parent=reco_parent, filter=GKE_ACTIVE_FILTER)
+                while request:
+                    response = request.execute()
+                    recommendations.extend(response.get('recommendations', []))
+                    request = recommender.projects().locations().recommenders().recommendations().list_next(previous_request=request, previous_response=response)
+                rows.extend(recommendation_rows(project_id, location, located, recommendations))
+        except Exception as e:
+            if clusters:
+                skipped.add(project_id, e, detail="Active Assist recommendations", resource_apis=())
+        return rows
 
     all_findings = []
     for project in all_projects:
-        findings = check_project(project)
-        if findings:
-            all_findings.extend(findings)
+        all_findings.extend(check_project(project))
 
     if all_findings:
-        result = {"Check": CHECK_NAME, "Finding": all_findings, "Status": "Action Required"}
+        statuses = {row.pop("_status") for row in all_findings}
+        result = {"Check": GKE_HYGIENE_CHECK, "Finding": all_findings, "Status": "Action Required" if "Action Required" in statuses else "Investigation Recommended"}
     else:
-        result = {"Check": CHECK_NAME, "Finding": [{"Status": "All checked GKE clusters seem to follow best practices."}], "Status": "Compliant"}
-    sink.write_finding(job_id, CHECK_NAME.replace(" ", "_"), result)
+        result = {"Check": GKE_HYGIENE_CHECK, "Finding": [{"Status": GKE_HYGIENE_ALL_CLEAR}], "Status": "Compliant"}
+    sink.write_finding(job_id, GKE_HYGIENE_CHECK.replace(" ", "_"), result)
     skipped.write(sink, job_id)
 
 

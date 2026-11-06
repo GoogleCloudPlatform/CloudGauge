@@ -8,7 +8,203 @@ the test suite running inside the image, a zero-traffic canary revision scanned
 against a real organization, promotion, and a production scan compared fact for
 fact with the previous version's report.
 
-Versions are the image tags (`v5` … `v17.3`); the commit is the one that shipped.
+Versions are the image tags (`v5` … `v18`); the commit is the one that shipped.
+
+---
+
+## v18 — Legacy checks revalidated
+
+The refactor kept the behaviour of the twenty-two checks it inherited and froze
+it in parity tests; it never asked whether the behaviour was right. v18 asked,
+check by check, against today's APIs and against Security Health Analytics on
+a real organization, and found that several of them could not be passed, could
+not be failed, or said something false: **Security Command Center Status** read
+`tier` from a resource that has no such field, so every organization — Premium
+and Enterprise included — read *Action Required: STANDARD*; **Monitoring Alert
+Coverage** looked for `cloud_sql`, `gke_cluster` and `load_balancer` in filters
+that never contain those words, so every project with those assets failed on
+every scan; **Organization Policies** scored 62 list constraints that it could
+only ever read as *Unsupported*; **Cloud SQL Security** read the deprecated
+`requireSsl` and flagged the recommended `ENCRYPTED_ONLY` mode while missing
+`0.0.0.0/0` in the authorized networks; **Open Firewall Rules** counted deny
+rules — the hardening pattern — as findings; **Primitive Roles** listed the
+Google APIs service agent, Editor by design in every project, so no real
+organization could pass; **OS Config Agent Coverage** turned a disabled API, a
+missing permission or OS inventory management being off into "every VM is not
+reporting"; **VM External IPs** flagged stopped instances whose address had
+long been released. This release is the correction: rows that disappear were
+never true, rows that appear were always there, and the Changes card says *rule
+changed* rather than *resolved* or *new*. The next release, v18.1, is for what
+is merely loose (the rules that should ask for more).
+
+### Changed
+
+Every revalidated check now has a pure rule over the API's own JSON, unit-tested
+on fixtures of the real shapes, a verdict that distinguishes what is wrong
+(*Action Required*) from what deserves a look (*Investigation Recommended*), and
+a `Fix` line on every row where one exists.
+
+- **Security Command Center Status**: reads `securitycenter v1beta2
+  organizations.getSubscription`, the resource that carries the tier. Premium
+  and Enterprise are Compliant; Standard is *Investigation Recommended* with a
+  neutral note on what the paid tiers add; a 404 (never activated) is *Action
+  Required*; the API being disabled in the scanner's own project is an *Error*,
+  not the organization's fault.
+- **Organization Policies**: the best-practices table's `Type` column is read.
+  A list constraint is compliant when a policy configures it (denies all
+  values, or names allowed or denied values); `allValues: ALLOW` and
+  `restoreDefault` are not configurations; a "won't have" constraint passes
+  when unset. *Unsupported* is gone. A hierarchy level that cannot be listed is
+  an *Error* instead of every policy silently reading *Not Configured*. (The
+  reader stays on Resource Manager v1: the probe showed it does return managed
+  constraints.)
+- **Primitive Roles (Owner or Editor)**: policy version 3 (conditions shown),
+  Google-managed service agents excluded, and the verdict by kind of holder — a
+  user-managed service account, a consumer account, a whole domain or the
+  public (on any role) *Action Required*; a person, a group or a default
+  service account *Investigation Recommended*. `Type`, `Condition` and `Fix`
+  columns. The empty-project-list Error writes under the check's own name.
+- **Critical Org-Level Roles**: Editor, Billing Administrator, Security
+  Administrator, Organization Role Administrator and Folder Administrator join
+  Owner and Organization Administrator; groups are the practice (a Compliant
+  inventory), a person *Investigation Recommended*, a service account, consumer
+  account, domain or public principal *Action Required*; Google-managed agents
+  excluded; `Fix` lines. **Public Org-Level Access** is unchanged in rule; both
+  write their errors under their own names (`Organization IAM Policy Check`
+  retired).
+- **Service Account Key Rotation**: disabled keys, expired keys and the keys
+  of disabled accounts are not rows; rows carry `Key ID`, `Created`, `Age
+  (days)`, `Expires`, `Origin` and the `keys disable` line; a project whose
+  keys could not be listed is under *Projects not checked* instead of turning
+  the check *Action Required* with an error row.
+- **Public GCS Buckets**: Public Access Prevention is read — on the bucket, and
+  the effective `storage.publicAccessPrevention` organization policy, once per
+  project with an open bucket; a blocked binding is *Investigation Recommended*
+  (dormant: remove it), an unblocked one *Action Required*; one row per public
+  principal with its roles and the `remove-iam-policy-binding` /
+  `--public-access-prevention` lines.
+- **Open Firewall Rules**: enabled *ingress allow* rules from `0.0.0.0/0` or
+  `::/0`, every page; `Protocols/Ports`, `Source Ranges`, `Targets`,
+  `Priority`; *Action Required* for everything, ranges and the sensitive ports
+  (the Security Health Analytics `OPEN_*_PORT` family), *Investigation
+  Recommended* for web ports and ICMP only; the fix is the IAP TCP-forwarding
+  range for SSH/RDP rules. Deny rules are never findings; firewall policies are
+  a later release.
+- **Cloud SQL Security**: `sqladmin v1`, every page; `sslMode` decides TLS
+  (`requireSsl` only when `sslMode` is absent); three rules — *TLS not
+  enforced* and *Open to the internet* (an authorized network of `0.0.0.0/0`
+  or `::/0` on a public IP) *Action Required*, *Public IP* alone *Investigation
+  Recommended*; `Kind` (primary/replica) and `Version` columns; the patch line
+  (a replica's names its primary).
+- **VM External IPs**: an instance is a row when it holds an address (`natIP`
+  or `externalIpv6`), one row per instance with `Zone`, `Status`, `External
+  IPs`, `Kind` (GKE node / MIG member / standalone) and the fix for that kind;
+  GKE nodes *Investigation Recommended*.
+- **OS Config Agent Coverage**: one `list_inventories` per zone (the
+  permission `roles/iam.securityReviewer` actually grants) instead of one
+  `get_inventory` per VM; `FailedPrecondition` → the project's one *OS
+  inventory management is disabled* row, a disabled OS Config API → likewise,
+  a 403 or 429 → *Projects not checked*; Autopilot (`gk3-`) nodes, Dataflow
+  and Batch workers excluded with GKE and Dataproc; one row per VM with `Zone`
+  and the `enable-osconfig` line.
+- **Monitoring Alert Coverage**: enabled policies, every page, every kind of
+  condition (threshold, absence, log match, MQL, PromQL, SQL), matched on
+  `cloudsql_database`/`cloudsql.googleapis.com`, `k8s_`/`kubernetes.io/`/
+  PromQL, `loadbalancing.googleapis.com`/`_lb_rule`,
+  `serviceruntime.googleapis.com/quota`; *Investigation Recommended*; the
+  quota row only for projects running one of the three asset families.
+- **GKE Hygiene**: the diagnosis recommender is asked once per location with
+  the ACTIVE filter and every page, and its recommendations are attributed by
+  `targetResources` (before, each was listed under every cluster of the
+  location); recommendations are *Investigation Recommended*; a Recommender
+  failure costs the project its recommendation rows, not its cluster rows;
+  `UNSPECIFIED` is no channel; fix lines.
+- **Network Insights** (eight names): asked at `global` and the active regions
+  (VPC insights live at `global`, GKE insights at the cluster's region; zones
+  answer nothing); ACTIVE insights only; a `Severity` column and the verdict by
+  it — Critical/High *Action Required*, Medium *Investigation Recommended*,
+  Low *Informational*; an insight type that answered with nothing writes its
+  all-clear row instead of nothing.
+- **Cost-Saving Recommendations**: every listing asks for
+  `stateInfo.state = ACTIVE` (applied and dismissed recommendations stop
+  persisting); a recommendation that costs more (an upsize) shows *none (costs
+  N more)* instead of a negative saving the Scorecard subtracted; **Idle Load
+  Balancers** retired — `google.compute.loadBalancer.IdleResourceRecommender`
+  is not a recommender (76 exist; none for load balancers), so it never
+  reached a verdict.
+- **Miscellaneous**: firewall complexity reads every page and writes its
+  all-clear row; the organization-level listings' failures are *Error* rows
+  under *Recent Changes* and *Unattended Projects* (before, one error row was
+  appended to both as a finding); a project whose recent changes cannot be
+  read is under *Projects not checked*; *Unattended Projects* is
+  *Investigation Recommended*, names the project by its target resource and
+  writes a Compliant row when Active Assist flags none; *Recent Changes*
+  writes a note when there were none.
+- **Standalone VMs (Not in MIGs)**: *Informational*.
+- **Quota Utilization (>80%)**: one `regions.list` per project (it already
+  carries every region's quotas) instead of one `regions.get` per region;
+  `COMMITTED_*` quotas excluded.
+- **Organization Log Sink**: its error writes under its own name (`Log Sink
+  Check` retired); the Action Required row carries the `sinks create` line.
+- **Sharded scans**: a check whose rows split between *Action Required* and
+  *Investigation Recommended* across shards is merged into one record under
+  the worst, as a single scan writes it (`categories.merge_shard_findings`).
+- `changes.RESHAPED_CHECKS`: *rule changed* at 18 for Organization Policies,
+  Security Command Center Status, Primitive Roles, Critical Org-Level Roles,
+  Service Account Key Rotation,
+  Public GCS Buckets, Open Firewall Rules, Cloud SQL Security, VM External IPs,
+  OS Config Agent Coverage, Monitoring Alert Coverage, GKE Hygiene, Quota
+  Utilization and the eight Network Insights names; *rows changed* for
+  Unattended Projects.
+- README: the Security, Reliability and Operations catalogues rewritten for
+  the fourteen checks; the two kinds of fixes paragraph; the roadmap
+  reconciled (below). `VERSION = "18"`.
+
+### Tests
+
+- `tests/test_revalidated_checks.py` (new, 40-odd): principal kinds; primitive
+  and critical role rows and both checks end to end (version 3, agents only →
+  Compliant, errors under their own names); the SCC tier row and the four
+  outcomes of the check; stale-key rows with a fixed clock and the
+  *Projects not checked* path; public-bucket rows under the three PAP states
+  and the one-read-per-project rule; firewall rows (allow-all, deny-all,
+  `::/0`, web, RDP+range, DNS, QUIC, egress, disabled, internal, IAP) and
+  paging; Cloud SQL rows for every `sslMode`, the open network, the public IP,
+  a replica, the legacy field and an instance without settings; external-IP
+  rows (running, stopped, static on stopped, IPv6, GKE node, MIG member, two
+  interfaces); OS Config exclusions, inventory matching and the four error
+  routes; real Monitoring filters across condition kinds; unattended-project
+  resolution and the miscellaneous records; committed quotas; the retired
+  recommender and the upsize; GKE Hygiene rows, attribution and the
+  recommender failure; Network Insights locations, severities and the
+  all-clear row; the parser's `Type` column, list-policy evaluation, the
+  evaluation by type and the unreadable level; the v18 lines of
+  `RESHAPED_CHECKS`.
+- `tests/test_beta_checks.py`: VPC Configuration and UBLA stay at parity with
+  beta v1; Cloud SQL Security and VM External IPs leave it by design (the
+  parity pinned the defects) and keep the skipped-project contract.
+- Synthetic world (drawn last): stopped VMs, disabled keys, Cloud SQL
+  authorized networks, PAP-enforced buckets; the provider answers the
+  subscription, `getEffectiveOrgPolicy`, inventories per zone, real
+  Monitoring filters, `allowed`/`denied`/`direction` on firewall rules,
+  `sslMode`, instance IDs, insight severities, `targetResources`; the
+  best-practices table carries `Type` and two list constraints. 996 tests.
+
+### Upgrade notes
+
+- The first scan after the upgrade shows *rule changed* for the checks above
+  instead of listing their old rows as resolved. Expect: Security Command
+  Center Status to read *Standard* (Investigation) where it read *Action
+  Required*, the Primitive Roles and Critical Org-Level Roles rows to lose the
+  Google-managed agents, Cloud SQL rows to disappear for `ENCRYPTED_ONLY`
+  instances, Open Firewall Rules to lose deny rules, Monitoring Alert Coverage
+  to clear where real alert policies exist, OS Config Agent Coverage to turn
+  into one row per project where VM Manager is off (or into *Projects not
+  checked* where the scanner may not read inventories), and *Idle Load
+  Balancers* to read *No longer checked*.
+- Nothing to grant and no new API: `securitycenter v1beta2`,
+  `getEffectiveOrgPolicy` and `osconfig.inventories.list` are covered by the
+  roles the README already lists.
 
 ---
 
@@ -1881,6 +2077,12 @@ performance; modernization; enablement; roadmap and roadblocks).
 | **v17.1** | The SSRF chain: GKE and identity hardening | *Shipped.* **GKE Credential Exposure** (metadata server, node account, roles, scopes, *one SSRF from roles/editor*), **Service Account Impersonation** (who can become which service account, with reach), **GKE Control Plane Exposure**, **GKE Node Hardening**, **GKE Threat Detection**, **VPC Service Controls Coverage**; the nine `container.managed.*` guardrails in Organization Policies. No new role, no new API. |
 | **v17.2** | Deploy with Terraform | *Shipped.* `terraform/` declares the deployment of `tools/deploy.sh` — the APIs, the account and its roles, the bucket, the queue, the worker and the web service behind IAP, the export, the schedules, and on request the organization-level roles — in two applies around one Cloud Build; the test suite holds it to the script, the README and the app. |
 | **v17.3** | Incidents as evidence | *Shipped.* The Service Health briefing off the Scorecard and the executive summary, *Impacted* plus location-specific *Related* by default, switchable; **Incident Exposure** (the customer's zonal assets in the locations and product of each location-specific incident, one row per asset with the incidents as evidence) and **GKE Cluster Resilience** (zonal control planes, single-zone node pools); list cells fixed. No new role, no new API. |
-| **v17.4** | Forecasts, budgets and spend | **Spend-based commitment recommendations** from the organization's **Recommender export to BigQuery** (`RECOMMENDATIONS_EXPORT`; a dataset-level read, no billing-account IAM); **Capacity Planner** forecasts (the spike showed `forecasts:query` works per region for vCPUs by family and GPUs by type: `capacityplanner.googleapis.com`, `roles/capacityplanner.viewer`; reservation usage stays on the Compute API); **budget coverage** (projects and billing accounts without a budget); a **spend briefing** over the billing export; cost anomalies if an API exists. |
-| **v18** | Footprint, support and detection | A **Platform Footprint** page (what runs where: services, regions, versions); **modernization indicators** (legacy runtimes, unmanaged VMs, missing release channels); a **Support cases** briefing; the deprecations recommender; the detective half of the SSRF chain over Cloud Logging — **GKE control-plane activity** (exec, webhooks, RBAC and DaemonSet changes by service accounts or external IPs), **service-account activity signals**, **edge protection** (external load balancers without Cloud Armor). |
+| **v18** | Legacy checks revalidated | *Shipped.* The twenty-two inherited checks re-read against today's APIs and Security Health Analytics: what was wrong corrected (a constant SCC tier, Monitoring needles no filter contains, list constraints scored as failures, `requireSsl`, deny rules as findings, the Google APIs agent as a finding, OS Config's swallowed errors, stopped VMs' released addresses), verdicts split between *Action Required* and *Investigation Recommended*, a `Fix` on every row that has one, *rule changed* on the Changes card. |
+| **v18.1** | Legacy checks revalidated — what is loose | Cloud Storage Versioning scoped to log-sink and retention buckets (soft delete and lifecycle as protection); VPC Configuration without proxy-only subnets and with the default network's auto-subnets collapsed; Organization Log Sink's filter, state and `includeChildren`, and a **Data Access Audit Logs** check from the organization's `auditConfigs`; Essential Contacts without invalid contacts and for folder/project scans; cost recommendations by priority with fix lines; GKE auto-repair; project-global quotas; the bundled best-practices table as the default; Asset-Inventory listings shared between checks. |
+| **v18.2** | GKE upgrade readiness & hygiene | Maintenance windows and exclusions, security-bulletin notifications, surge settings, integrity monitoring, intranode visibility, monitoring components, PDBs that block drains — from the cluster listing the security checks already make. |
+| **v18.3** | Network edge & reachability | Interconnect/VPN redundancy, load balancer health-check firewall reachability, Cloud Armor on external load balancers, weak TLS policies and HTTP-only load balancers, DNSSEC, VPC flow logs, DNS logging, firewall policies, Cloud NAT capacity. |
+| **v18.4** | Data governance | Public BigQuery datasets and tables, BigQuery time travel and expiration defaults, Cloud SQL flag packs, AlloyDB exposure and backups, KMS rotation and IAM, API keys. |
+| **v18.5** | VM hardening & identities | Default service accounts and scopes on VMs, OS Login, project-wide SSH keys, serial ports, Shielded VM, public images, non-organization members, administrative and unused service accounts. |
+| **v19** | Footprint and detection | A **Platform Footprint** page (what runs where: services, regions, versions); the detective half of the SSRF chain over Cloud Logging — **GKE control-plane activity** (exec, webhooks, RBAC and DaemonSet changes by service accounts or external IPs), **service-account activity signals**; a **Support cases** briefing (its own API and role, its own decision); the deprecations recommender, once confirmed to exist. |
+| On hold | Forecasts, budgets and spend | **Spend-based commitment recommendations** from the organization's **Recommender export to BigQuery** (`RECOMMENDATIONS_EXPORT`; a dataset-level read, no billing-account IAM); **Capacity Planner** forecasts (`capacityplanner.googleapis.com`, `roles/capacityplanner.viewer`); **budget coverage**; a **spend briefing** over the billing export; cost anomalies if an API exists. Numbered when taken up; the export keeps running. |
 | Later | | VM Manager vulnerability summary, Security Command Center findings summary, SLO coverage, PDF export. |

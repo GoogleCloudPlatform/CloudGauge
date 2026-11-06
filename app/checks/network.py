@@ -160,41 +160,71 @@ def parse_network_insight_content(insight_dict, description, project_id, check_n
     return parsed_findings_list
 
 
+# v18: insights by severity. Network Analyzer rates every insight; an informational one is not a verdict against Operations.
+SEVERITY_STATUS = {"CRITICAL": "Action Required", "HIGH": "Action Required", "MEDIUM": "Investigation Recommended",
+                   "LOW": "Informational", "SEVERITY_UNSPECIFIED": "Investigation Recommended", "": "Investigation Recommended"}
+STATUS_RANK = {"Action Required": 3, "Investigation Recommended": 2, "Informational": 1, "Compliant": 0}
+NOTHING_FOUND = {name: f"No active {name} insights from Network Analyzer." for name in NETWORK_INSIGHT_TYPES}
+ACTIVE_INSIGHTS = "stateInfo.state = ACTIVE"
+
+
+def insight_locations(active_regions):
+    """Where Network Analyzer is asked (v18): ``global`` (VPC, hybrid and managed-service insights) plus the active regions
+    (GKE insights live at the cluster's region); never zones, which answer nothing."""
+    regions = [region for region in active_regions if region and region != "global"]
+    return ["global"] + sorted(set(regions))
+
+
+def insight_severity(insight_dict):
+    """The insight's severity name (``CRITICAL`` … ``LOW``), ``""`` when it has none."""
+    severity = insight_dict.get("severity")
+    return str(getattr(severity, "name", severity) or "").upper()
+
+
+def is_active_insight(insight_dict):
+    """Whether an insight is still ACTIVE (a dismissed or accepted one is not a finding)."""
+    state = (insight_dict.get("state_info") or insight_dict.get("stateInfo") or {}).get("state")
+    return str(getattr(state, "name", state) or "ACTIVE").upper() in ("ACTIVE", "STATE_UNSPECIFIED", "0")
+
+
 def run_network_insights(scope_id, all_projects, active_zones, active_regions, job_id, location_errors=None, *, sink):
     """
     Fetches and parses Network Analyzer insights across all projects.
     Normalizes various insight types into a consistent, table-friendly format.
 
+    v18: asked at ``global`` and the active regions only (``insight_locations``), ACTIVE insights
+    only, every row carries the insight's ``Severity`` and the record's status follows the worst of
+    them (``SEVERITY_STATUS``: an informational insight no longer reads *Action Required*), and an
+    insight type that answered everywhere with nothing writes its Compliant row instead of nothing.
+
     Args:
         scope_id (str): The organization, folder, or project ID being scanned.
         all_projects (list): A list of project dictionaries.
-        active_zones (list): A list of active GCP zones.
+        active_zones (list): A list of active GCP zones (no longer queried).
         active_regions (list): A list of active GCP regions.
         location_errors (dict): Project ID -> the error that stopped location discovery
             for it (``get_active_compute_locations``); such a project is reported as
             not checked, having been queried only at other projects' locations.
-
-    Returns:
-        list: A list of finding dictionaries, grouped by insight type.
     """
     print("🌐 Performing Network Insights checks (Final Normalized Parser)...")
     if not all_projects: return []
-    
-    all_locations = active_zones + active_regions
+
+    all_locations = insight_locations(active_regions)
     location_errors = location_errors or {}
 
     insight_type_map = NETWORK_INSIGHT_TYPES
     # Skips are reported under the check's display name (app.checks.registry); the
     # rows say which insight types could not be queried for the project.
     skipped = NotChecked("Network Insights")
+    answered = set()  # insight types that completed a listing somewhere: the ones that reached a verdict
 
     def check_project(project):
         project_id = project['projectId']
-        project_findings_map = {} 
+        project_findings_map = {}
         failed = {}  # insight name -> the first error that stopped it in this project
 
         def note_failure(check_name, error):
-            # Every insight type is queried in every zone and region; an invalid
+            # Every insight type is queried at global and every region; an invalid
             # argument or not-found there is a location mismatch, not a skipped project.
             if not is_request_error(error):
                 failed.setdefault(check_name, error)
@@ -202,29 +232,30 @@ def run_network_insights(scope_id, all_projects, active_zones, active_regions, j
         try:
             client = gcp.recommender_client()
             for loc in all_locations:
-                for check_name, insight_type_id in insight_type_map.items(): 
+                for check_name, insight_type_id in insight_type_map.items():
                     parent = f"projects/{project_id}/locations/{loc}/insightTypes/{insight_type_id}"
                     try:
-                        api_call = lambda: client.list_insights(parent=parent)
+                        errors = []
+                        api_call = lambda: client.list_insights(request={"parent": parent, "filter": ACTIVE_INSIGHTS})
                         context = f"'{check_name}' in {project_id} at {loc}"
-                        on_error = lambda error, name=check_name: note_failure(name, error)
+                        on_error = lambda error, name=check_name: (errors.append(error), note_failure(name, error))
                         for insight in call_api_with_backoff(api_call, context_message=context, on_error=on_error):
                             parsed_data_list = []
                             try:
-                                insight_dict = Insight.to_dict(insight)
-                                
-                                # --- MODIFIED CALL ---
-                                # Pass the check_name INTO the parser so it knows what it's parsing.
+                                insight_dict = Insight.to_dict(insight, use_integers_for_enums=False)  # severity and state by name
+                                if not is_active_insight(insight_dict):
+                                    continue
                                 parsed_data_list = parse_network_insight_content(insight_dict, insight.description, project_id, check_name)
-
+                                severity = insight_severity(insight_dict)
                             except Exception as e:
                                 parsed_data_list = [{"Project": project_id, "Finding Type": "Top-level Parse Error", "Resource": insight.description, "Detail": str(e), "Value": "N/A"}]
-                            
-                            if check_name not in project_findings_map:
-                                project_findings_map[check_name] = []
-
-                            project_findings_map[check_name].extend(parsed_data_list)
-                            
+                                severity = ""
+                            for row in parsed_data_list:
+                                row["Severity"] = severity.capitalize() if severity else "Unrated"
+                                row["_status"] = SEVERITY_STATUS.get(severity, "Investigation Recommended")
+                            project_findings_map.setdefault(check_name, []).extend(parsed_data_list)
+                        if not errors:
+                            answered.add(check_name)
                     except Exception as e:
                         note_failure(check_name, e)
         except Exception as e:
@@ -238,25 +269,29 @@ def run_network_insights(scope_id, all_projects, active_zones, active_regions, j
             skipped.add(project_id, location_errors[project_id], resource_apis=LOCATION_DISCOVERY_APIS,
                         detail=location_detail(bool(all_locations), len(insight_type_map), "insight type"))
         return project_findings_map
-        
+
 
     project_results_list = []
     for project in all_projects:
         project_results_list.append(check_project(project))
 
-    
+
     # Aggregate results from all projects
     final_findings_by_check = {}
     for project_map in project_results_list:
         for check_name, findings in project_map.items():
-            if check_name not in final_findings_by_check:
-                final_findings_by_check[check_name] = []
-            final_findings_by_check[check_name].extend(findings)
+            final_findings_by_check.setdefault(check_name, []).extend(findings)
 
-
-    # Write one file per insight type
-    for check_name, all_findings in final_findings_by_check.items():
+    # Write one file per insight type: its rows under the worst severity, or its all-clear row when it answered with none.
+    for check_name in insight_type_map:
+        all_findings = final_findings_by_check.get(check_name)
         if all_findings:
-            result = {"Check": check_name, "Finding": all_findings, "Status": "Action Required"}
-            sink.write_finding(job_id, check_name.replace(" ", "_"), result)
+            statuses = [row.pop("_status", "Investigation Recommended") for row in all_findings]
+            status = max(statuses, key=lambda s: STATUS_RANK.get(s, 0))
+            result = {"Check": check_name, "Finding": all_findings, "Status": status}
+        elif check_name in answered:
+            result = {"Check": check_name, "Finding": [{"Status": NOTHING_FOUND[check_name]}], "Status": "Compliant"}
+        else:
+            continue  # no verdict: nothing to write
+        sink.write_finding(job_id, check_name.replace(" ", "_"), result)
     skipped.write(sink, job_id)
