@@ -345,6 +345,8 @@ CloudGauge runs as **two Cloud Run services from one image**, in a project of yo
 
 No load balancer, domain, certificate or OAuth client is involved: IAP on Cloud Run needs the `iap.googleapis.com` API and the `--iap` flag. A project that belongs to an organization needs no console step; gcloud warns that a project without one may need a one-time setup in the console the first time IAP is enabled.
 
+These two are the two halves of the application, not two copies of it, and that is all a deployment is: **two services, one revision each**, whichever method below you use — and two idle services cost what one idle service does, nothing, since no minimum instances are set. A *canary* is never a service: it is a zero-traffic revision tag on one of these two, which only [Updating an Existing Deployment](#updating-an-existing-deployment-zero-downtime) creates and whose last step removes it. A fresh deployment has none.
+
 Do the **Common Prerequisites** once, then deploy with **Method 1** (the script; recommended, and also the way to update), **Method 2** (the console) or **Method 3** (Terraform, for teams that keep their infrastructure declared; it can do the organization step of the prerequisites too), and grant access: [Who can use it](#who-can-use-it). The single public service that releases before v16 deployed is still possible: [A public deployment (discouraged)](#a-public-deployment-discouraged).
 
 ### **Common Prerequisites (Required for all methods)** 
