@@ -12,7 +12,8 @@ venv/
 !README.md
 !terraform/README.md
 LICENSE
-assets/
+assets/*
+!assets/gcp_best_practices.csv
 terraform/.terraform/
 terraform/terraform.tfvars
 *.tfstate

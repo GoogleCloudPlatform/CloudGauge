@@ -279,6 +279,14 @@ class ProjectProfile:
     disabled_key_accounts: tuple = ()  # service accounts whose oldest user-managed key is disabled
     sql_open_networks: tuple = ()  # Cloud SQL instances with 0.0.0.0/0 among their authorized networks
     pap_enforced_buckets: tuple = ()  # public buckets whose Public Access Prevention is enforced (the binding is dormant)
+    # v18.1: what the loose rules read
+    unprotected_buckets: tuple = ()  # buckets with soft delete turned off (a row when nothing else protects them)
+    sink_buckets: tuple = ()  # buckets a log sink writes to (versioning expected)
+    retention_buckets: tuple = ()  # buckets under a retention policy (protected by it; never asked for versioning)
+    proxy_subnet: bool = False  # a proxy-only subnet (never a PGA row)
+    gke_auto_repair: dict = field(default_factory=dict)  # cluster name -> per node pool, auto-repair on
+    project_audit_configs: bool = False  # the project turns Data Access logs on for every service
+    project_contact: bool = False  # the project has an Essential Contact of its own (SUSPENSION, LEGAL)
 
     @property
     def project_number(self):
@@ -573,6 +581,15 @@ class SyntheticOrg:
         sql_open_networks = tuple(sql.name for sql in sql_instances if sql.public_ip and _chance(rng, 0.3))
         pap_enforced_buckets = tuple(bucket.name for bucket in buckets if bucket.public and _chance(rng, 0.4))
 
+        # v18.1 (drawn last, for the same reason): what the loose rules read.
+        unprotected_buckets = tuple(bucket.name for bucket in buckets if not bucket.versioning and _chance(rng, 0.25))
+        sink_buckets = tuple(bucket.name for bucket in buckets if _chance(rng, 0.1))
+        retention_buckets = tuple(bucket.name for bucket in buckets if _chance(rng, 0.1) and not bucket.versioning)  # the two exclude each other
+        proxy_subnet = size in ("medium", "large") and _chance(rng, 0.4)
+        gke_auto_repair = {cluster.name: tuple(_chance(rng, 0.8) for _ in cluster.node_pools) for cluster in gke_clusters}
+        project_audit_configs = _chance(rng, 0.15)
+        project_contact = _chance(rng, 0.2)
+
         return ProjectProfile(
             index=index, project_id=project_id, display_name=f"Synthetic Project {index}",
             folder_id=self.folder_of(index), denied=denied, osconfig_disabled=osconfig_disabled,
@@ -593,6 +610,8 @@ class SyntheticOrg:
             etd_enabled=etd_enabled, data_access_logs=data_access_logs, gke_pool_zones=gke_pool_zones,
             stopped_vms=stopped_vms, disabled_key_accounts=disabled_key_accounts, sql_open_networks=sql_open_networks,
             pap_enforced_buckets=pap_enforced_buckets,
+            unprotected_buckets=unprotected_buckets, sink_buckets=sink_buckets, retention_buckets=retention_buckets, proxy_subnet=proxy_subnet,
+            gke_auto_repair=gke_auto_repair, project_audit_configs=project_audit_configs, project_contact=project_contact,
         )
 
     # --- organization-level data ---

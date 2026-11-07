@@ -158,6 +158,7 @@
                     <tbody>{{ org_policy_rows(org_policies.categories) }}</tbody>
                 </table>
             </div>
+            {% if org_policies.source %}<div class="table-note check-note">Policy table: {{ org_policies.source }}</div>{% endif %}
             {{ resolved_list(org_policies.change) }}
         </div>
     </details>

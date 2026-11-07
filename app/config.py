@@ -26,12 +26,18 @@ from dataclasses import dataclass
 # The release, as the image tag names it ("15.6" for v15.6; tests/test_packaging.py pins it to the newest entry
 # of RELEASE_NOTES.md). The report's footer shows it, and every scan summary records it so the next scan can tell
 # a check that is new to the release from one that merely had nothing to check last time (app.reporting.changes).
-VERSION = "18"
-# Best-practices CSV for the Organization Policies check (legacy name: GCS_PUBLIC_URL;
-# it points at GitHub, not GCS). The value is frozen byte-for-byte; override it
-# with the BEST_PRACTICES_CSV_URL environment variable.
-BEST_PRACTICES_CSV_URL = "https://raw.githubusercontent.com/GoogleCloudPlatform/CloudGauge/Beta/assets/gcp_best_practices.csv"
+VERSION = "18.1"
+# The policy table of the Organization Policies check (v18.1): by default the one shipped with the release
+# (assets/gcp_best_practices.csv, copied into the image), so a scan never depends on GitHub and the rules move only
+# with a release. BEST_PRACTICES_CSV_URL set to a gs:// object (read as the service account) or an https:// URL
+# (fetched anonymously; the pre-v18.1 default was the GitHub Beta branch, GITHUB_POLICY_TABLE_URL) replaces it.
+BUNDLED_POLICY_TABLE = "bundled"
+BEST_PRACTICES_CSV_URL = BUNDLED_POLICY_TABLE
+GITHUB_POLICY_TABLE_URL = "https://raw.githubusercontent.com/GoogleCloudPlatform/CloudGauge/Beta/assets/gcp_best_practices.csv"
 BEST_PRACTICES_FETCH_TIMEOUT_SECONDS = 30
+# The operator's overrides table, in the results bucket: the same columns, merged by constraint ID on top of the
+# table in use (add a constraint, change an expectation, or Skip a row). Read at every scan; no redeploy.
+POLICY_OVERRIDES_OBJECT = "config/best_practices_overrides.csv"
 SCOPES = ['https://www.googleapis.com/auth/cloud-platform']
 
 # These names are part of the deploy contract (README, Terraform); don't rename them.

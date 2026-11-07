@@ -39,6 +39,7 @@ CATEGORY_MAP = {
     "VM Rightsizing": "Cost Optimization", "Unassociated IPs": "Cost Optimization",
     "Idle Load Balancers": "Cost Optimization", "Idle Persistent Disks": "Cost Optimization",
     "Underutilized Reservations": "Cost Optimization", "Idle Reservations": "Cost Optimization",
+    "MIG Rightsizing": "Cost Optimization",  # v18.1
     # v17 (FinOps): six more recommenders, labels, lifecycle,
     # snapshots, and the commitments about to end (written by the capacity check, app.checks.capacity).
     "Resource-Based Commitment Recommendations": "Cost Optimization", "Overprovisioned Cloud SQL Instances": "Cost Optimization",
@@ -62,13 +63,13 @@ CATEGORY_MAP = {
 
     # Operational Excellence & Observability
     "Organization Log Sink": "Operational Excellence & Observability",
+    "Data Access Audit Logs": "Operational Excellence & Observability",  # v18.1
     "OS Config Agent Coverage": "Operational Excellence & Observability", "Monitoring Alert Coverage": "Operational Excellence & Observability",
     "Standalone VMs (Not in MIGs)": "Operational Excellence & Observability",
     "VPC IP Address Utilization": "Operational Excellence & Observability", "VPC Connectivity": "Operational Excellence & Observability",
     "Load Balancer Health": "Operational Excellence & Observability", "GKE IP Address Utilization": "Operational Excellence & Observability",
     "GKE Connectivity": "Operational Excellence & Observability", "GKE Service Account": "Operational Excellence & Observability",
     "Dynamic Route Health": "Operational Excellence & Observability", "Cloud SQL Connectivity": "Operational Excellence & Observability",
-    "VPC Firewall Complexity (>150 Rules)": "Operational Excellence & Observability",
     "Recent Changes (Org & Project)": "Operational Excellence & Observability", "Unattended Projects": "Operational Excellence & Observability",
     "Quota Utilization (>80%)": "Operational Excellence & Observability",
     "Quota Increase Recommendations": "Operational Excellence & Observability",  # v17
@@ -87,6 +88,7 @@ CATEGORY_MAP = {
     "Organization IAM Policy Check": "Security & Identity",
     "Log Sink Check": "Operational Excellence & Observability",
     "Idle Load Balancers": "Cost Optimization",  # v18: the recommender never existed; "No longer checked" in the Changes card
+    "VPC Firewall Complexity (>150 Rules)": "Operational Excellence & Observability",  # v18.1: retired into the FIREWALLS quota
 
     # B2: display names from app.checks.registry. When a check raises, the runner
     # records the error under this name. Names already mapped above aren't repeated;

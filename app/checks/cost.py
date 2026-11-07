@@ -32,6 +32,7 @@ all-clear row; the label check is *Informational* until ``COST_ALLOCATION_LABELS
 names the keys, so an unconfigured check never moves the Efficiency score.
 """
 import logging
+import re
 
 from google.api_core import exceptions as core_exceptions
 from google.api_core.exceptions import PermissionDenied
@@ -61,6 +62,7 @@ COST_RECOMMENDERS = {
     "VM Rightsizing": ("google.compute.instance.MachineTypeRecommender", "zone"),
     "Unassociated IPs": ("google.compute.address.IdleResourceRecommender", "region"),
     "Idle Persistent Disks": ("google.compute.disk.IdleResourceRecommender", "zone"),
+    "MIG Rightsizing": ("google.compute.instanceGroupManager.MachineTypeRecommender", "zone"),  # v18.1
     "Underutilized Reservations": ("google.compute.RightSizeResourceRecommender", "zone"),
     "Idle Reservations": ("google.compute.IdleResourceRecommender", "zone"),
     # v17 (FinOps)
@@ -80,6 +82,7 @@ NOTHING_FOUND = {
     "VM Rightsizing": "No VM rightsizing recommendations found.",
     "Unassociated IPs": "No unassociated IP addresses found.",
     "Idle Persistent Disks": "No idle persistent disks found.",
+    "MIG Rightsizing": "No managed instance group rightsizing recommendations found.",
     "Underutilized Reservations": "No underutilized reservations found.",
     "Idle Reservations": "No idle reservations found.",
     "Resource-Based Commitment Recommendations": "No resource-based commitment recommendations found.",
@@ -108,6 +111,43 @@ def is_active(reco):
     return str(getattr(state, "name", state) or "ACTIVE").upper() in ("ACTIVE", "STATE_UNSPECIFIED", "0")
 
 
+# v18.1: the recommender's priority decides the verdict — P1 and P2 are Action Required, P3 and P4 a look; a
+# recommendation without a priority keeps the Action Required the check always gave.
+PRIORITY_STATUS = {"P1": "Action Required", "P2": "Action Required", "P3": "Investigation Recommended", "P4": "Investigation Recommended"}
+RECOMMENDED_TYPE = re.compile(r"\bto\s+([a-z][a-z0-9]*-[a-z0-9-]+)\b")
+# Where the recommender's location is a zone, the region is its prefix.
+
+
+def recommendation_priority(reco):
+    """``"P1"`` … ``"P4"`` from the recommendation, ``""`` when it has none."""
+    priority = getattr(reco, "priority", None)
+    name = str(getattr(priority, "name", priority) or "")
+    return name if name.startswith("P") and name[1:].isdigit() else ""
+
+
+def recommendation_fix(check, project_id, location, resource_name, description):
+    """The ``gcloud`` line that applies a cost recommendation, by recommender; prose where the action is a purchase."""
+    region = location.rsplit("-", 1)[0] if location.count("-") == 2 else location
+    target = (RECOMMENDED_TYPE.search(description or "") or [None, "<recommended type>"])[1]
+    lines = {
+        "Idle Cloud SQL Instances": f"gcloud sql instances patch {resource_name} --project={project_id} --activation-policy=NEVER  # stop it; delete once nothing needs it",
+        "Low Utilization VMs": f"gcloud compute instances stop {resource_name} --zone={location} --project={project_id}",
+        "VM Rightsizing": f"gcloud compute instances stop {resource_name} --zone={location} --project={project_id} && gcloud compute instances set-machine-type {resource_name} --zone={location} --project={project_id} --machine-type={target} && gcloud compute instances start {resource_name} --zone={location} --project={project_id}",
+        "Unassociated IPs": f"gcloud compute addresses delete {resource_name} --region={region} --project={project_id}",
+        "Idle Persistent Disks": f"gcloud compute disks snapshot {resource_name} --zone={location} --project={project_id} --snapshot-names={resource_name}-final && gcloud compute disks delete {resource_name} --zone={location} --project={project_id}",
+        "MIG Rightsizing": f"Create an instance template with {target} and roll it out: gcloud compute instance-groups managed rolling-action start-update {resource_name} --version=template=<template> --zone={location} --project={project_id}",
+        "Underutilized Reservations": f"gcloud compute reservations update {resource_name} --zone={location} --project={project_id} --vm-count=<in use>",
+        "Idle Reservations": f"gcloud compute reservations delete {resource_name} --zone={location} --project={project_id}",
+        "Overprovisioned Cloud SQL Instances": f"gcloud sql instances patch {resource_name} --project={project_id} --tier={target}",
+        "Cloud Run Cost": f"gcloud run services update {resource_name} --region={region} --project={project_id} --cpu-throttling  # CPU allocated during requests only",
+        "Idle Images": f"gcloud compute images delete {resource_name} --project={project_id}",
+        "Cloud Storage Soft Delete": f"gcloud storage buckets update gs://{resource_name} --soft-delete-duration=0",
+        "Resource-Based Commitment Recommendations": f"Review and purchase in the console: Compute Engine → Committed use discounts ({region}); the recommendation names the term and the amount.",
+        "BigQuery Slot Commitments": f"Review and purchase in the console: BigQuery → Capacity management ({location}).",
+    }
+    return lines.get(check, "")
+
+
 def recommender_locations(loc_type, active_zones, active_regions):
     """Where a recommender of ``loc_type`` is asked (``COST_RECOMMENDERS``), from the scan's active locations.
 
@@ -128,8 +168,12 @@ def location_bound_recommenders(recommenders=None):
     return [name for name, (_, loc_type) in (recommenders or COST_RECOMMENDERS).items() if loc_type in ("zone", "region")]
 
 
-def parse_recommendation(reco, project_id):
-    """Safely parses a recommendation proto to extract resource name and savings."""
+def parse_recommendation(reco, project_id, check=None, location=""):
+    """Safely parses a recommendation proto to extract resource name and savings.
+
+    v18.1: with ``check`` and ``location`` given, the row carries the recommendation's ``Priority`` and the ``Fix``
+    for that recommender, and a ``_status`` from the priority (``PRIORITY_STATUS``).
+    """
     resource_name = "N/A"
     cost_savings = "N/A"
     
@@ -181,12 +225,18 @@ def parse_recommendation(reco, project_id):
     if "CHANGE_MACHINE_TYPE" in reco.recommender_subtype:
         detail = f"For VM '{resource_name}', {reco.description}"
         
-    return {
+    row = {
         "Project": project_id, 
         "Resource Name": resource_name,  # This column should now populate correctly
         "Recommendation": detail, 
         "Est. Monthly Saving": cost_savings
     }
+    if check is not None:
+        priority = recommendation_priority(reco)
+        row["Priority"] = priority or "unrated"
+        row["Fix"] = recommendation_fix(check, project_id, location, resource_name, reco.description)
+        row["_status"] = PRIORITY_STATUS.get(priority, "Action Required")
+    return row
 
 
 def run_cost_recommendations(scope_id, all_projects, active_zones, active_regions, job_id, location_errors=None, *, sink):
@@ -255,7 +305,7 @@ def run_cost_recommendations(scope_id, all_projects, active_zones, active_region
                         for reco in call_api_with_backoff(api_call, context_message=context, on_error=on_error):
                             if not is_active(reco):
                                 continue
-                            finding = parse_recommendation(reco, project_id)
+                            finding = parse_recommendation(reco, project_id, check=check, location=loc)
                             if check not in findings_map:
                                 findings_map[check] = []
                             findings_map[check].append(finding)
@@ -301,7 +351,8 @@ def run_cost_recommendations(scope_id, all_projects, active_zones, active_region
     for check_name in COST_RECOMMENDERS:
         all_findings = final_findings_by_check.get(check_name)
         if all_findings:
-            result = {"Check": check_name, "Finding": all_findings, "Status": "Action Required"}
+            statuses = {row.pop("_status", "Action Required") for row in all_findings}
+            result = {"Check": check_name, "Finding": all_findings, "Status": "Action Required" if "Action Required" in statuses else "Investigation Recommended"}
         elif check_name in answered:
             result = {"Check": check_name, "Finding": [{"Status": NOTHING_FOUND[check_name]}], "Status": "Compliant"}
         else:

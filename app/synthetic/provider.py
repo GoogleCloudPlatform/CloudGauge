@@ -250,6 +250,11 @@ class SyntheticGcp:
     def osconfig_client(self):
         return _OsConfigStub(self)
 
+    def policy_table(self):
+        """The synthetic organization's small policy table (v18.1: what the bundled table is in a real deployment)."""
+        self.call("policy_table", "read", style="http")
+        return BEST_PRACTICES_CSV
+
     def http_get(self, url, **kwargs):
         if "servicehealth.googleapis.com/" in url:
             return self._service_health_events(url, kwargs.get("params") or {})
@@ -328,6 +333,8 @@ class SyntheticGcp:
         policy = {"bindings": self._project_policy_bindings(profile), "etag": "synthetic"}
         if profile.data_access_logs:  # v17.1
             policy["auditConfigs"] = [{"service": "container.googleapis.com", "auditLogConfigs": [{"logType": "DATA_READ"}, {"logType": "DATA_WRITE"}]}]
+        if profile.project_audit_configs:  # v18.1: the project turns the three Data Access log types on for every service
+            policy.setdefault("auditConfigs", []).append({"service": "allServices", "auditLogConfigs": [{"logType": t} for t in ("ADMIN_READ", "DATA_READ", "DATA_WRITE")]})
         return policy
 
     def _project_policy_bindings(self, profile):
@@ -365,7 +372,9 @@ class SyntheticGcp:
 
     def _h_cloudresourcemanager_organizations_getIamPolicy(self, kw, project_id):
         self.call("cloudresourcemanager", "organizations.getIamPolicy", style="http")
-        return {"bindings": self.world.org_iam_bindings()}
+        # v18.1: a partial Data Access configuration at the organization (ADMIN_READ and DATA_WRITE for all services).
+        return {"bindings": self.world.org_iam_bindings(),
+                "auditConfigs": [{"service": "allServices", "auditLogConfigs": [{"logType": "ADMIN_READ"}, {"logType": "DATA_WRITE"}]}]}
 
     def _list_org_policies(self, kw, project_id):
         self.call("cloudresourcemanager", "listOrgPolicies", project_id=project_id, style="http")
@@ -493,7 +502,8 @@ class SyntheticGcp:
     def _h_compute_networks_list(self, kw, project_id):
         self.call("compute", "networks.list", project_id=project_id, style="http")
         profile = self.world.project(project_id)
-        return {"items": [{"name": "vpc-main"}] + ([{"name": "default"}] if profile.has_default_vpc else [])}
+        return {"items": [{"name": "vpc-main", "selfLink": f"https://www.googleapis.com/compute/v1/projects/{project_id}/global/networks/vpc-main"}]
+                + ([{"name": "default", "selfLink": f"https://www.googleapis.com/compute/v1/projects/{project_id}/global/networks/default", "autoCreateSubnetworks": True}] if profile.has_default_vpc else [])}
 
     def _h_compute_regions_list(self, kw, project_id):
         self.call("compute", "regions.list", project_id=project_id, style="http")
@@ -518,6 +528,34 @@ class SyntheticGcp:
         profile = self.world.project(project_id)
         return {"items": [{"name": name, "region": region, "privateIpGoogleAccess": pga}
                           for name, region, pga in profile.subnets if region == kw["region"]]}
+
+    def _h_compute_subnetworks_aggregatedList(self, kw, project_id):
+        """Every subnet of the project in one call (v18.1), with ``purpose`` and ``network``; a proxy-only subnet for some projects."""
+        self.call("compute", "subnetworks.aggregatedList", project_id=project_id, style="http")
+        profile, items = self.world.project(project_id), {}
+        for name, region, pga in profile.subnets:
+            items.setdefault(f"regions/{region}", {"subnetworks": []})["subnetworks"].append(
+                {"name": name, "region": f"https://www.googleapis.com/compute/v1/projects/{project_id}/regions/{region}", "privateIpGoogleAccess": pga,
+                 "purpose": "PRIVATE", "network": f"https://www.googleapis.com/compute/v1/projects/{project_id}/global/networks/vpc-main"})
+        if profile.proxy_subnet and profile.subnets:
+            region = profile.subnets[0][1]
+            items.setdefault(f"regions/{region}", {"subnetworks": []})["subnetworks"].append(
+                {"name": "proxy-only", "region": f"https://www.googleapis.com/compute/v1/projects/{project_id}/regions/{region}", "privateIpGoogleAccess": False,
+                 "purpose": "REGIONAL_MANAGED_PROXY", "role": "ACTIVE", "network": f"https://www.googleapis.com/compute/v1/projects/{project_id}/global/networks/vpc-main"})
+        if profile.has_default_vpc and profile.subnets:
+            region = profile.subnets[0][1]
+            items.setdefault(f"regions/{region}", {"subnetworks": []})["subnetworks"].append(
+                {"name": "default", "region": f"https://www.googleapis.com/compute/v1/projects/{project_id}/regions/{region}", "privateIpGoogleAccess": False,
+                 "purpose": "PRIVATE", "network": f"https://www.googleapis.com/compute/v1/projects/{project_id}/global/networks/default"})
+        return {"items": items}
+
+    def _h_compute_projects_get(self, kw, project_id):
+        """The project's global Compute quotas (v18.1): FIREWALLS near its limit for the projects with many rules."""
+        self.call("compute", "projects.get", project_id=project_id, style="http")
+        profile = self.world.project(project_id)
+        rules = len(profile.firewall_rules) + 1
+        return {"name": project_id, "quotas": [{"metric": "FIREWALLS", "usage": float(rules), "limit": 200.0},
+                                               {"metric": "NETWORKS", "usage": 2.0, "limit": 15.0}, {"metric": "IMAGES", "usage": 3.0, "limit": 2000.0}]}
 
     def _h_iam_projects_serviceAccounts_list(self, kw, project_id):
         self.call("iam", "serviceAccounts.list", project_id=project_id, style="http")
@@ -553,8 +591,8 @@ class SyntheticGcp:
         for cluster in profile.gke_clusters:
             entry = {"name": cluster.name, "location": cluster.location,
                      "currentMasterVersion": cluster.master_version, "currentNodeVersion": cluster.node_pools[0][2],
-                     "nodePools": [{"name": name, "version": version, "management": {"autoUpgrade": auto}}
-                                   for name, auto, version in cluster.node_pools]}
+                     "nodePools": [{"name": name, "version": version, "management": {"autoUpgrade": auto, "autoRepair": repair}}
+                                   for (name, auto, version), repair in zip(cluster.node_pools, profile.gke_auto_repair.get(cluster.name, (True,) * len(cluster.node_pools)))]}
             if cluster.release_channel:
                 entry["releaseChannel"] = {"channel": "REGULAR"}
             clusters.append(entry)
@@ -644,10 +682,29 @@ class SyntheticGcp:
         self.call("cloudresourcemanager", "projects.getEffectiveOrgPolicy", project_id=project_id, style="http")
         return {"constraint": (kw.get("body") or {}).get("constraint", ""), "booleanPolicy": {"enforced": False}}
 
+    ORG_CONTACTS = [{"email": "security@example.com", "notificationCategorySubscriptions": ["SECURITY"], "validationState": "VALID"},
+                    {"email": "ops@example.com", "notificationCategorySubscriptions": ["TECHNICAL"], "validationState": "VALID"},
+                    {"email": "legal-old@example.com", "notificationCategorySubscriptions": ["LEGAL"], "validationState": "INVALID"}]  # v18.1: bounced
+
     def _h_essentialcontacts_organizations_contacts_list(self, kw, project_id):
         self.call("essentialcontacts", "contacts.list", style="http")
-        return {"contacts": [{"email": "security@example.com", "notificationCategorySubscriptions": ["SECURITY"]},
-                             {"email": "ops@example.com", "notificationCategorySubscriptions": ["TECHNICAL"]}]}
+        return {"contacts": list(self.ORG_CONTACTS)}
+
+    def _h_essentialcontacts_projects_contacts_compute(self, kw, project_id):
+        """The effective contacts of a project (v18.1): the organization's, plus the project's own when it has one."""
+        self.call("essentialcontacts", "contacts.compute(project)", project_id=project_id, style="http")
+        profile = self.world.project(project_id)
+        own = [{"email": f"owner@{profile.project_id}.example.com", "notificationCategorySubscriptions": ["SUSPENSION", "LEGAL"], "validationState": "VALID"}] if profile.project_contact else []
+        return {"contacts": list(self.ORG_CONTACTS) + own}
+
+    def _h_essentialcontacts_folders_contacts_compute(self, kw, project_id):
+        self.call("essentialcontacts", "contacts.compute(folder)", style="http")
+        return {"contacts": list(self.ORG_CONTACTS)}
+
+    def _h_cloudresourcemanager_folders_getIamPolicy(self, kw, project_id):
+        """A folder's IAM policy (v3; v18.1): no bindings of note, no audit configuration."""
+        self.call("cloudresourcemanager", "folders.getIamPolicy", style="http")
+        return {"bindings": [], "etag": "synthetic"}
 
     # --- Advisory Notifications ---
 
@@ -724,6 +781,8 @@ class SyntheticGcp:
             found = self._resilience_assets(profile, asset_types)
             if "container.googleapis.com/Cluster" in asset_types:
                 found += [self._cluster_asset(profile, c) for c in profile.gke_clusters]
+            if "logging.googleapis.com/LogSink" in asset_types:
+                found += self._sink_assets(profile)
             if "compute.googleapis.com/ForwardingRule" in asset_types:
                 found += [SimpleNamespace(name=f"//compute.googleapis.com/projects/{project_id}/regions/{r}/forwardingRules/lb-{r}",
                                           resource=SimpleNamespace(data={"name": f"lb-{r}"})) for r in profile.forwarding_rule_regions]
@@ -735,8 +794,17 @@ class SyntheticGcp:
             found += self._resilience_assets(profile, asset_types)
             if "container.googleapis.com/Cluster" in asset_types:
                 found += [self._cluster_asset(profile, c) for c in profile.gke_clusters]
+            if "logging.googleapis.com/LogSink" in asset_types:
+                found += self._sink_assets(profile)
         self.call("asset", "listAssets(folder)" if folder_id else "listAssets(org)", pages=max(1, math.ceil(len(found) / PAGE_SIZE)))
         return found
+
+    @staticmethod
+    def _sink_assets(profile):
+        """The project's log sinks (v18.1): one per bucket the world marks as a sink destination."""
+        return [SimpleNamespace(name=f"//logging.googleapis.com/projects/{profile.project_id}/sinks/sink-{i}",
+                                resource=SimpleNamespace(data={"name": f"sink-{i}", "destination": f"storage.googleapis.com/{bucket}"}))
+                for i, bucket in enumerate(profile.sink_buckets)]
 
     def _cluster_asset(self, profile, cluster):
         """A ``container.googleapis.com/Cluster`` asset with the fields the v17.1 checks read, from the cluster's GkeHardening."""
@@ -884,6 +952,7 @@ class SyntheticGcp:
         recos = profile.cost_recommendations.get((check, location), []) if check else []
         return [recommender_v1.Recommendation({
             "name": f"{parent}/recommendations/{i}", "description": description, "recommender_subtype": subtype,
+            "priority": "P2" if usd >= 50 else "P4", "state_info": {"state": "ACTIVE"},  # v18.1: the priority decides the verdict
             "primary_impact": {"category": "COST", "cost_projection": {"cost": {"currency_code": "USD", "units": -usd, "nanos": 0}}},
             "content": {"overview": {"resourceName": resource},
                         "operation_groups": [{"operations": [{"action": "replace", "resource": f"//compute.googleapis.com/projects/{project_id}/zones/{location}/instances/{resource}"}]}]},
@@ -1085,6 +1154,10 @@ class _BucketStub:
         self.lifecycle_rules = [{"action": {"type": "SetStorageClass", "storageClass": "NEARLINE"}, "condition": {"age": 30}}] if bucket.lifecycle else []
         self.autoclass_enabled = bucket.autoclass
         self.storage_class = "STANDARD"
+        # v18.1: soft delete (the 7-day default, or off for the unprotected buckets) and a retention policy on some
+        profile = provider.world.project(project_id)
+        self.soft_delete_policy = SimpleNamespace(retention_duration_seconds=0 if bucket.name in profile.unprotected_buckets else 604800)
+        self.retention_period = 86400 * 30 if bucket.name in profile.retention_buckets else None
 
     def get_iam_policy(self, requested_policy_version=None):
         return self._p.bucket_iam_policy(self._project, self._bucket)

@@ -333,7 +333,10 @@ V17_COMMON_CHECKS = ['check_cost_allocation_labels', 'check_storage_lifecycle', 
 # v17.1: the SSRF-chain checks, scope-level, after IAM Least Privilege in the common list.
 V17_1_CHECKS = ['check_gke_security', 'check_service_account_impersonation', 'check_vpc_sc_coverage']
 V17_CHECKS = set(V17_COMMON_CHECKS) | set(V17_1_CHECKS)
-LATER_CHECKS = V14_CHECKS | V15_CHECKS | V15_6_CHECKS | V17_CHECKS
+# v18.1: Essential Contacts runs in every scope (it leaves beta v1's organization-only list) and Data Access Audit Logs is new;
+# both scope-level, after the SSRF-chain checks in the common list.
+V18_1_CHECKS = ['check_essential_contacts', 'check_data_access_audit_logs']
+LATER_CHECKS = V14_CHECKS | V15_CHECKS | V15_6_CHECKS | V17_CHECKS | set(V18_1_CHECKS)
 
 
 def finished_checks(progress_updates):
@@ -351,7 +354,7 @@ def test_runner_runs_the_beta_v1_check_plan(scope, scope_id, beta, monkeypatch):
     specs = registry.build_check_plan(scope, scope_id, JOB_ID, PROJECTS, zones, regions)
     names = [spec.func.__name__ for spec in specs]
     v17_names = {spec.name for spec in specs if spec.func.__name__ in V17_CHECKS}
-    assert len(names) == (37 if scope == 'organization' else 33)
+    assert len(names) == (38 if scope == 'organization' else 35)
     # Same order as beta v1's plan lists, which append the four checks after "Service Quota Limits".
     beta_plan = ast.parse(textwrap.dedent(inspect.getsource(beta.run_all_checks)))
     beta_lists = [[entry.elts[2].id for entry in node.elts if isinstance(entry, ast.Tuple)]
@@ -359,12 +362,13 @@ def test_runner_runs_the_beta_v1_check_plan(scope, scope_id, beta, monkeypatch):
     beta_common, beta_org_only = [plan for plan in beta_lists if plan]
     beta_names = beta_common + (beta_org_only if scope == 'organization' else [])
     shared = [name for name in names if name not in LATER_CHECKS]
-    assert shared == [name for name in beta_names if name not in RETIRED_CHECKS | V15_6_CHECKS]
+    assert shared == [name for name in beta_names if name not in RETIRED_CHECKS | V15_6_CHECKS | set(V18_1_CHECKS)]
     assert names[14:18] == BETA_V1_CHECKS
     assert names[18:21] == ['check_service_health_incidents', 'check_gke_supported_versions', 'check_resilience_assets']
     assert names[21:29] == V17_COMMON_CHECKS
     assert names[29:32] == V17_1_CHECKS
-    assert names[-2:] == (['check_essential_contacts', 'check_org_advisories'] if scope == 'organization' else ['check_vpc_sc_coverage', 'check_project_advisories'])
+    assert names[32:34] == V18_1_CHECKS
+    assert names[-2:] == (['check_audit_logging', 'check_org_advisories'] if scope == 'organization' else ['check_data_access_audit_logs', 'check_project_advisories'])
     calls = {'beta': {}, 'new': {}}
     sink = RecordingSink()
 
@@ -388,10 +392,14 @@ def test_runner_runs_the_beta_v1_check_plan(scope, scope_id, beta, monkeypatch):
     assert set(calls['new']) == set(names)
     assert set(calls['beta']) == set(beta_names)
     # The two location-based checks take one argument more than in beta v1: the projects whose
-    # locations could not be discovered (none here), which they report as not checked.
+    # locations could not be discovered (none here), which they report as not checked. Cloud Storage Versioning
+    # (v18.1) takes the scope first: it lists the scope's log sinks once.
     for name in shared:
         beta_args, beta_kwargs = calls['beta'][name]
         args, kwargs = calls['new'][name]
+        if name == 'check_storage_versioning':
+            assert (args, beta_args, kwargs) == ((scope, scope_id, PROJECTS, JOB_ID), (scope_id, PROJECTS, JOB_ID), {'sink': sink})
+            continue
         assert (args[:len(beta_args)], beta_kwargs, kwargs) == (beta_args, {}, {'sink': sink}), name
         assert args[len(beta_args):] == (({},) if name in ('run_cost_recommendations', 'run_network_insights') else ()), name
     for name in names:
@@ -402,7 +410,8 @@ def test_runner_runs_the_beta_v1_check_plan(scope, scope_id, beta, monkeypatch):
     assert len(progress) == len(names) and len(beta_progress) == len(beta_names)
     assert progress[-1]['progress'] == beta_progress[-1]['progress'] == 95
     later = {registry.SERVICE_HEALTH_CHECK, registry.GKE_VERSIONS_CHECK, registry.ADVISORIES_CHECK, registry.RESILIENCE_CHECK} | v17_names
-    assert finished_checks(progress) - later == finished_checks(beta_progress) - {'Personalized Service Health', registry.RESILIENCE_CHECK}
+    later |= {'Essential Contacts', registry.DATA_ACCESS_CHECK}  # v18.1: every scope, so out of the comparison on both sides
+    assert finished_checks(progress) - later == finished_checks(beta_progress) - {'Personalized Service Health', registry.RESILIENCE_CHECK, 'Essential Contacts'}
     assert sink.findings == []
 
 
@@ -414,7 +423,7 @@ def test_check_plan_is_the_legacy_plan_plus_the_beta_v1_checks(scope, legacy):
     legacy_names = set(legacy.run_all_checks.__code__.co_names)
     advisories = 'check_org_advisories' if scope == 'organization' else 'check_project_advisories'
     assert [name for name in names if name not in legacy_names] == \
-           BETA_V1_CHECKS + ['check_service_health_incidents', 'check_gke_supported_versions'] + V17_COMMON_CHECKS + V17_1_CHECKS + [advisories]
+           BETA_V1_CHECKS + ['check_service_health_incidents', 'check_gke_supported_versions'] + V17_COMMON_CHECKS + V17_1_CHECKS + ['check_data_access_audit_logs', advisories]
     if scope == 'organization':  # the one legacy check the plan no longer runs
         assert {name for name in legacy_names if name.startswith('check_')} - set(names) == RETIRED_CHECKS
 
@@ -449,9 +458,10 @@ def test_runner_runs_the_scope_level_checks_when_there_is_no_project(scope, scop
     # v17: Snapshot Sprawl and Cloud SQL Extended Support look at the scope too; an organization or folder has IAM
     # recommendations of its own (the scope half of the split check). v17.1: the three SSRF-chain checks are scope-level.
     scope_level = ['Organization Policies', registry.RESILIENCE_CHECK, 'Snapshot Sprawl', 'Cloud SQL Extended Support',
-                   'GKE Credential Exposure', 'Service Account Impersonation', 'VPC Service Controls Coverage']
+                   'GKE Credential Exposure', 'Service Account Impersonation', 'VPC Service Controls Coverage',
+                   'Essential Contacts', 'Data Access Audit Logs']  # v18.1: the last two in every scope
     if scope == 'organization':
-        assert ran[:8] == scope_level + ['Organization IAM Policy'] and registry.MISCELLANEOUS_CHECK in ran and 'IAM Least Privilege' in ran
+        assert ran[:10] == scope_level + ['Organization IAM Policy'] and registry.MISCELLANEOUS_CHECK in ran and 'IAM Least Privilege' in ran
     elif scope == 'folder':
         assert ran == scope_level + ['IAM Least Privilege']
     else:

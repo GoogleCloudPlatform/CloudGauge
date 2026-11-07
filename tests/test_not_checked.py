@@ -173,7 +173,7 @@ DISCOVERY_ERRORS = {"p-denied": http_error(403, DENIED, "forbidden"), "p-flaky":
 # eleven asked at discovered zones and regions only.
 ALWAYS_ASKED = ("BigQuery Slot Commitments", "Idle Images", "Cloud Storage Soft Delete")
 LOCATION_BOUND = tuple(name for name in COST_RECOMMENDERS if name not in ALWAYS_ASKED)
-NO_LOCATIONS = (f"Cost-Saving Recommendations (10 of 13 recommenders: {', '.join(LOCATION_BOUND)}: "
+NO_LOCATIONS = (f"Cost-Saving Recommendations (11 of 14 recommenders: {', '.join(LOCATION_BOUND)}: "
                 f"no zones or regions were discovered to query)")
 
 
@@ -195,13 +195,13 @@ def test_cost_check_reports_a_project_whose_locations_could_not_be_discovered(gc
 
 def test_cost_check_does_not_repeat_a_project_whose_every_query_failed(gcp):
     """With locations from other projects the project is queried there: a denied project already has
-    its "all 13 recommenders" row, a project whose queries succeed is reported as partially covered."""
+    its "all 14 recommenders" row, a project whose queries succeed is reported as partially covered."""
     gcp.recommender.project_errors["p-denied"] = core_exceptions.PermissionDenied(DENIED)
     sink = FakeSink()
     run_cost_recommendations("org", PROJECTS, ["us-central1-a"], ["us-central1", "global"], "job-1", DISCOVERY_ERRORS, sink=sink)
     assert {parent.split("/")[1] for parent in gcp.recommender.parents} == {p["projectId"] for p in PROJECTS}
     assert not_checked_rows(sink) == [
-        {"Project": "p-denied", "Skipped check": "Cost-Saving Recommendations (all 13 recommenders)", "Reason": f"403 {DENIED}"},
+        {"Project": "p-denied", "Skipped check": "Cost-Saving Recommendations (all 14 recommenders)", "Reason": f"403 {DENIED}"},
         {"Project": "p-flaky", "Reason": "503 Backend Error",
          "Skipped check": "Cost-Saving Recommendations (location discovery; queried only in zones and regions found in other projects)"},
     ]
@@ -230,12 +230,12 @@ def test_a_recommender_that_answered_with_nothing_is_compliant(gcp):
     run_cost_recommendations("org", [{"projectId": "p-ok"}], ["us-central1-a"], ["us-central1", "global"], "job-1", sink=sink)
     assert cost_records(sink) == {check: ("Compliant", [{"Status": NOTHING_FOUND[check]}]) for check in COST_RECOMMENDERS}
     assert [record["Check"] for record in sink.records] == list(COST_RECOMMENDERS) and not_checked_rows(sink) == []  # in the report's order
-    assert {check: NOTHING_FOUND[check] for check in list(COST_RECOMMENDERS)[:7]} == {
+    assert {check: NOTHING_FOUND[check] for check in list(COST_RECOMMENDERS)[:8]} == {
         "Idle Cloud SQL Instances": "No idle Cloud SQL instances found.", "Low Utilization VMs": "No low-utilization VMs found.",
         "VM Rightsizing": "No VM rightsizing recommendations found.", "Unassociated IPs": "No unassociated IP addresses found.",
-        "Idle Persistent Disks": "No idle persistent disks found.",
+        "Idle Persistent Disks": "No idle persistent disks found.", "MIG Rightsizing": "No managed instance group rightsizing recommendations found.",
         "Underutilized Reservations": "No underutilized reservations found.", "Idle Reservations": "No idle reservations found."}
-    assert set(NOTHING_FOUND) == set(COST_RECOMMENDERS) and len(COST_RECOMMENDERS) == 13  # v17: six more, each with its all-clear text; v18: Idle Load Balancers retired
+    assert set(NOTHING_FOUND) == set(COST_RECOMMENDERS) and len(COST_RECOMMENDERS) == 14  # v17: six more; v18: Idle Load Balancers retired; v18.1: MIG Rightsizing
 
 
 def test_a_recommendation_anywhere_outweighs_the_all_clear_and_a_denied_project_is_still_reported(gcp):
@@ -248,10 +248,13 @@ def test_a_recommendation_anywhere_outweighs_the_all_clear_and_a_denied_project_
     run_cost_recommendations("org", [{"projectId": "p-ok"}, {"projectId": "p-denied"}], ["us-central1-a"], ["us-central1"], "job-1", sink=sink)
     records = cost_records(sink)
     assert records["Idle Persistent Disks"] == ("Action Required", [
-        {"Project": "p-ok", "Resource Name": "old-boot-disk", "Recommendation": "Delete the idle disk.", "Est. Monthly Saving": "12.00 USD"}])
+        {"Project": "p-ok", "Resource Name": "old-boot-disk", "Recommendation": "Delete the idle disk.", "Est. Monthly Saving": "12.00 USD",
+         "Priority": "unrated",  # v18.1: the recommendation's priority and the gcloud line that applies it
+         "Fix": "gcloud compute disks snapshot old-boot-disk --zone=us-central1-a --project=p-ok --snapshot-names=old-boot-disk-final "
+                "&& gcloud compute disks delete old-boot-disk --zone=us-central1-a --project=p-ok"}])
     assert {check: status for check, (status, _) in records.items()} == {
         check: "Action Required" if check == "Idle Persistent Disks" else "Compliant" for check in COST_RECOMMENDERS}
-    assert not_checked_rows(sink) == [{"Project": "p-denied", "Skipped check": "Cost-Saving Recommendations (all 13 recommenders)", "Reason": f"403 {DENIED}"}]
+    assert not_checked_rows(sink) == [{"Project": "p-denied", "Skipped check": "Cost-Saving Recommendations (all 14 recommenders)", "Reason": f"403 {DENIED}"}]
 
 
 def test_a_recommender_nobody_could_ask_reaches_no_verdict(gcp):
@@ -274,7 +277,7 @@ def test_a_recommender_not_offered_where_it_was_asked_is_neither_a_failure_nor_a
     sink = FakeSink()
     run_cost_recommendations("org", [{"projectId": "p-ok"}], ["asia-south1-a"], ["asia-south1"], "job-1", sink=sink)
     records = cost_records(sink)
-    assert "Cloud Run Cost" not in records and len(records) == 12 and not_checked_rows(sink) == []
+    assert "Cloud Run Cost" not in records and len(records) == 13 and not_checked_rows(sink) == []
 
 
 def test_network_check_reports_a_project_whose_locations_could_not_be_discovered(gcp):

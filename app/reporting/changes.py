@@ -120,9 +120,20 @@ RESHAPED_CHECKS = {
     "VM External IPs": ("18", RULE_CHANGED),  # addresses held, not access configs; one row per instance
     "OS Config Agent Coverage": ("18", RULE_CHANGED),  # one row per VM; errors routed; Autopilot and worker fleets out
     "Monitoring Alert Coverage": ("18", RULE_CHANGED),  # real filter matching across every condition kind
-    "GKE Hygiene": ("18", RULE_CHANGED),  # recommendations attributed to their cluster; fixes
+    "GKE Hygiene": ("18.1", RULE_CHANGED),  # v18: recommendations attributed to their cluster; v18.1: auto-repair rows
     "Unattended Projects": ("18", ROWS_CHANGED),  # the project ID instead of its number
-    "Quota Utilization (>80%)": ("18", RULE_CHANGED),  # COMMITTED_* quotas excluded (supersedes the v17 line)
+    # v18.1 (what is loose): the rules that now ask for the right thing.
+    "Cloud Storage Versioning": ("18.1", RULE_CHANGED),  # sink/retention buckets Action Required; soft delete and lifecycle protect the rest
+    "VPC Configuration": ("18.1", RULE_CHANGED),  # proxy-only subnets out; the default network's subnets fold; PGA a look; Region, Fix
+    "Organization Log Sink": ("18.1", RULE_CHANGED),  # the built-in sinks no longer count; qualification per sink
+    "Essential Contacts": ("18.1", RULE_CHANGED),  # invalid contacts out; every scope
+    "Quota Utilization (>80%)": ("18.1", RULE_CHANGED),  # project-global quotas join (supersedes v17 rows changed, v18 COMMITTED_* out)
+    "Idle Cloud SQL Instances": ("18.1", RULE_CHANGED), "Low Utilization VMs": ("18.1", RULE_CHANGED),  # cost: Priority decides the
+    "VM Rightsizing": ("18.1", RULE_CHANGED), "Unassociated IPs": ("18.1", RULE_CHANGED),  # verdict; Priority and Fix columns
+    "Idle Persistent Disks": ("18.1", RULE_CHANGED), "Underutilized Reservations": ("18.1", RULE_CHANGED),
+    "Idle Reservations": ("18.1", RULE_CHANGED), "Resource-Based Commitment Recommendations": ("18.1", RULE_CHANGED),
+    "Overprovisioned Cloud SQL Instances": ("18.1", RULE_CHANGED), "Cloud Run Cost": ("18.1", RULE_CHANGED),
+    "BigQuery Slot Commitments": ("18.1", RULE_CHANGED), "Idle Images": ("18.1", RULE_CHANGED), "Cloud Storage Soft Delete": ("18.1", RULE_CHANGED),
     "VPC IP Address Utilization": ("18", RULE_CHANGED), "VPC Connectivity": ("18", RULE_CHANGED),  # Network Insights: Severity column,
     "Load Balancer Health": ("18", RULE_CHANGED), "GKE IP Address Utilization": ("18", RULE_CHANGED),  # verdict by severity
     "GKE Connectivity": ("18", RULE_CHANGED), "GKE Service Account": ("18", RULE_CHANGED),

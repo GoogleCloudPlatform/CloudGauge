@@ -36,6 +36,7 @@ Two kinds of clients:
 Discovery clients are built on every call, because ``httplib2`` is not
 thread-safe and the checks run on a thread pool.
 """
+import pathlib
 import threading
 
 import google.auth
@@ -74,7 +75,13 @@ class RealGcp:
     def http_get(self, url, **kwargs):
         return requests.get(url, **kwargs)
 
+    def policy_table(self):
+        """The policy table shipped with the release (v18.1): ``assets/gcp_best_practices.csv`` next to the ``app`` package."""
+        return BUNDLED_POLICY_TABLE_PATH.read_text(encoding="utf-8")
 
+
+# assets/gcp_best_practices.csv: in the repository root, and copied next to the app package in the image (Dockerfile).
+BUNDLED_POLICY_TABLE_PATH = pathlib.Path(__file__).resolve().parents[2] / "assets" / "gcp_best_practices.csv"
 _real_provider = RealGcp()
 _provider = _real_provider
 
@@ -129,8 +136,13 @@ def osconfig_client():
 
 
 def http_get(url, **kwargs):
-    """``requests.get``: the best-practices CSV and the Service Health REST call."""
+    """``requests.get``: an https:// policy table and the Service Health REST call."""
     return _provider.http_get(url, **kwargs)
+
+
+def policy_table():
+    """The text of the policy table shipped with the release (the synthetic provider answers its own small table)."""
+    return _provider.policy_table()
 
 
 # --- Infrastructure clients (shared, never replaced by a provider) ---

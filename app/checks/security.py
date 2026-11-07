@@ -750,54 +750,106 @@ def check_cloud_sql_security(scope_id, all_projects, job_id, *, sink):
     skipped.write(sink, job_id)
 
 
+# VPC Configuration (v18.1): the default network, and subnets without Private Google Access where it applies.
+VPC_CHECK = "VPC Configuration"
+# Subnet purposes that carry no VM: proxy-only subnets of load balancers, Private Service Connect, Private NAT, peer migration.
+PGA_EXEMPT_PURPOSES = frozenset({"REGIONAL_MANAGED_PROXY", "GLOBAL_MANAGED_PROXY", "INTERNAL_HTTPS_LOAD_BALANCER", "PRIVATE_SERVICE_CONNECT",
+                                 "PRIVATE_NAT", "PEER_MIGRATION"})
+IPV6_PGA_VALUES = ("ENABLE_OUTBOUND_VM_ACCESS_TO_GOOGLE", "ENABLE_BIDIRECTIONAL_ACCESS_TO_GOOGLE")
+# The subnet GKE creates for a cluster's private control-plane endpoint (``gke-<cluster>-<hash>-pe-subnet``, purpose PRIVATE,
+# no PGA): Google's, carries no VM, cannot usefully be changed — never a row. Seen on the v18.1 probe cluster.
+GKE_ENDPOINT_SUBNET_DESCRIPTION = "Control Plane Endpoint Subnetwork"
+VPC_ALL_CLEAR = "No default VPC network, and every subnet that can have Private Google Access has it."
+
+
+def subnet_has_private_google_access(subnet):
+    """Whether a subnet's VMs reach Google APIs privately: ``privateIpGoogleAccess`` (IPv4), ``privateIpv6GoogleAccess`` for IPv6-only subnets."""
+    if str(subnet.get("stackType", "IPV4_ONLY")).upper() == "IPV6_ONLY":
+        return str(subnet.get("privateIpv6GoogleAccess", "")).upper() in IPV6_PGA_VALUES
+    return bool(subnet.get("privateIpGoogleAccess", False))
+
+
+def subnet_is_exempt(subnet):
+    """A subnet that is never judged for Private Google Access: a ``PGA_EXEMPT_PURPOSES`` purpose, or GKE's control-plane endpoint subnet."""
+    purpose = str(subnet.get("purpose") or "PRIVATE").upper()
+    name = str(subnet.get("name") or "")
+    return (purpose in PGA_EXEMPT_PURPOSES or subnet.get("description") == GKE_ENDPOINT_SUBNET_DESCRIPTION
+            or (name.startswith("gke-") and name.endswith("-pe-subnet")))
+
+
+def vpc_rows(project_id, networks, subnets):
+    """The rows of a project's networks and subnets.
+
+    The ``default`` network is **Action Required** (one row; its auto-mode subnets without Private Google Access are
+    counted into it rather than listed); any other subnet without Private Google Access is **Investigation Recommended**
+    with its region and fix; subnets of ``PGA_EXEMPT_PURPOSES`` (proxy-only, PSC, NAT) and GKE's control-plane endpoint
+    subnets are not judged (``subnet_is_exempt``).
+    """
+    default_networks = {str(n.get("selfLink") or n.get("name")).rsplit("/", 1)[-1] for n in networks if n.get("name") == "default"}
+    rows, folded = [], 0
+    for subnet in subnets:
+        if subnet_is_exempt(subnet) or subnet_has_private_google_access(subnet):
+            continue
+        network = str(subnet.get("network", "")).rsplit("/", 1)[-1]
+        if network in default_networks:
+            folded += 1
+            continue
+        region = str(subnet.get("region", "")).rsplit("/", 1)[-1]
+        rows.append({"Project": project_id, "Network / Subnet": f"{network} / {subnet.get('name')}", "Region": region,
+                     "Issue": "Private Google Access disabled.",
+                     "Fix": f"gcloud compute networks subnets update {subnet.get('name')} --region={region} --project={project_id} --enable-private-ip-google-access",
+                     "_status": INVESTIGATION})
+    for network in sorted(default_networks):
+        issue = "Default VPC network exists."
+        if folded:
+            issue += f" {folded} of its auto-mode subnets lack Private Google Access (counted here, not listed)."
+        rows.insert(0, {"Project": project_id, "Network / Subnet": f"{network} (network)", "Region": "global", "Issue": issue,
+                        "Fix": f"gcloud compute networks delete {network} --project={project_id}  # after moving its workloads and deleting its firewall rules",
+                        "_status": ACTION_REQUIRED})
+    return rows
+
+
 def check_vpc_configuration(scope_id, all_projects, job_id, *, sink):
     """
     Checks for 'default' VPC usage and subnets without Private Google Access.
+
+    v18.1: one ``subnetworks.aggregatedList`` per project instead of one listing per region; proxy-only
+    and PSC subnets are no longer flagged (they cannot have PGA); the default network's auto-subnets
+    fold into its row; a PGA row is Investigation Recommended with its region and fix (``vpc_rows``).
 
     Args:
         scope_id (str): The scope ID.
         all_projects (list): A list of project dictionaries.
         job_id (str): The job ID.
     """
-    CHECK_NAME = "VPC Configuration"
-    print(f"🕸️  [{job_id}] Checking {CHECK_NAME}...")
-    skipped = NotChecked(CHECK_NAME, resource_apis=("compute.googleapis.com",))
+    print(f"🕸️  [{job_id}] Checking {VPC_CHECK}...")
+    skipped = NotChecked(VPC_CHECK, resource_apis=("compute.googleapis.com",))
 
     def check_project(p):
-        project_id, findings = p['projectId'], []
+        project_id = p['projectId']
         try:
             credentials, _ = gcp.auth_default(scopes=SCOPES)
             compute = gcp.api_build('compute', 'v1', credentials=credentials)
-            
-            # Check 1: Default VPC
-            networks = compute.networks().list(project=project_id).execute().get('items', [])
-            for net in networks:
-                if net.get('name') == 'default':
-                    findings.append({"Project": project_id, "Network": "default", "Issue": "Default VPC network exists."})
-
-            # Check 2: Private Google Access
-            regions = compute.regions().list(project=project_id).execute().get('items', [])
-            for region in regions:
-                subnets = compute.subnetworks().list(project=project_id, region=region['name']).execute().get('items', [])
-                for subnet in subnets:
-                    if not subnet.get('privateIpGoogleAccess', False):
-                        findings.append({"Project": project_id, "Subnet": subnet['name'], "Issue": "Private Google Access disabled."})
-
+            networks, request = [], compute.networks().list(project=project_id)
+            while request:
+                response = request.execute()
+                networks.extend(response.get('items', []))
+                request = compute.networks().list_next(previous_request=request, previous_response=response)
+            subnets, request = [], compute.subnetworks().aggregatedList(project=project_id)
+            while request:
+                response = request.execute()
+                for scoped in response.get('items', {}).values():
+                    subnets.extend(scoped.get('subnetworks', []))
+                request = compute.subnetworks().aggregatedList_next(previous_request=request, previous_response=response)
+            return vpc_rows(project_id, networks, subnets)
         except Exception as e:
             skipped.add(project_id, e)
-        return findings
+            return []
 
     all_findings = []
     for project in all_projects:
-        findings = check_project(project)
-        if findings:
-            all_findings.extend(findings)
-
-    if all_findings:
-        result = {"Check": CHECK_NAME, "Finding": all_findings, "Status": "Action Required"}
-    else:
-        result = {"Check": CHECK_NAME, "Finding": [{"Status": "No default VPCs found and all subnets have Private Google Access."}], "Status": "Compliant"}
-    sink.write_finding(job_id, CHECK_NAME.replace(" ", "_"), result)
+        all_findings.extend(check_project(project))
+    sink.write_finding(job_id, VPC_CHECK.replace(" ", "_"), result_record(VPC_CHECK, all_findings, VPC_ALL_CLEAR))
     skipped.write(sink, job_id)
 
 
@@ -820,7 +872,8 @@ def check_storage_ubla(scope_id, all_projects, job_id, *, sink):
             storage_client_local = gcp.project_storage_client(project_id)
             for bucket in storage_client_local.list_buckets():
                 if not bucket.iam_configuration.uniform_bucket_level_access_enabled:
-                    findings.append({"Project": project_id, "Bucket": bucket.name, "Issue": "UBLA not enabled."})
+                    findings.append({"Project": project_id, "Bucket": bucket.name, "Issue": "UBLA not enabled.",
+                                     "Fix": f"gcloud storage buckets update gs://{bucket.name} --uniform-bucket-level-access"})  # v18.1
         except Exception as e:
             skipped.add(project_id, e)
         return findings
@@ -1063,4 +1116,4 @@ def check_iam_recommendations(scope, scope_id, all_projects, job_id, *, sink, sc
 # The legacy checks of this module that write through ``result_record`` (v18); each name is a key of CATEGORY_MAP
 # (tests/test_category_consistency.py resolves the ``Check`` values of the shared writer from this table).
 REVALIDATED_CHECKS = (CRITICAL_ROLES_CHECK, PUBLIC_ORG_CHECK, PRIMITIVE_ROLES_CHECK, SA_KEYS_CHECK, PUBLIC_BUCKETS_CHECK,
-                      FIREWALL_CHECK, SQL_CHECK, EXTERNAL_IPS_CHECK)
+                      FIREWALL_CHECK, SQL_CHECK, EXTERNAL_IPS_CHECK, VPC_CHECK)

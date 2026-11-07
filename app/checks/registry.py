@@ -39,8 +39,10 @@ from app.checks.gke_versions import CHECK_NAME as GKE_VERSIONS_CHECK
 from app.checks.gke_versions import check_gke_supported_versions
 from app.checks.network import run_network_insights
 from app.checks.operations import (
+    DATA_ACCESS_CHECK,
     QUOTA_RECOMMENDATIONS_CHECK,
     check_audit_logging,
+    check_data_access_audit_logs,
     check_monitoring_coverage,
     check_os_config_coverage,
     check_quota_recommendations,
@@ -135,7 +137,7 @@ def build_check_plan(scope, scope_id, job_id, all_projects, active_zones, active
         CheckSpec("Security & Identity", "Public GCS Buckets", check_public_buckets, (scope_id, all_projects, job_id)),
         CheckSpec("Security & Identity", "Open Firewall Rules", check_open_firewall_rules, (scope_id, all_projects, job_id)),
         CheckSpec("Cost Optimization", "Cost-Saving Recommendations", run_cost_recommendations, (scope_id, all_projects, active_zones, active_regions, job_id, location_errors)),
-        CheckSpec("Reliability & Resilience", "GCS Bucket Versioning", check_storage_versioning, (scope_id, all_projects, job_id)),
+        CheckSpec("Reliability & Resilience", "GCS Bucket Versioning", check_storage_versioning, (scope, scope_id, all_projects, job_id)),
         CheckSpec("Reliability & Resilience", "GKE Hygiene", check_gke_hygiene, (scope_id, all_projects, job_id)),
         CheckSpec("Operational Excellence & Observability", "OS Config Agent Coverage", check_os_config_coverage, (scope_id, all_projects, job_id)),
         CheckSpec("Operational Excellence & Observability", "Monitoring Alert Coverage", check_monitoring_coverage, (scope_id, all_projects, job_id)),
@@ -163,6 +165,9 @@ def build_check_plan(scope, scope_id, job_id, all_projects, active_zones, active
         CheckSpec("Security & Identity", CREDENTIAL_EXPOSURE_CHECK, check_gke_security, (scope, scope_id, job_id)),
         CheckSpec("Security & Identity", IMPERSONATION_CHECK, check_service_account_impersonation, (scope, scope_id, job_id)),
         CheckSpec("Security & Identity", VPC_SC_CHECK, check_vpc_sc_coverage, (scope, scope_id, job_id)),
+        # v18.1: two checks every scope runs on the scope itself
+        CheckSpec("Reliability & Resilience", "Essential Contacts", check_essential_contacts, (scope, scope_id, job_id)),
+        CheckSpec("Operational Excellence & Observability", DATA_ACCESS_CHECK, check_data_access_audit_logs, (scope, scope_id, job_id)),
     ]
 
     if scope == 'organization':
@@ -170,7 +175,6 @@ def build_check_plan(scope, scope_id, job_id, all_projects, active_zones, active
             CheckSpec("Security & Identity", "Organization IAM Policy", check_org_iam_policy, (scope_id, job_id)),
             CheckSpec("Security & Identity", "Security Command Center Status", check_scc_status, (scope_id, job_id)),
             CheckSpec("Operational Excellence & Observability", "Organization Audit Logging", check_audit_logging, (scope_id, job_id)),
-            CheckSpec("Reliability & Resilience", "Essential Contacts", check_essential_contacts, (scope_id, job_id)),
             CheckSpec("Security & Identity", ADVISORIES_CHECK, check_org_advisories, (scope_id, job_id)),
         ]
         all_checks_to_run.extend(org_only_checks)
@@ -190,7 +194,7 @@ def build_check_plan(scope, scope_id, job_id, all_projects, active_zones, active
 # listing, one IAM search, one perimeter listing for the whole scope).
 SCOPE_LEVEL_CHECKS = frozenset({
     "Organization Policies", "Organization IAM Policy", "Security Command Center Status",
-    "Organization Audit Logging", "Essential Contacts", RESILIENCE_CHECK,
+    "Organization Audit Logging", "Essential Contacts", DATA_ACCESS_CHECK, RESILIENCE_CHECK,
     SNAPSHOT_SPRAWL_CHECK, SQL_VERSIONS_CHECK, CREDENTIAL_EXPOSURE_CHECK, IMPERSONATION_CHECK, VPC_SC_CHECK,
 })
 # The checks that do both: scope-wide work plus per-project work. Shards split them

@@ -858,8 +858,20 @@ def test_sharded_scan_end_to_end_matches_a_single_task_scan(gcp, monkeypatch):
     """50 synthetic projects, shards of 20: dispatcher -> 3 project shards + scope shard -> aggregation.
 
     The fake Cloud Tasks client delivers the tasks; the report must be the one a
-    single-task scan of the same organization produces.
+    single-task scan of the same organization produces. The synthetic world's
+    clock is frozen for the test: its timestamps are relative to "now", and two
+    scans a minute apart would otherwise differ in the rows that show a time.
     """
+    from datetime import timezone
+
+    from app.synthetic import provider as synthetic_provider
+    frozen = datetime.now(timezone.utc)
+
+    class FrozenDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return frozen.astimezone(tz) if tz else frozen.replace(tzinfo=None)
+    monkeypatch.setattr(synthetic_provider, 'datetime', FrozenDatetime)
     set_env(monkeypatch, synthetic_env(50, 20))
     app = create_app()
     client = app.test_client()

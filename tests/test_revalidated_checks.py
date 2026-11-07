@@ -610,7 +610,7 @@ def test_misc_checks_write_errors_under_their_own_names_and_notes_when_there_is_
     sink = Sink()
     operations.run_miscellaneous_checks_refactored('organization', '1', [{'projectId': 'p'}], JOB, sink=sink)
     records = sink.by_check()
-    assert records['VPC Firewall Complexity (>150 Rules)']['Status'] == C  # answered, nothing over the limit: a verdict, not silence
+    assert 'VPC Firewall Complexity (>150 Rules)' not in records  # v18.1: retired into the FIREWALLS quota
     assert records['Unattended Projects']['Status'] == 'Error' and 'Could not list' in records['Unattended Projects']['Finding'][0]['Error']
     assert records['Recent Changes (Org & Project)'] == {'Check': 'Recent Changes (Org & Project)', 'Status': INFO, 'Finding': [{'Summary': operations.NO_RECENT_CHANGES}]}
 
@@ -643,7 +643,7 @@ def test_committed_quotas_are_never_rows():
 # --- Cost recommenders --------------------------------------------------------------------------------------------
 
 def test_idle_load_balancers_retired_and_a_cost_increase_is_not_a_saving():
-    assert 'Idle Load Balancers' not in cost.COST_RECOMMENDERS and len(cost.COST_RECOMMENDERS) == 13
+    assert 'Idle Load Balancers' not in cost.COST_RECOMMENDERS and len(cost.COST_RECOMMENDERS) == 14  # v18.1: MIG Rightsizing joined
     assert CATEGORY_MAP['Idle Load Balancers'] == 'Cost Optimization'  # older summaries still name it
     upsize = SimpleNamespace(name='r', description='Upsize for performance.', recommender_subtype='CHANGE_MACHINE_TYPE',
                              content=SimpleNamespace(overview={'resourceName': 'vm-1'}),
@@ -655,8 +655,8 @@ def test_idle_load_balancers_retired_and_a_cost_increase_is_not_a_saving():
 
 def test_gke_hygiene_rows_and_the_attribution_of_recommendations():
     static = {'name': 'legacy', 'location': 'us-central1-a', 'releaseChannel': {'channel': 'UNSPECIFIED'},
-              'nodePools': [{'name': 'default-pool', 'management': {'autoUpgrade': False}}]}
-    channel = {'name': 'prod', 'location': 'us-central1-a', 'releaseChannel': {'channel': 'REGULAR'}, 'nodePools': [{'name': 'p', 'management': {'autoUpgrade': True}}]}
+              'nodePools': [{'name': 'default-pool', 'management': {'autoUpgrade': False, 'autoRepair': True}}]}
+    channel = {'name': 'prod', 'location': 'us-central1-a', 'releaseChannel': {'channel': 'REGULAR'}, 'nodePools': [{'name': 'p', 'management': {'autoUpgrade': True, 'autoRepair': True}}]}
     assert reliability.cluster_channel(static) == '' and reliability.cluster_channel(channel) == 'REGULAR' and reliability.cluster_channel({}) == ''
     rows = reliability.gke_hygiene_rows('p', static)
     assert [(r['Cluster'], r.get('Node Pool'), r['Issue']) for r in rows] == [('legacy', None, 'Not on a release channel.'), ('legacy', 'default-pool', 'Auto-upgrades disabled.')]
@@ -668,7 +668,7 @@ def test_gke_hygiene_rows_and_the_attribution_of_recommendations():
 
 
 def test_gke_hygiene_check_keeps_cluster_rows_when_the_recommender_fails(gcp):
-    clusters = {'clusters': [{'name': 'legacy', 'location': 'us-central1-a', 'nodePools': [{'name': 'default-pool', 'management': {'autoUpgrade': True}}]}]}
+    clusters = {'clusters': [{'name': 'legacy', 'location': 'us-central1-a', 'nodePools': [{'name': 'default-pool', 'management': {'autoUpgrade': True, 'autoRepair': True}}]}]}
     gcp.discovery.apis['container'] = SimpleNamespace(projects=lambda: SimpleNamespace(locations=lambda: SimpleNamespace(clusters=lambda: SimpleNamespace(list=lambda parent: _execute(clusters)))))
     recommendations = SimpleNamespace(list=lambda parent, filter: _execute(RuntimeError('403 denied')))
     gcp.discovery.apis['recommender'] = SimpleNamespace(projects=lambda: SimpleNamespace(locations=lambda: SimpleNamespace(recommenders=lambda: SimpleNamespace(recommendations=lambda: recommendations))))
@@ -769,8 +769,9 @@ def test_a_policy_level_that_cannot_be_listed_is_an_error_not_a_silent_pass(gcp)
 def test_every_revalidated_check_draws_its_line_at_v18():
     revalidated = ['Organization Policies', 'Security Command Center Status', 'Primitive Roles (Owner or Editor)', 'Critical Org-Level Roles', 'Service Account Key Rotation',
                    'Public GCS Buckets', 'Open Firewall Rules', 'Cloud SQL Security', 'VM External IPs', 'OS Config Agent Coverage',
-                   'Monitoring Alert Coverage', 'GKE Hygiene', 'Quota Utilization (>80%)', *network.NETWORK_INSIGHT_TYPES]
+                   'Monitoring Alert Coverage', *network.NETWORK_INSIGHT_TYPES]
     assert {name: RESHAPED_CHECKS[name] for name in revalidated} == {name: ('18', RULE_CHANGED) for name in revalidated}
+    assert RESHAPED_CHECKS['GKE Hygiene'] == RESHAPED_CHECKS['Quota Utilization (>80%)'] == ('18.1', RULE_CHANGED)  # redrawn again in v18.1
     assert RESHAPED_CHECKS['Unattended Projects'] == ('18', 'rows changed')
     for name in revalidated + ['Unattended Projects']:
         assert name in CATEGORY_MAP

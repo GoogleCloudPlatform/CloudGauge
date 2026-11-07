@@ -89,7 +89,7 @@ def test_recommenders_are_asked_where_they_live():
     assert recommender_locations('global', zones, regions) == ['global']
     assert recommender_locations('bigquery', zones, regions) == ['US', 'EU', 'us-central1', 'asia-south1']
     assert recommender_locations('global', [], []) == ['global'] and recommender_locations('bigquery', [], []) == list(BIGQUERY_MULTI_REGIONS)
-    assert len(COST_RECOMMENDERS) == 13 and len(location_bound_recommenders()) == 10  # v18: Idle Load Balancers retired (no such recommender)
+    assert len(COST_RECOMMENDERS) == 14 and len(location_bound_recommenders()) == 11  # v18: Idle Load Balancers retired; v18.1: MIG Rightsizing
     assert [name for name in COST_RECOMMENDERS if name not in location_bound_recommenders()] == \
         ['BigQuery Slot Commitments', 'Idle Images', 'Cloud Storage Soft Delete']
     assert COST_RECOMMENDERS['Resource-Based Commitment Recommendations'] == ('google.compute.commitment.UsageCommitmentRecommender', 'region')

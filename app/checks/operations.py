@@ -42,13 +42,56 @@ ACTIVE_RECOMMENDATIONS = "stateInfo.state = ACTIVE"
 # --- Operational Excellence Checks ---
 
 LOG_SINK_CHECK = "Organization Log Sink"
+# Every organization has these two sinks (its own _Required and _Default log buckets); they are not the aggregated export
+# CIS 2.2 asks for, so they are never the evidence (v18.1).
+BUILTIN_SINKS = ("_Required", "_Default")
+SINK_FIX = "gcloud logging sinks create <sink> <destination> --organization={org} --include-children --log-filter='logName:\"cloudaudit.googleapis.com\"'"
+
+
+def sink_shortcomings(sink_entry):
+    """What keeps a customer sink from being the organization's audit export: ``[]`` when nothing does."""
+    lacks = []
+    if sink_entry.get("disabled"):
+        lacks.append("disabled")
+    if not sink_entry.get("includeChildren"):
+        lacks.append("covers the organization resource only (no --include-children)")
+    log_filter = str(sink_entry.get("filter") or "").strip()
+    if log_filter and ("cloudaudit.googleapis.com" not in log_filter or log_filter.upper().startswith("NOT ")):
+        lacks.append("filter leaves the audit logs out")
+    return lacks
+
+
+def log_sink_rows(org_id, sinks):
+    """One row per customer sink (the built-ins left out) with its assessment, and the record's status (v18.1).
+
+    A qualifying sink → Compliant; customer sinks that all fall short → Investigation Recommended; none → Action Required.
+    """
+    rows = []
+    for entry in sinks:
+        if entry.get("name") in BUILTIN_SINKS:
+            continue
+        lacks = sink_shortcomings(entry)
+        rows.append({"Sink Name": entry.get("name"), "Destination": entry.get("destination"), "Filter": str(entry.get("filter") or "")[:160] or "(all logs)",
+                     "Children": "yes" if entry.get("includeChildren") else "no", "State": "disabled" if entry.get("disabled") else "enabled",
+                     "Assessment": "qualifies as the organization's audit export" if not lacks else "; ".join(lacks)})
+    if not rows:
+        return [{"Issue": "No organization-level log sink besides the built-in _Required and _Default: audit logs are not exported anywhere.",
+                 "Fix": SINK_FIX.format(org=org_id)}], ACTION_REQUIRED
+    if any(row["Assessment"].startswith("qualifies") for row in rows):
+        return rows, COMPLIANT
+    for row in rows:
+        row["Fix"] = SINK_FIX.format(org=org_id)
+    return rows, INVESTIGATION
 
 
 def check_audit_logging(org_id, job_id, *, sink):
     """
-    Verifies if an organization-level log sink is configured for centralized audit logging.
+    Verifies that an organization-level log sink exports the audit logs of the whole organization.
 
     v18: a failure is an Error row under the check's own name (``Log Sink Check`` is retired).
+    v18.1: the built-in ``_Required`` and ``_Default`` sinks no longer count (every organization has
+    them, so the check could never fail); a sink qualifies when it is enabled, includes children and
+    its filter admits the audit logs (``sink_shortcomings``).
 
     Args:
         org_id (str): The organization ID.
@@ -57,17 +100,131 @@ def check_audit_logging(org_id, job_id, *, sink):
     try:
         credentials, _ = gcp.auth_default(scopes=SCOPES)
         service = gcp.api_build('logging', 'v2', credentials=credentials)
-        sinks = service.organizations().sinks().list(parent=f'organizations/{org_id}').execute().get('sinks', [])
-        if sinks:
-            finding_data = [{"Sink Name": s['name'], "Destination": s['destination']} for s in sinks]
-            result = {"Check": LOG_SINK_CHECK, "Finding": finding_data, "Status": "Compliant"}
-        else:
-            result = {"Check": LOG_SINK_CHECK, "Finding": [{"Issue": "No organization-level log sink configured.",
-                                                              "Fix": f"gcloud logging sinks create <sink> <destination> --organization={org_id} --include-children --log-filter='logName:\"cloudaudit.googleapis.com\"'"}],
-                      "Status": "Action Required"}
+        sinks, request = [], service.organizations().sinks().list(parent=f'organizations/{org_id}')
+        while request:
+            response = request.execute()
+            sinks.extend(response.get('sinks', []))
+            request = service.organizations().sinks().list_next(previous_request=request, previous_response=response)
+        rows, status = log_sink_rows(org_id, sinks)
+        result = {"Check": LOG_SINK_CHECK, "Finding": rows, "Status": status}
     except Exception as e:
         result = {"Check": LOG_SINK_CHECK, "Finding": [{"Error": f"Could not list the organization's log sinks: {e}"}], "Status": "Error"}
     sink.write_finding(job_id, LOG_SINK_CHECK.replace(" ", "_"), result)
+
+
+# Data Access Audit Logs (v18.1): CIS 2.1 / SHA AUDIT_LOGGING_DISABLED — whether the IAM policies of the scanned resource and
+# its ancestors turn on the three Data Access log types for every service, with nobody exempted.
+DATA_ACCESS_CHECK = "Data Access Audit Logs"
+AUDIT_LOG_TYPES = ("ADMIN_READ", "DATA_READ", "DATA_WRITE")
+ALL_SERVICES = "allServices"
+DATA_ACCESS_COST_NOTE = ("DATA_READ for every service can produce significant log volume and cost; CIS recommends it all the same — "
+                         "exempt high-volume services deliberately rather than leave the logs off.")
+DATA_ACCESS_FIX = ("Add to the IAM policy of {resource} (gcloud {kind} get-iam-policy {id} --format=yaml > policy.yaml; append; "
+                   "gcloud {kind} set-iam-policy {id} policy.yaml): auditConfigs: [{{service: allServices, auditLogConfigs: "
+                   "[{{logType: ADMIN_READ}}, {{logType: DATA_READ}}, {{logType: DATA_WRITE}}]}}]  # console: IAM & Admin → Audit Logs → Default audit config")
+GCLOUD_KIND = {"organization": "organizations", "folder": "resource-manager folders", "project": "projects"}
+
+
+def audit_config_assessment(configs_by_resource):
+    """What the Data Access configuration of a resource amounts to, from its own and its ancestors' ``auditConfigs``.
+
+    ``configs_by_resource`` is ``[(resource name, auditConfigs list)]``, the organization first. The effective configuration
+    is the union: a log type is on for all services when any level turns it on for ``allServices``; an exemption anywhere
+    leaves those members out. Returns a dict: ``types`` (on for all services), ``missing``, ``exemptions``
+    (``{type: [members]}``), ``services`` (``{service: [types]}`` configured individually), ``configured_at`` (resources
+    with any configuration), ``status``.
+    """
+    on, exemptions, services, configured_at = set(), {}, {}, []
+    for resource, configs in configs_by_resource:
+        if configs:
+            configured_at.append(resource)
+        for config in configs or []:
+            service = config.get("service", "")
+            for log_config in config.get("auditLogConfigs", []):
+                log_type = str(log_config.get("logType", "")).upper()
+                if service == ALL_SERVICES:
+                    on.add(log_type)
+                    for member in log_config.get("exemptedMembers", []) or []:
+                        exemptions.setdefault(log_type, []).append(member)
+                elif log_type:
+                    services.setdefault(service, []).append(log_type)
+    missing = [t for t in AUDIT_LOG_TYPES if t not in on]
+    if not configured_at:
+        status = ACTION_REQUIRED
+    elif missing or exemptions:
+        status = INVESTIGATION
+    else:
+        status = COMPLIANT
+    return {"types": [t for t in AUDIT_LOG_TYPES if t in on], "missing": missing, "exemptions": exemptions, "services": services,
+            "configured_at": configured_at, "status": status}
+
+
+def data_access_row(scope, scope_id, assessment):
+    """The check's one row: what is on, what is missing, who is exempted, where it is configured, and the fix."""
+    kind = GCLOUD_KIND.get(scope, "organizations")
+    resource = f"{scope}s/{scope_id}"
+    row = {"Resource": resource,
+           "Log types on for all services": ", ".join(assessment["types"]) or "none",
+           "Missing": ", ".join(assessment["missing"]) or "none",
+           "Exemptions": "; ".join(f"{t}: {len(m)} member{'s' if len(m) != 1 else ''}" for t, m in assessment["exemptions"].items()) or "none",
+           "Configured at": ", ".join(assessment["configured_at"]) or "nowhere",
+           "Services configured individually": ", ".join(f"{s} ({', '.join(sorted(set(t)))})" for s, t in sorted(assessment["services"].items())) or "none"}
+    if assessment["status"] == ACTION_REQUIRED:
+        row["Issue"] = f"No Data Access audit logs are configured on {resource} or above: reads and writes of data leave no audit trail. {DATA_ACCESS_COST_NOTE}"
+    elif assessment["status"] == INVESTIGATION:
+        row["Issue"] = f"Data Access audit logs are partly configured. {DATA_ACCESS_COST_NOTE}"
+    if assessment["status"] != COMPLIANT:
+        row["Fix"] = DATA_ACCESS_FIX.format(resource=resource, kind=kind, id=scope_id)
+    return row
+
+
+def check_data_access_audit_logs(scope, scope_id, job_id, *, sink):
+    """
+    Checks whether Data Access audit logs are on for every service of the scanned resource (v18.1).
+
+    An organization scan reads the organization's IAM policy; a folder or project scan reads the
+    scanned resource's and its ancestors' (the effective configuration is their union).
+
+    Args:
+        scope (str): ``organization``, ``folder`` or ``project``.
+        scope_id (str): The scope ID.
+    """
+    print(f"📜 [{job_id}] Checking {DATA_ACCESS_CHECK} for {scope} {scope_id}...")
+    try:
+        credentials, _ = gcp.auth_default(scopes=SCOPES)
+        crm_v1 = gcp.api_build('cloudresourcemanager', 'v1', credentials=credentials)
+        crm_v3 = gcp.api_build('cloudresourcemanager', 'v3', credentials=credentials)
+        lineage = []  # resource names, the organization first
+        if scope == "organization":
+            lineage = [f"organizations/{scope_id}"]
+        elif scope == "project":
+            ancestry = crm_v1.projects().getAncestry(projectId=scope_id, body={}).execute()
+            lineage = [f"{a['resourceId']['type']}s/{a['resourceId']['id']}" for a in reversed(ancestry.get("ancestor", []))]
+            if f"projects/{scope_id}" not in lineage:
+                lineage.append(f"projects/{scope_id}")
+        else:
+            current, chain = f"folders/{scope_id}", []
+            while current and current.startswith("folders/"):
+                chain.append(current)
+                current = crm_v3.folders().get(name=current).execute().get("parent")
+            if current:
+                chain.append(current)
+            lineage = list(reversed(chain))
+        configs_by_resource = []
+        for resource in lineage:
+            kind, identifier = resource.split("/", 1)
+            if kind == "organizations":
+                policy = crm_v1.organizations().getIamPolicy(resource=resource, body={}).execute()
+            elif kind == "folders":
+                policy = crm_v3.folders().getIamPolicy(resource=resource, body={}).execute()
+            else:
+                policy = crm_v1.projects().getIamPolicy(resource=identifier, body={}).execute()
+            configs_by_resource.append((resource, policy.get("auditConfigs", [])))
+        assessment = audit_config_assessment(configs_by_resource)
+        result = {"Check": DATA_ACCESS_CHECK, "Finding": [data_access_row(scope, scope_id, assessment)], "Status": assessment["status"]}
+    except Exception as e:
+        result = {"Check": DATA_ACCESS_CHECK, "Finding": [{"Error": f"Could not read the IAM policies that carry the audit configuration: {e}"}], "Status": "Error"}
+    sink.write_finding(job_id, DATA_ACCESS_CHECK.replace(" ", "_"), result)
 
 
 # OS Config Agent Coverage (v18): the running VMs without an OS inventory, from one inventory listing per zone.
@@ -348,11 +505,11 @@ def check_standalone_vms(scope_id, all_projects, job_id, *, sink):
     skipped.write(sink, job_id)
 
 
-# Miscellaneous (v18): the three names it writes, each with a verdict or a note; errors as Error rows or Projects not checked.
-FIREWALL_COMPLEXITY_CHECK = "VPC Firewall Complexity (>150 Rules)"
+# Miscellaneous (v18): the names it writes, each with a verdict or a note; errors as Error rows or Projects not checked.
+# v18.1: *VPC Firewall Complexity (>150 Rules)* retired — the FIREWALLS project quota in Quota Utilization measures the same
+# thing against the project's actual limit.
 RECENT_CHANGES_CHECK = "Recent Changes (Org & Project)"
 UNATTENDED_CHECK = "Unattended Projects"
-FIREWALL_RULE_LIMIT = 150
 RECENT_CHANGE_INSIGHT = "google.cloud.RecentChangeInsight"
 UNATTENDED_RECOMMENDER = "google.resourcemanager.projectUtilization.Recommender"
 NO_RECENT_CHANGES = "No recent-change insights (IAM policy, firewall or organization changes Active Assist flags) in the scanned scope."
@@ -395,8 +552,7 @@ def run_miscellaneous_checks_refactored(scope, scope_id, all_projects, job_id, *
     this with ``org_insights=False``, the scope shard with ``project_checks=False``
     (and no projects). With both flags on (the default) the behavior is the legacy one.
 
-    v18: firewall complexity reads every page and writes its all-clear row; the
-    organization-level insights' failures are Error rows under their own names (before,
+    v18: the organization-level insights' failures are Error rows under their own names (before,
     one error row was appended to both records, and *Unattended Projects* read Action
     Required with an error as its only row); a project whose recent changes could not be
     read is under *Projects not checked*; unattended projects are *Investigation Recommended*
@@ -409,41 +565,6 @@ def run_miscellaneous_checks_refactored(scope, scope_id, all_projects, job_id, *
 
     recent_change_findings, unattended_findings = [], []
     org_errors = {}  # check name -> the error that stopped its organization-level listing
-
-    # --- Check 1: Firewall Rules (Runs for all scopes) ---
-    firewall_skipped = NotChecked(FIREWALL_COMPLEXITY_CHECK, resource_apis=("compute.googleapis.com",))
-    answered = False
-
-    def check_firewall_rules_count(project):
-        nonlocal answered
-        project_id = project['projectId']
-        try:
-            credentials, _ = gcp.auth_default(scopes=SCOPES)
-            compute_service = gcp.api_build('compute', 'v1', credentials=credentials)
-            count, request = 0, compute_service.firewalls().list(project=project_id)
-            while request:
-                response = request.execute()
-                count += len(response.get('items', []))
-                request = compute_service.firewalls().list_next(previous_request=request, previous_response=response)
-            answered = True
-            if count > FIREWALL_RULE_LIMIT:
-                return {"Project": project_id, "Rule Count": count, "Recommendation": f"Project has {count} firewall rules."}
-        except Exception as e: firewall_skipped.add(project_id, e)
-        return None
-
-    firewall_findings = []
-    for project in all_projects:
-        finding = check_firewall_rules_count(project)
-        if finding:
-            firewall_findings.append(finding)
-
-    if firewall_findings:
-        result = {"Check": FIREWALL_COMPLEXITY_CHECK, "Finding": firewall_findings, "Status": INVESTIGATION}
-        sink.write_finding(job_id, "VPC_Firewall_Complexity", result)
-    elif answered:
-        result = {"Check": FIREWALL_COMPLEXITY_CHECK, "Finding": [{"Status": f"No project has more than {FIREWALL_RULE_LIMIT} VPC firewall rules."}], "Status": "Compliant"}
-        sink.write_finding(job_id, "VPC_Firewall_Complexity", result)
-    firewall_skipped.write(sink, job_id)
 
     # --- Org-Level Recommender/Insight Checks (Run ONLY for organization scope) ---
     if scope == 'organization' and org_insights:
@@ -519,6 +640,9 @@ def run_service_limit_checks_refactored(scope_id, all_projects, job_id, *, sink)
     """
     Checks regional compute quotas for all projects to identify any approaching their limit.
 
+    v18.1: the project-global quotas (``projects.get().quotas``) join the regional ones under Region
+    ``global``; the FIREWALLS quota among them retires the separate firewall count.
+
     v17: two thresholds instead of one — a quota at ``QUOTA_CRITICAL_RATIO`` (95 %) or more is
     *Action Required*, one at ``QUOTA_WARN_RATIO`` (80 %) *Investigation Recommended* — and
     every row says which ``Family`` the metric belongs to (*Accelerator* for GPU and TPU
@@ -557,6 +681,11 @@ def run_service_limit_checks_refactored(scope_id, all_projects, job_id, *, sink)
                     row = quota_row(project_id, region['name'], quota)
                     if row:
                         exceeded_quotas.append(row)
+            # v18.1: the project-global Compute quotas (FIREWALLS, NETWORKS, ROUTES, IMAGES, SNAPSHOTS, ...), Region "global".
+            for quota in compute_service.projects().get(project=project_id).execute().get('quotas', []):
+                row = quota_row(project_id, GLOBAL_REGION, quota)
+                if row:
+                    exceeded_quotas.append(row)
         except Exception as e:
             skipped.add(project_id, e)
         return exceeded_quotas # Return the list of findings (will be empty if none)
@@ -591,6 +720,7 @@ ACCELERATOR_METRIC = re.compile(r"GPU|TPU|NVIDIA|AMD_|_VWS_", re.I)
 # v18: COMMITTED_* quotas are consumed by the commitments themselves — a project that committed exactly its quota sits at
 # 100 % by construction, with nothing to fix; the commitment side is Capacity Commitments' and the recommender's.
 EXCLUDED_QUOTA_PREFIXES = ("COMMITTED_",)
+GLOBAL_REGION = "global"  # v18.1: the Region of a project-global quota row
 QUOTA_RECOMMENDATIONS_CHECK = "Quota Increase Recommendations"
 QUOTA_RECOMMENDER = "google.resourcemanager.serviceLimit.Recommender"
 

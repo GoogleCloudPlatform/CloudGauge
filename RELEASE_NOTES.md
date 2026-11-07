@@ -8,7 +8,172 @@ the test suite running inside the image, a zero-traffic canary revision scanned
 against a real organization, promotion, and a production scan compared fact for
 fact with the previous version's report.
 
-Versions are the image tags (`v5` … `v18`); the commit is the one that shipped.
+Versions are the image tags (`v5` … `v18.1`); the commit is the one that shipped.
+
+---
+
+## v18.1 — Legacy checks revalidated: what is loose
+
+v18 corrected the inherited checks that said something false. v18.1 is the
+second half of that review: the checks that were true but loose — rules that
+could not fail on any real organization, rules that asked for more than the
+practice they cite, rules that asked for less. **Organization Log Sink**
+counted the `_Required` and `_Default` sinks every organization is born with,
+so it never failed, while the thing CIS 2.2 asks for — an aggregated export of
+the audit logs — went unexamined; **Cloud Storage Versioning** flagged every
+bucket without versioning, soft delete (on by default since 2024) and lifecycle
+rules notwithstanding, and so on a real organization every row was noise and
+the one bucket that must have versioning, a log-sink destination, was
+indistinguishable from the rest; **VPC Configuration** flagged proxy-only and
+Private Service Connect subnets, which cannot have Private Google Access, and
+listed each auto-mode subnet of a `default` network as its own finding;
+**Essential Contacts** counted contacts whose address had bounced and ran in an
+organization scan only; the **cost recommendations** carried no priority and no
+fix; **GKE Hygiene** did not read auto-repair; **Quota Utilization** never saw a
+project-global quota; nothing read the Data Access audit configuration at all.
+This release tightens each rule to what the practice actually asks, adds the
+**Data Access Audit Logs** check, and — the request behind the policy table —
+makes the Organization Policies best-practices table something an operator can
+change without a redeploy: the table ships inside the image, a `gs://` or
+`https://` URL replaces it, and an overrides file in the results bucket amends
+it row by row. The Changes card says *rule changed* for every rule touched.
+
+### Changed
+
+- **Cloud Storage Versioning** (Reliability): the rule asks for versioning
+  where CIS 2.3 and Security Health Analytics ask for it — on a bucket a log
+  sink writes to (one Asset Inventory `logging.googleapis.com/LogSink` listing
+  of the scope, shared by every project) — *Action Required* with the
+  `--versioning` line; any other bucket without versioning is a row only when
+  nothing protects its objects at all (soft delete off, no lifecycle rule, no
+  retention policy) — *Investigation Recommended* with the `--versioning
+  --soft-delete-duration=7d` line; a bucket with soft delete of seven days or
+  more, a lifecycle rule or a retention policy is no row (a retention policy
+  and versioning exclude each other, so a retention bucket is never asked for
+  versioning). `Project`, `Bucket`, `Protection`, `Fix`. When the sink
+  listing fails, the sink-destination rule is reported under *Projects not
+  checked* and the rest of the check still runs. Signature `(scope, scope_id,
+  all_projects, job_id)`.
+- **VPC Configuration** (Security): one `subnetworks.aggregatedList` per
+  project instead of one listing per region; proxy-only, PSC, private NAT and
+  peer-migration subnets are not judged (they cannot have Private Google
+  Access), nor is the subnet GKE creates for a cluster's private control-plane
+  endpoint (`gke-…-pe-subnet`, Google's, no VM in it — the probe cluster
+  showed it); IPv6-only access counts as access; the `default` network is one
+  *Action Required* row with its auto-mode subnets lacking PGA counted into it
+  rather than listed; any other subnet without PGA is *Investigation
+  Recommended* with `Region` and the `subnets update
+  --enable-private-ip-google-access` line.
+- **Uniform Bucket-Level Access**: the `--uniform-bucket-level-access` fix on
+  every row.
+- **Organization Log Sink** (Operations): the built-in `_Required` and
+  `_Default` sinks no longer count; a customer sink qualifies when it is
+  enabled, includes children and its filter admits the audit logs — one row per
+  customer sink (`Sink Name`, `Destination`, `Filter`, `Children`, `State`,
+  `Assessment`); a qualifying sink is Compliant, customer sinks that all fall
+  short *Investigation Recommended* (each with the fix), none *Action
+  Required*; every page of the listing.
+- **Data Access Audit Logs** (Operations, **new**, every scope): the
+  `auditConfigs` of the scanned resource's IAM policy — the organization's in
+  an organization scan; the project's or folder's and its ancestors' otherwise,
+  the effective configuration being their union — judged against CIS 2.1 /
+  `AUDIT_LOGGING_DISABLED`: `ADMIN_READ`, `DATA_READ` and `DATA_WRITE` on for
+  `allServices` with nobody exempted is Compliant; nothing configured anywhere
+  *Action Required*; a partial configuration or an exemption *Investigation
+  Recommended*. One row: `Resource`, `Log types on for all services`,
+  `Missing`, `Exemptions`, `Configured at`, `Services configured
+  individually`, the cost caveat on `DATA_READ`, and the `set-iam-policy`
+  recipe. Scope-level (one shard runs it).
+- **Essential Contacts** (Reliability): runs in every scope — the
+  organization's own contacts, a folder's or a project's *effective* contacts
+  (`contacts.compute`, inherited ones included); a contact whose address
+  bounced (`validationState: INVALID`) does not count and the row says how many
+  were left out; the Compliant row names who receives each required category
+  (`Contacts`). Leaves the organization-only list.
+- **Cost-Saving Recommendations** (Cost): every row carries the
+  recommendation's `Priority` (`P1` … `P4`, or *unrated*) and a `Fix` — the
+  `gcloud` line that applies it, or the console path where the action is a
+  purchase; the verdict follows the priority (`P1`/`P2` *Action Required*,
+  `P3`/`P4` *Investigation Recommended*, unrated *Action Required* as before);
+  a record's status is the worst of its rows. **MIG Rightsizing**
+  (`google.compute.instanceGroupManager.MachineTypeRecommender`, zonal) joins
+  the recommenders — fourteen in all.
+- **GKE Hygiene** (Reliability): a node pool with auto-repair off is an
+  *Action Required* row with the `--enable-autorepair` line
+  (`AUTO_REPAIR_DISABLED`); the all-clear row says so.
+- **Quota Utilization (>80%)** (Operations): the project-global Compute quotas
+  (`FIREWALLS`, `NETWORKS`, `ROUTES`, `IMAGES`, `SNAPSHOTS`, …) from
+  `projects.get`, `Region` *global*, next to the regional ones.
+- **VPC Firewall Complexity (>150 Rules)** retired: a rule count is not a
+  posture signal (firewall policies and rule quality are the network release's
+  subject); the Changes card reads *No longer checked*.
+- **Organization Policies — the policy table**: the best-practices table ships
+  inside the image (`assets/gcp_best_practices.csv`, 138 policies in 21
+  categories, digest `348c39eaaf95`) and is the default;
+  `BEST_PRACTICES_CSV_URL` takes an `https://` URL as before or a `gs://`
+  object the service account can read; and an **overrides file** at
+  `gs://<results bucket>/config/best_practices_overrides.csv` — the same
+  columns as the table — is merged into whichever table is in use by
+  constraint ID: a row with an ID the table has replaces that row in place, a
+  new ID is appended under the file's category, and `Skip` in the *Recommended
+  to set* column removes the constraint from the evaluation. The report's
+  Organization Policies table carries a provenance line — *Policy table:
+  bundled table (138 rows, 348c39eaaf95) · 2 overrides, 1 skipped (gs://…)* —
+  so two reports are never compared without knowing what each was scored
+  against. An overrides file that cannot be read or parsed is the check's
+  *Error*, not a table quietly scored without it. No redeploy for any of it.
+- `changes.RESHAPED_CHECKS`: *rule changed* at 18.1 for Cloud Storage
+  Versioning, VPC Configuration, Organization Log Sink, Essential Contacts,
+  Quota Utilization, GKE Hygiene and the thirteen pre-existing cost
+  recommenders; Data Access Audit Logs and MIG Rightsizing are *new check* by
+  the existing rule.
+- README: the catalogue lines above, `BEST_PRACTICES_CSV_URL` in the
+  configuration reference, and a *Customising the policy table* section.
+  `VERSION = "18.1"`.
+
+### Tests
+
+- `tests/test_loose_rules.py` (new): the versioning protection ladder
+  (versioned, soft-deleted, lifecycle, naked, sink destination, retention
+  policy, a client that reports nothing), sink destinations from the asset
+  listing,
+  the one sink listing per scan and the failed listing; VPC rows (proxy-only
+  skipped, the default network folded, PGA rows) and the aggregated listing;
+  log-sink rows (built-ins ignored, disabled, no children, a narrowing filter,
+  a qualifying sink) and paging; the audit-config union, exemptions and the
+  hierarchy read; invalid contacts and the effective contacts of a project;
+  cost priorities, fixes and the fourteen recommenders; GKE auto-repair; the
+  project-global quotas; the retired firewall-complexity check; the bundled
+  table, overrides merging (replace, append, skip), provenance through
+  `fetch_best_practices`, the summary and a `gs://` or `https://` source; the
+  18.1 lines of `RESHAPED_CHECKS`.
+- `tests/test_beta_checks.py`: no check remains at parity with beta v1; the
+  four it covered are held to their own expectations instead.
+- Synthetic world (drawn last): unprotected, sink-destination and retention
+  buckets, a proxy-only subnet, auto-repair off, project audit configs, a
+  project contact and an invalid organization contact; the provider answers
+  `subnetworks.aggregatedList`, `projects.get` quotas, `LogSink` assets,
+  `contacts.compute`, folder IAM policies, recommendation priorities, and
+  serves the synthetic policy table. The sharded-versus-inline end-to-end test
+  freezes the synthetic world's clock (two scans a minute apart differed in
+  the rows that show a time — the flake noted since v17.3). 1,024 tests.
+
+### Upgrade notes
+
+- The first scan after the upgrade shows *rule changed* for the checks above.
+  Expect: Cloud Storage Versioning to lose every soft-delete-protected bucket
+  and keep (or gain) the log-sink destinations; VPC Configuration to lose its
+  proxy-only rows; Organization Log Sink to stay Compliant where a real
+  aggregated export exists and to turn *Action Required* where only the
+  built-in sinks did; **Data Access Audit Logs** to read *Action Required* on
+  most organizations (few turn it on at the top); Essential Contacts to appear
+  in folder and project scans; cost rows to gain `Priority` and `Fix`.
+- Nothing to grant and no new API: the LogSink asset type, `contacts.compute`,
+  `folders.getIamPolicy`, `projects.get` and `subnetworks.aggregatedList` are
+  covered by the roles the README already lists.
+- `BEST_PRACTICES_CSV_URL` unset now means the bundled table (before, the
+  GitHub copy at `GITHUB_POLICY_TABLE_URL`); set it to that URL to keep reading
+  from GitHub.
 
 ---
 
@@ -2078,7 +2243,7 @@ performance; modernization; enablement; roadmap and roadblocks).
 | **v17.2** | Deploy with Terraform | *Shipped.* `terraform/` declares the deployment of `tools/deploy.sh` — the APIs, the account and its roles, the bucket, the queue, the worker and the web service behind IAP, the export, the schedules, and on request the organization-level roles — in two applies around one Cloud Build; the test suite holds it to the script, the README and the app. |
 | **v17.3** | Incidents as evidence | *Shipped.* The Service Health briefing off the Scorecard and the executive summary, *Impacted* plus location-specific *Related* by default, switchable; **Incident Exposure** (the customer's zonal assets in the locations and product of each location-specific incident, one row per asset with the incidents as evidence) and **GKE Cluster Resilience** (zonal control planes, single-zone node pools); list cells fixed. No new role, no new API. |
 | **v18** | Legacy checks revalidated | *Shipped.* The twenty-two inherited checks re-read against today's APIs and Security Health Analytics: what was wrong corrected (a constant SCC tier, Monitoring needles no filter contains, list constraints scored as failures, `requireSsl`, deny rules as findings, the Google APIs agent as a finding, OS Config's swallowed errors, stopped VMs' released addresses), verdicts split between *Action Required* and *Investigation Recommended*, a `Fix` on every row that has one, *rule changed* on the Changes card. |
-| **v18.1** | Legacy checks revalidated — what is loose | Cloud Storage Versioning scoped to log-sink and retention buckets (soft delete and lifecycle as protection); VPC Configuration without proxy-only subnets and with the default network's auto-subnets collapsed; Organization Log Sink's filter, state and `includeChildren`, and a **Data Access Audit Logs** check from the organization's `auditConfigs`; Essential Contacts without invalid contacts and for folder/project scans; cost recommendations by priority with fix lines; GKE auto-repair; project-global quotas; the bundled best-practices table as the default; Asset-Inventory listings shared between checks. |
+| **v18.1** | Legacy checks revalidated — what is loose | *Shipped.* Cloud Storage Versioning scoped to log-sink destination buckets (soft delete, lifecycle rules and retention policies as protection); VPC Configuration without proxy-only subnets and with the default network's auto-subnets collapsed; Organization Log Sink's filter, state and `includeChildren`, and a **Data Access Audit Logs** check from the `auditConfigs` of the scanned resource and its ancestors; Essential Contacts without invalid contacts and in every scope; cost recommendations by priority with fix lines, **MIG Rightsizing**; GKE auto-repair; project-global quotas; firewall complexity retired; the best-practices table bundled in the image, replaceable by a `gs://` or `https://` URL and amended by an overrides file in the results bucket, with a provenance line in the report. No new role, no new API. |
 | **v18.2** | GKE upgrade readiness & hygiene | Maintenance windows and exclusions, security-bulletin notifications, surge settings, integrity monitoring, intranode visibility, monitoring components, PDBs that block drains — from the cluster listing the security checks already make. |
 | **v18.3** | Network edge & reachability | Interconnect/VPN redundancy, load balancer health-check firewall reachability, Cloud Armor on external load balancers, weak TLS policies and HTTP-only load balancers, DNSSEC, VPC flow logs, DNS logging, firewall policies, Cloud NAT capacity. |
 | **v18.4** | Data governance | Public BigQuery datasets and tables, BigQuery time travel and expiration defaults, Cloud SQL flag packs, AlloyDB exposure and backups, KMS rotation and IAM, API keys. |

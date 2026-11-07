@@ -27,10 +27,11 @@ Dockerfile.test
 Dockerfile.test.dockerignore
 cloudbuild.yaml
 
-# Docs and repository assets
+# Docs and repository assets (the policy table ships with the image: v18.1)
 *.md
 LICENSE
-assets/
+assets/*
+!assets/gcp_best_practices.csv
 terraform/
 
 # Editors, OS, local configuration

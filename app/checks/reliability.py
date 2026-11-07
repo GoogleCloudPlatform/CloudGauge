@@ -36,6 +36,14 @@ from app.utils import parse_timestamp, utcnow
 REQUIRED_CONTACT_CATEGORIES = ("SECURITY", "TECHNICAL", "LEGAL", "SUSPENSION")
 
 
+CONTACTS_CHECK = "Essential Contacts"
+
+
+def valid_contacts(contacts):
+    """The contacts Google can actually reach: a contact whose address bounced (``validationState: INVALID``) counts for nothing (v18.1)."""
+    return [contact for contact in contacts if str(contact.get('validationState') or '').upper() != 'INVALID']
+
+
 def missing_contact_categories(contacts):
     """The required categories no contact in ``contacts`` is subscribed to, in required order.
 
@@ -50,86 +58,166 @@ def missing_contact_categories(contacts):
     return [category for category in REQUIRED_CONTACT_CATEGORIES if category not in found]
 
 
-def check_essential_contacts(org_id, job_id, *, sink):
+def contacts_by_category(contacts):
+    """``"SECURITY: a@x, b@x · TECHNICAL: ops@x"`` — who receives each required category (``ALL`` subscribers count for every one)."""
+    parts = []
+    for category in REQUIRED_CONTACT_CATEGORIES:
+        emails = sorted({c.get('email', '') for c in contacts if category in (c.get('notificationCategorySubscriptions') or []) or 'ALL' in (c.get('notificationCategorySubscriptions') or [])})
+        parts.append(f"{category}: {', '.join(e for e in emails if e)}")
+    return " · ".join(parts)
+
+
+def check_essential_contacts(scope, scope_id, job_id, *, sink):
     """
     Checks if Essential Contacts are configured for key notification categories.
 
-    Args:
-        org_id (str): The organization ID.
+    v18.1: runs in every scope — an organization's own contacts, a folder's or a project's
+    *effective* contacts (``contacts.compute``, inherited ones included); a contact whose
+    address bounced (``INVALID``) does not count; the Compliant row names who receives what.
 
-    Returns:
-        list: A list of finding dictionaries indicating missing contact categories.
+    Args:
+        scope (str): ``organization``, ``folder`` or ``project``.
+        scope_id (str): The scope ID.
     """
-    CHECK_NAME = "Essential Contacts"
-    print(f"📞 [{job_id}] Checking for {CHECK_NAME}...")
+    print(f"📞 [{job_id}] Checking for {CONTACTS_CHECK}...")
+    parent, flag = f"{scope}s/{scope_id}", {"organization": "--organization", "folder": "--folder", "project": "--project"}.get(scope, "--organization")
     try:
         credentials, _ = gcp.auth_default(scopes=SCOPES)
         service = gcp.api_build('essentialcontacts', 'v1', credentials=credentials)
-        contacts = service.organizations().contacts().list(parent=f"organizations/{org_id}").execute().get('contacts', [])
+        resource = getattr(service, {"organization": "organizations", "folder": "folders", "project": "projects"}.get(scope, "organizations"))()
+        if scope == "organization":
+            contacts = resource.contacts().list(parent=parent).execute().get('contacts', [])
+        else:
+            contacts = resource.contacts().compute(parent=parent, notificationCategories=list(REQUIRED_CONTACT_CATEGORIES)).execute().get('contacts', [])
+        invalid = len(contacts) - len(valid_contacts(contacts))
+        contacts = valid_contacts(contacts)
         missing = missing_contact_categories(contacts)
 
         if not missing:
-            result = {"Check": CHECK_NAME, "Finding": [{"Status": f"A contact is subscribed to every key category ({', '.join(REQUIRED_CONTACT_CATEGORIES)})."}], "Status": "Compliant"}
+            result = {"Check": CONTACTS_CHECK, "Finding": [{"Status": f"A valid contact is subscribed to every key category ({', '.join(REQUIRED_CONTACT_CATEGORIES)}).",
+                                                          "Contacts": contacts_by_category(contacts)}], "Status": "Compliant"}
         else:
-            result = {"Check": CHECK_NAME, "Finding": [{
+            issue = f"Nobody in the {scope} receives Google's notifications in these categories."
+            if invalid:
+                issue += f" ({invalid} contact{'s' if invalid != 1 else ''} with a bounced address not counted.)"
+            result = {"Check": CONTACTS_CHECK, "Finding": [{
                 "Missing Categories": ", ".join(missing),
-                "Issue": "Nobody in the organization receives Google's notifications in these categories.",
-                "Fix": (f"gcloud essential-contacts create --organization={org_id} --email=<address> "
+                "Issue": issue,
+                "Fix": (f"gcloud essential-contacts create {flag}={scope_id} --email=<address> "
                         f"--notification-categories={','.join(missing)}"),
             }], "Status": "Action Required"}
     except HttpError as e:
         if "API has not been used" in str(e) or "service is disabled" in str(e):
-             result = {"Check": CHECK_NAME, "Finding": [{"Error": "The Essential Contacts API is not enabled. Please enable it to run this check."}], "Status": "Error"}
+             result = {"Check": CONTACTS_CHECK, "Finding": [{"Error": "The Essential Contacts API is not enabled. Please enable it to run this check."}], "Status": "Error"}
         else:
-            result = {"Check": CHECK_NAME, "Finding": [{"Error": str(e)}], "Status": "Error"}
+            result = {"Check": CONTACTS_CHECK, "Finding": [{"Error": str(e)}], "Status": "Error"}
     except Exception as e:
-        result = {"Check": CHECK_NAME, "Finding": [{"Error": str(e)}], "Status": "Error"}
-    sink.write_finding(job_id, CHECK_NAME.replace(" ", "_"), result)
+        result = {"Check": CONTACTS_CHECK, "Finding": [{"Error": str(e)}], "Status": "Error"}
+    sink.write_finding(job_id, CONTACTS_CHECK.replace(" ", "_"), result)
 
 
-def check_storage_versioning(scope_id, all_projects, job_id, *, sink):
+# Cloud Storage Versioning (v18.1): what protects a bucket's objects from an accidental delete or overwrite, and which
+# buckets must have versioning itself — log-sink destinations (CIS 2.3, SHA OBJECT_VERSIONING_DISABLED). Soft delete (on by
+# default since 2024, 7 days), a lifecycle rule or a retention policy covers the accidental-deletion case elsewhere; a
+# retention policy and versioning are mutually exclusive, so a retention bucket is never asked for versioning.
+VERSIONING_CHECK = "Cloud Storage Versioning"
+LOG_SINK_ASSET = "logging.googleapis.com/LogSink"
+SOFT_DELETE_MIN_SECONDS = 7 * 24 * 3600
+VERSIONING_ALL_CLEAR = ("Every log-sink destination bucket has versioning, and every other bucket is protected by versioning, "
+                        "soft delete, a lifecycle rule or a retention policy.")
+
+
+def sink_destination_buckets(assets):
+    """The bucket names that log sinks write to, from the ``LOG_SINK_ASSET`` assets of the scope (``storage.googleapis.com/<bucket>``)."""
+    buckets = set()
+    for asset in assets:
+        data = getattr(getattr(asset, "resource", None), "data", None) or {}
+        destination = str(data.get("destination", "") if hasattr(data, "get") else "")
+        if destination.startswith("storage.googleapis.com/"):
+            buckets.add(destination.split("/", 1)[1].split("/", 1)[0])
+    return buckets
+
+
+def bucket_protection(bucket):
+    """``(versioning, soft delete seconds or None, lifecycle rules?, retention policy?)`` as the storage client reports them."""
+    versioning = bool(getattr(bucket, "versioning_enabled", False))
+    policy = getattr(bucket, "soft_delete_policy", None)
+    soft_delete = getattr(policy, "retention_duration_seconds", None) if policy is not None else None
+    try:
+        lifecycle = bool(list(getattr(bucket, "lifecycle_rules", None) or []))
+    except Exception:
+        lifecycle = False
+    retention = bool(getattr(bucket, "retention_period", None))
+    return versioning, soft_delete, lifecycle, retention
+
+
+def versioning_row(project_id, bucket, sink_buckets):
+    """The row of a bucket without versioning, or ``None`` when it needs none.
+
+    Action Required for a log-sink destination; Investigation Recommended when nothing at all protects the bucket
+    (versioning off, soft delete off, no lifecycle rule, no retention policy); nothing otherwise.
     """
-    Checks if Object Versioning is enabled on all Cloud Storage buckets.
+    versioning, soft_delete, lifecycle, retention = bucket_protection(bucket)
+    if versioning:
+        return None
+    name = bucket.name
+    if name in sink_buckets:
+        return {"Project": project_id, "Bucket": name, "Protection": "versioning off on a log-sink destination bucket",
+                "Fix": f"gcloud storage buckets update gs://{name} --versioning", "_status": "Action Required"}
+    if (soft_delete or 0) >= SOFT_DELETE_MIN_SECONDS or lifecycle or retention:
+        return None
+    return {"Project": project_id, "Bucket": name, "Protection": "none: versioning off, soft delete off, no lifecycle rule, no retention policy",
+            "Fix": f"gcloud storage buckets update gs://{name} --versioning --soft-delete-duration=7d", "_status": "Investigation Recommended"}
+
+
+def check_storage_versioning(scope, scope_id, all_projects, job_id, *, sink):
+    """
+    Checks the buckets of every project for the protection object versioning gives (``versioning_row``).
+
+    v18.1: the rule asks for versioning where CIS and Security Health Analytics ask for it — log-sink
+    destinations (one Asset Inventory listing of the scope's sinks) — and otherwise only that *something*
+    protects the bucket; before, every bucket without versioning was Action Required, soft delete notwithstanding.
 
     Args:
-        org_id (str): The organization ID.
+        scope (str): ``organization``, ``folder`` or ``project`` (the sinks are listed under it).
+        scope_id (str): The scope ID.
         all_projects (list): A list of project dictionaries.
-
-    Returns:
-        list: A list of finding dictionaries for buckets without versioning.
     """
-    CHECK_NAME = "Cloud Storage Versioning"
-    print(f"🔄 [{job_id}] Checking for {CHECK_NAME}...")
-    skipped = NotChecked(CHECK_NAME)
-
-    def check_project(p):
-        project_id, findings = p['projectId'], []
-        try:
-            storage_client = gcp.project_storage_client(project_id)
-            for bucket in storage_client.list_buckets():
-                if not bucket.versioning_enabled:
-                    findings.append({"Project": project_id, "Bucket": bucket.name, "Issue": "Object versioning is not enabled."})
-        except Exception as e: skipped.add(project_id, e)
-        return findings
+    print(f"🗂️  [{job_id}] Checking {VERSIONING_CHECK}...")
+    skipped = NotChecked(VERSIONING_CHECK)
+    sink_buckets = set()
+    try:
+        credentials, _ = gcp.auth_default(scopes=SCOPES)
+        request = {"parent": f"{scope}s/{scope_id}", "asset_types": [LOG_SINK_ASSET], "content_type": asset_v1.ContentType.RESOURCE}
+        sink_buckets = sink_destination_buckets(gcp.asset_client(credentials).list_assets(request=request))
+    except Exception as e:
+        skipped.add(f"{scope}s/{scope_id}", e, detail="log-sink destinations (the sink-bucket rule could not be applied)")
 
     all_findings = []
     for project in all_projects:
-        findings = check_project(project)
-        if findings:
-            all_findings.extend(findings)
+        project_id = project['projectId']
+        try:
+            storage_client_local = gcp.project_storage_client(project_id)
+            for bucket in storage_client_local.list_buckets():
+                row = versioning_row(project_id, bucket, sink_buckets)
+                if row:
+                    all_findings.append(row)
+        except Exception as e:
+            skipped.add(project_id, e)
 
     if all_findings:
-        result = {"Check": CHECK_NAME, "Finding": all_findings, "Status": "Action Required"}
+        statuses = {row.pop("_status") for row in all_findings}
+        result = {"Check": VERSIONING_CHECK, "Finding": all_findings, "Status": "Action Required" if "Action Required" in statuses else "Investigation Recommended"}
     else:
-        result = {"Check": CHECK_NAME, "Finding": [{"Status": "Object versioning is enabled on all buckets."}], "Status": "Compliant"}
-    sink.write_finding(job_id, CHECK_NAME.replace(" ", "_"), result)
+        result = {"Check": VERSIONING_CHECK, "Finding": [{"Status": VERSIONING_ALL_CLEAR}], "Status": "Compliant"}
+    sink.write_finding(job_id, VERSIONING_CHECK.replace(" ", "_"), result)
     skipped.write(sink, job_id)
 
 
 GKE_HYGIENE_CHECK = "GKE Hygiene"
 GKE_DIAGNOSIS_RECOMMENDER = "google.container.DiagnosisRecommender"
 GKE_ACTIVE_FILTER = 'stateInfo.state="ACTIVE"'  # the REST form the check has always sent
-GKE_HYGIENE_ALL_CLEAR = "Every GKE cluster is on a release channel with auto-upgrades on, and Active Assist has no diagnosis for it."
+GKE_HYGIENE_ALL_CLEAR = "Every GKE cluster is on a release channel with auto-upgrade and auto-repair on, and Active Assist has no diagnosis for it."
 
 
 def cluster_channel(cluster):
@@ -146,9 +234,14 @@ def gke_hygiene_rows(project_id, cluster):
         rows.append({"Project": project_id, "Cluster": name, "Issue": "Not on a release channel.",
                      "Fix": f"gcloud container clusters update {name} --location={location} --project={project_id} --release-channel=regular", "_status": "Action Required"})
     for pool in cluster.get('nodePools', []):
-        if not (pool.get('management') or {}).get('autoUpgrade', False):
+        management = pool.get('management') or {}
+        if not management.get('autoUpgrade', False):
             rows.append({"Project": project_id, "Cluster": name, "Node Pool": pool.get('name'), "Issue": "Auto-upgrades disabled.",
                          "Fix": f"gcloud container node-pools update {pool.get('name')} --cluster={name} --location={location} --project={project_id} --enable-autoupgrade",
+                         "_status": "Action Required"})
+        if not management.get('autoRepair', False):  # v18.1: SHA AUTO_REPAIR_DISABLED
+            rows.append({"Project": project_id, "Cluster": name, "Node Pool": pool.get('name'), "Issue": "Auto-repair disabled.",
+                         "Fix": f"gcloud container node-pools update {pool.get('name')} --cluster={name} --location={location} --project={project_id} --enable-autorepair",
                          "_status": "Action Required"})
     return rows
 

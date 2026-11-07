@@ -57,6 +57,7 @@ from app.reporting.changes import (IDENTITY_SEPARATOR, ORG_POLICIES_CHECK, RowMa
                                    text_identities)
 from app.reporting.layouts import lay_out
 from app.reporting.scoring import NOT_ASSESSED, NOT_ASSESSED_TEXT, Tally, tally_statuses
+from app.services.org_policies import POLICY_TABLE_META, describe_policy_table
 
 # The report's sections, in display order. The sidebar in report.html links to them.
 REPORT_CATEGORY_ORDER = ("Security & Identity", "Cost Optimization", "Reliability & Resilience", "Operational Excellence & Observability")
@@ -178,6 +179,7 @@ class OrgPolicySummary:
     status_class: str
     icon: str
     change: object = None  # app.reporting.changes.CheckChange since the previous scan, or None
+    source: str = ""  # v18.1: which policy table was evaluated (app.services.org_policies.describe_policy_table)
 
     @property
     def open(self):
@@ -590,7 +592,7 @@ def evaluate_org_policies(best_practices, current_policies):
     """
     evaluated = []
     for category, policies in sorted(best_practices.items()):
-        if not policies: continue
+        if not policies or category == POLICY_TABLE_META: continue  # v18.1: the table's provenance is not a category
         results = []
         for policy in policies:
             policy_id, details = policy['policyId'], policy
@@ -634,7 +636,8 @@ def build_org_policy_summary(org_policy_data):
     # Determine status class for the LI item
     status_class = "compliant" if compliant_policy_count == total_policies else "action-required"
     icon = ICON_CHECK if status_class == "compliant" else ICON_CROSS
-    return OrgPolicySummary(tuple(categories), compliant_policy_count, total_policies, status_class, icon)
+    source = describe_policy_table(best_practices_by_category.get(POLICY_TABLE_META)) if isinstance(best_practices_by_category, dict) else ""
+    return OrgPolicySummary(tuple(categories), compliant_policy_count, total_policies, status_class, icon, source=source)
 
 
 def build_report_context(scope, scope_id, job_id, all_results, banner=None, coverage=None, total_projects=None, previous=None,

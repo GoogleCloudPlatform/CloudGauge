@@ -211,7 +211,8 @@ def test_recommender_answers_are_real_protos(gcp):
 COVERAGE = {'organization': '12 of 12 projects · organization-level checks completed',
             'folder': '2 of 2 projects · folder-level checks completed',
             'project': '1 project'}
-ORG_ONLY_CHECKS = ('Critical Org-Level Roles', 'Security Command Center Status', 'Organization Log Sink', 'Essential Contacts')
+ORG_ONLY_CHECKS = ('Critical Org-Level Roles', 'Security Command Center Status', 'Organization Log Sink')
+EVERY_SCOPE_CHECKS = ('Essential Contacts', 'Data Access Audit Logs')  # v18.1: a folder's or a project's effective contacts and audit configuration
 
 
 @pytest.mark.parametrize('scope', ['organization', 'folder', 'project'])
@@ -231,6 +232,7 @@ def test_scan_completes_against_the_synthetic_organization(gcp, scope):
     assert f'<title>CloudGauge Report: {scope.capitalize()} {scope_id}</title>' in html
     assert COVERAGE[scope] in html
     assert all((check in html) is (scope == 'organization') for check in ORG_ONLY_CHECKS)
+    assert all(check in html for check in EVERY_SCOPE_CHECKS)
     assert 'Organization Policies' in html and 'policies as recommended' in html
     assert 'Advisory Notifications' in html  # read from the organization, or per project
     # v15.6: Resilience of Critical Assets runs under every scope (its listings under the scope, not the organization),
@@ -241,8 +243,9 @@ def test_scan_completes_against_the_synthetic_organization(gcp, scope):
     by_method = metrics['by_method']
     # Three resilience listings, two for Snapshot Sprawl and one for Cloud SQL Extended Support (v17), one for the clusters
     # (v17.1), all under the scope; the perimeters (v17.1) come from the Access Context Manager API.
-    assert by_method.get('asset.listAssets(org)', 0) == (7 if scope == 'organization' else 0)
-    assert by_method.get('asset.listAssets(folder)', 0) == (7 if scope == 'folder' else 0)
+    # ... and the log sinks of the scope (v18.1: Cloud Storage Versioning's sink-destination rule).
+    assert by_method.get('asset.listAssets(org)', 0) == (8 if scope == 'organization' else 0)
+    assert by_method.get('asset.listAssets(folder)', 0) == (8 if scope == 'folder' else 0)
     assert by_method.get('accesscontextmanager.servicePerimeters.list', 0) == 1
     metrics = provider.metrics.snapshot()
     assert metrics['total_calls'] > 50 and metrics['errors'] == {}
@@ -271,8 +274,9 @@ def test_an_empty_folder_is_still_checked_as_a_folder(gcp):
     assert '0 of 0 projects · folder-level checks completed' in html
     assert 'Organization Policies' in html and 'policies as recommended' in html
     assert 'status-badge">Error<' not in html
-    # v17: Snapshot Sprawl is scope-level too, so Efficiency has a verdict as well; Operations alone stays not assessed.
-    assert html.count('Not assessed — no ') == 1 and 'Not assessed — no Operational Excellence' in html
+    # v17: Snapshot Sprawl is scope-level too, so Efficiency has a verdict as well. v18.1: Data Access Audit Logs reads the
+    # folder's own audit configuration, so Operations has one too — no category is left unassessed.
+    assert html.count('Not assessed — no ') == 0 and 'Data Access Audit Logs' in html and 'Essential Contacts' in html
     assert 'Not assessed — no Security' not in html and 'Not assessed — no Cost' not in html
     assert 'Not assessed — no Reliability' not in html and 'No single-region disk snapshots found.' in html
     assert 'No snapshots older than 90 days or without a source disk found.' in html
@@ -331,10 +335,10 @@ def test_denied_projects_and_quota_errors_do_not_break_the_scan(gcp):
     # than passing as compliant. Network Insights always queries 'global', so its queries fail.
     assert {'Open Firewall Rules', 'GKE Hygiene', 'Network Insights (all 8 insight types)', 'Quota Utilization (>80%)',
             # v17: the global and BigQuery recommenders are asked regardless of discovered locations, and fail on their own
-            'Cost-Saving Recommendations (10 of 13 recommenders: Idle Cloud SQL Instances, Low Utilization VMs, VM Rightsizing, Unassociated IPs, '
-            'Idle Persistent Disks, Underutilized Reservations, Idle Reservations, Resource-Based Commitment Recommendations, '
+            'Cost-Saving Recommendations (11 of 14 recommenders: Idle Cloud SQL Instances, Low Utilization VMs, VM Rightsizing, Unassociated IPs, '
+            'Idle Persistent Disks, MIG Rightsizing, Underutilized Reservations, Idle Reservations, Resource-Based Commitment Recommendations, '
             'Overprovisioned Cloud SQL Instances, Cloud Run Cost: no zones or regions were discovered to query)',
-            'Cost-Saving Recommendations (3 of 13 recommenders: BigQuery Slot Commitments, Idle Images, Cloud Storage Soft Delete)',
+            'Cost-Saving Recommendations (3 of 14 recommenders: BigQuery Slot Commitments, Idle Images, Cloud Storage Soft Delete)',
             'Reservation Coverage', 'Commitments Expiring', 'Capacity Signals', 'Cloud Storage Lifecycle', 'IAM Least Privilege',
             'Quota Increase Recommendations'} <= {row[3] for row in rows}
     assert all('(synthetic)' in row[4] for row in rows)  # the reason is the API's message

@@ -11,20 +11,15 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""The Security checks ported from upstream beta v1 (``tests/legacy/cloudgauge_beta_v1.py``).
+"""The four Security checks ported from upstream beta v1 (``tests/legacy/cloudgauge_beta_v1.py``).
 
-VPC Configuration and Uniform Bucket-Level Access run in the frozen beta v1 module
-and in ``app.checks.security`` against the same fake Compute and Storage APIs, and
-both must write the same finding. Explicit expectations document what they report.
-The one intended difference: a project the check could not read is also written as
-a "Projects not checked" record (``app.checks.not_checked``), where beta v1 only
-logged it.
-
-Cloud SQL Security and VM External IPs left the parity in v18: beta v1 read the
-deprecated ``requireSsl`` and counted access configs rather than addresses, and
-the parity tests pinned those defects. Their rules are tested on their own in
-``tests/test_revalidated_checks.py``; here the two checks keep only the
-"skipped project" contract they share with the others.
+Until v18 each ran in the frozen beta v1 module and in ``app.checks.security`` against the same fakes and had to
+write the same finding — which froze beta v1's defects along with its behaviour. All four have since left the parity
+by design: Cloud SQL Security and VM External IPs in v18 (``requireSsl``, access-config presence), VPC Configuration and
+Uniform Bucket-Level Access in v18.1 (subnet purposes and the aggregated listing; a ``Fix`` column). Their rules are tested
+in ``tests/test_revalidated_checks.py`` and ``tests/test_loose_rules.py``; this module keeps what the four still share
+with beta v1 — the shape of their records, their names under Security, and the "skipped project" contract: a project
+the check could not read is a *Projects not checked* record (``app.checks.not_checked``), where beta v1 only logged it.
 """
 from types import SimpleNamespace
 
@@ -37,12 +32,10 @@ from fakes import _execute
 JOB_ID = 'job-42'
 SCOPE_ID = '123456789'
 WEB, LAKE, BROKEN = ({'projectId': 'web-prod'}, {'projectId': 'data-lake'}, {'projectId': 'locked-down'})
-CHECKS = {  # function name -> (check name, finding file name): the checks still at parity with beta v1
+CHECKS = {  # function name -> (check name, finding file name)
+    'check_cloud_sql_security': ('Cloud SQL Security', 'Cloud_SQL_Security'),
     'check_vpc_configuration': ('VPC Configuration', 'VPC_Configuration'),
     'check_storage_ubla': ('GCS Uniform Bucket-Level Access', 'GCS_Uniform_Bucket-Level_Access'),
-}
-REVALIDATED = {  # v18: the same contract for skipped projects, the rules tested elsewhere
-    'check_cloud_sql_security': ('Cloud SQL Security', 'Cloud_SQL_Security'),
     'check_vm_external_ips': ('VM External IPs', 'VM_External_IPs'),
 }
 DENIED = RuntimeError('403 The caller does not have permission')
@@ -52,7 +45,7 @@ SQL_INSTANCES = {
         {'name': 'db-public', 'settings': {'ipConfiguration': {'ipv4Enabled': True, 'requireSsl': True}}},
         {'name': 'db-no-ssl', 'settings': {'ipConfiguration': {'ipv4Enabled': False}}},
         {'name': 'db-both', 'settings': {'ipConfiguration': {'ipv4Enabled': True, 'requireSsl': False}}},
-        {'name': 'db-bare'},  # no settings: SSL is not enforced
+        {'name': 'db-bare'},  # no settings: an instance mid-operation, no rows
     ]},
     'data-lake': {'items': [{'name': 'db-ok', 'settings': {'ipConfiguration': {'ipv4Enabled': False, 'requireSsl': True}}}]},
     'locked-down': DENIED,
@@ -62,10 +55,24 @@ NETWORKS = {
     'data-lake': {'items': [{'name': 'lake-vpc'}]},
     'locked-down': DENIED,
 }
-SUBNETS = {  # project -> region -> subnetworks
-    'web-prod': {'us-central1': [{'name': 'web-a', 'privateIpGoogleAccess': True}, {'name': 'web-b'}],
-                 'europe-west1': [{'name': 'web-c', 'privateIpGoogleAccess': False}], 'asia-south1': []},
-    'data-lake': {'us-central1': [{'name': 'lake-a', 'privateIpGoogleAccess': True}]},
+
+
+def subnet(name, region, network, pga=None, purpose='PRIVATE'):
+    entry = {'name': name, 'region': f'https://www.googleapis.com/compute/v1/projects/p/regions/{region}',
+             'network': f'https://www.googleapis.com/compute/v1/projects/p/global/networks/{network}', 'purpose': purpose}
+    if pga is not None:
+        entry['privateIpGoogleAccess'] = pga
+    return entry
+
+
+SUBNETS = {  # project -> the aggregated listing
+    'web-prod': {'items': {'regions/us-central1': {'subnetworks': [subnet('web-a', 'us-central1', 'prod-vpc', True), subnet('web-b', 'us-central1', 'prod-vpc'),
+                                                                   subnet('default', 'us-central1', 'default', False)]},
+                           'regions/europe-west1': {'subnetworks': [subnet('web-c', 'europe-west1', 'prod-vpc', False),
+                                                                    subnet('proxy', 'europe-west1', 'prod-vpc', False, purpose='REGIONAL_MANAGED_PROXY')]},
+                           'regions/asia-south1': {'warning': {'code': 'NO_RESULTS_ON_PAGE'}}}},
+    'data-lake': {'items': {'regions/us-central1': {'subnetworks': [subnet('lake-a', 'us-central1', 'lake-vpc', True)]}}},
+    'locked-down': DENIED,
 }
 INSTANCE_PAGES = {  # project -> pages of instances().aggregatedList
     'web-prod': [
@@ -74,7 +81,7 @@ INSTANCE_PAGES = {  # project -> pages of instances().aggregatedList
             {'name': 'web-2', 'networkInterfaces': [{'network': 'prod-vpc'}]},
         ]}, 'zones/us-east1-b': {'warning': {'code': 'NO_RESULTS_ON_PAGE'}}}},
         {'items': {'zones/europe-west1-b': {'instances': [
-            {'name': 'web-3', 'networkInterfaces': [{'network': 'a'}, {'network': 'b', 'accessConfigs': []}]},  # key present: counted
+            {'name': 'web-3', 'networkInterfaces': [{'network': 'a'}, {'network': 'b', 'accessConfigs': []}]},  # key present, no address: not a row since v18
             {'name': 'batch-1'},  # no interfaces
         ]}}},
     ],
@@ -102,16 +109,13 @@ class FakeSqlAdmin:
 
 
 class FakeCompute:
-    """``compute v1``: networks, regions, subnetworks, and instances().aggregatedList with paging."""
+    """``compute v1``: networks, subnetworks.aggregatedList, and instances().aggregatedList with paging."""
 
     def networks(self):
-        return SimpleNamespace(list=lambda project: _execute(NETWORKS.get(project, {})))
-
-    def regions(self):
-        return SimpleNamespace(list=lambda project: _execute({'items': [{'name': r} for r in SUBNETS.get(project, {})]}))
+        return SimpleNamespace(list=lambda project: _execute(NETWORKS.get(project, {})), list_next=lambda previous_request, previous_response: None)
 
     def subnetworks(self):
-        return SimpleNamespace(list=lambda project, region: _execute({'items': SUBNETS[project][region]}))
+        return SimpleNamespace(aggregatedList=lambda project: _execute(SUBNETS.get(project, {})), aggregatedList_next=lambda previous_request, previous_response: None)
 
     def instances(self):
         return SimpleNamespace(aggregatedList=self._aggregated_list, aggregatedList_next=self._aggregated_list_next)
@@ -145,13 +149,6 @@ def run_new(name, projects):
     return writes
 
 
-def run_beta(beta, name, projects, monkeypatch):
-    writes = []
-    monkeypatch.setattr(beta, '_write_finding_to_gcs', lambda *args: writes.append(args))
-    getattr(beta, name)(SCOPE_ID, projects, JOB_ID)
-    return writes
-
-
 def split_not_checked(writes):
     """``(the check's own writes, the "Projects not checked" writes)``."""
     skipped = [w for w in writes if w[1].startswith('NOT_CHECKED_')]
@@ -160,10 +157,9 @@ def split_not_checked(writes):
 
 @pytest.mark.parametrize('projects', [[WEB, LAKE, BROKEN], [LAKE], [BROKEN], []], ids=['findings', 'compliant', 'errors only', 'no projects'])
 @pytest.mark.parametrize('name', CHECKS)
-def test_check_matches_beta_v1(name, projects, apis, beta, monkeypatch):
-    """The check's own record is beta v1's; the projects it could not check are a second record (beta had none)."""
+def test_each_check_writes_one_record_and_the_skipped_projects(name, projects, apis):
+    """One record under the check's name and file; the projects it could not check in a second record (beta v1 had none)."""
     new, skipped = split_not_checked(run_new(name, projects))
-    assert new == run_beta(beta, name, projects, monkeypatch)
     check_name, file_name = CHECKS[name]
     ((job_id, written_name, finding),) = new
     assert (job_id, written_name, finding['Check']) == (JOB_ID, file_name, check_name)
@@ -181,9 +177,8 @@ def findings_of(name, projects=(WEB, LAKE, BROKEN)):
     return finding['Finding']
 
 
-def test_cloud_sql_security_left_the_parity_in_v18(apis):
-    """beta v1 flagged ``db-no-ssl`` (no public IP, ``requireSsl`` absent) and ``db-bare`` (no settings); v18 reads ``sslMode``
-    first and skips an instance without settings — the rows differ by design (``tests/test_revalidated_checks.py``)."""
+def test_cloud_sql_security_findings(apis):
+    """v18: ``sslMode`` first, ``requireSsl`` only without it; an instance without settings has no rows (beta v1 flagged it)."""
     rows = findings_of('check_cloud_sql_security')
     assert [(r['Instance'], r['Issue'].split(':')[0]) for r in rows] == [
         ('db-public', 'Public IP enabled.'), ('db-no-ssl', 'TLS not enforced'), ('db-both', 'TLS not enforced'), ('db-both', 'Public IP enabled.')]
@@ -193,34 +188,35 @@ def test_cloud_sql_security_left_the_parity_in_v18(apis):
 
 
 def test_vpc_configuration_findings(apis):
-    assert findings_of('check_vpc_configuration') == [
-        {'Project': 'web-prod', 'Network': 'default', 'Issue': 'Default VPC network exists.'},
-        {'Project': 'web-prod', 'Subnet': 'web-b', 'Issue': 'Private Google Access disabled.'},
-        {'Project': 'web-prod', 'Subnet': 'web-c', 'Issue': 'Private Google Access disabled.'},
+    """v18.1: the default network is one row (its subnet counted in), the proxy-only subnet is not judged, PGA rows carry the region."""
+    assert [(r['Network / Subnet'], r['Region'], r['Issue']) for r in findings_of('check_vpc_configuration')] == [
+        ('default (network)', 'global', 'Default VPC network exists. 1 of its auto-mode subnets lack Private Google Access (counted here, not listed).'),
+        ('prod-vpc / web-b', 'us-central1', 'Private Google Access disabled.'),
+        ('prod-vpc / web-c', 'europe-west1', 'Private Google Access disabled.'),
     ]
-    assert findings_of('check_vpc_configuration', [LAKE]) == [
-        {'Status': 'No default VPCs found and all subnets have Private Google Access.'}]
+    assert findings_of('check_vpc_configuration', [LAKE]) == [{'Status': security.VPC_ALL_CLEAR}]
 
 
 def test_storage_ubla_findings(apis):
+    """v18.1: the rows carry the fix."""
     assert findings_of('check_storage_ubla') == [
-        {'Project': 'web-prod', 'Bucket': 'web-assets', 'Issue': 'UBLA not enabled.'},
-        {'Project': 'web-prod', 'Bucket': 'web-backups', 'Issue': 'UBLA not enabled.'},
+        {'Project': 'web-prod', 'Bucket': 'web-assets', 'Issue': 'UBLA not enabled.', 'Fix': 'gcloud storage buckets update gs://web-assets --uniform-bucket-level-access'},
+        {'Project': 'web-prod', 'Bucket': 'web-backups', 'Issue': 'UBLA not enabled.', 'Fix': 'gcloud storage buckets update gs://web-backups --uniform-bucket-level-access'},
     ]
     assert findings_of('check_storage_ubla', [LAKE]) == [{'Status': 'All buckets have Uniform Bucket-Level Access enabled.'}]
 
 
-def test_vm_external_ips_left_the_parity_in_v18(apis):
-    """beta v1 counted ``web-3`` for an empty ``accessConfigs`` key; v18 counts addresses held, so only ``web-1`` is a row."""
+def test_vm_external_ips_findings(apis):
+    """v18: addresses held, not access configs — ``web-3``'s empty ``accessConfigs`` is not a row."""
     assert [(r['VM'], r['External IPs'], r['Kind']) for r in findings_of('check_vm_external_ips')] == [('web-1', '203.0.113.7', 'standalone')]
     assert findings_of('check_vm_external_ips', [LAKE]) == [{'Status': 'No VM instance holds an external IP address.'}]
 
 
-@pytest.mark.parametrize('name', {**CHECKS, **REVALIDATED})
+@pytest.mark.parametrize('name', CHECKS)
 def test_a_project_that_fails_is_logged_skipped_and_reported(name, apis, caplog):
     """As in beta v1, the error is logged and the other projects' results still count;
     unlike beta v1, the skipped project is reported instead of passing as compliant."""
-    check_name, _ = {**CHECKS, **REVALIDATED}[name]
+    check_name, _ = CHECKS[name]
     assert findings_of(name, [BROKEN, LAKE]) == findings_of(name, [LAKE])
     assert f'Could not check {check_name} for locked-down: 403 The caller does not have permission' in caplog.text
     _, skipped = split_not_checked(run_new(name, [BROKEN, LAKE]))
@@ -229,8 +225,8 @@ def test_a_project_that_fails_is_logged_skipped_and_reported(name, apis, caplog)
 
 def test_findings_are_reported_under_security():
     """Beta v1 left these names out of its category map, so its reports dropped the findings."""
-    for check_name, _ in {**CHECKS, **REVALIDATED}.values():
+    for check_name, _ in CHECKS.values():
         assert CATEGORY_MAP[check_name] == 'Security & Identity'
     assert CATEGORY_ORDER[0] == 'Security & Identity'
-    findings = [{'Check': check_name, 'Status': 'Compliant', 'Finding': []} for check_name, _ in {**CHECKS, **REVALIDATED}.values()]
+    findings = [{'Check': check_name, 'Status': 'Compliant', 'Finding': []} for check_name, _ in CHECKS.values()]
     assert categorize_findings(findings)['Security & Identity'] == findings

@@ -70,7 +70,7 @@ def run(gcp, answer):
     fake = FakeEssentialContacts(answer)
     gcp.discovery.apis['essentialcontacts'] = fake
     writes = []
-    check_essential_contacts(ORG, JOB, sink=SimpleNamespace(write_finding=lambda job, name, record: writes.append((job, name, record))))
+    check_essential_contacts('organization', ORG, JOB, sink=SimpleNamespace(write_finding=lambda job, name, record: writes.append((job, name, record))))
     assert fake.parents == [f'organizations/{ORG}']
     assert [(job, name) for job, name, _ in writes] == [(JOB, 'Essential_Contacts')]
     return writes[0][2]
@@ -79,7 +79,8 @@ def run(gcp, answer):
 def test_check_is_compliant_when_one_contact_covers_everything(gcp):
     record = run(gcp, {'contacts': [contact('ALL')]})
     assert record['Status'] == 'Compliant' and record['Check'] == 'Essential Contacts'
-    assert record['Finding'] == [{'Status': 'A contact is subscribed to every key category (SECURITY, TECHNICAL, LEGAL, SUSPENSION).'}]
+    assert record['Finding'] == [{'Status': 'A valid contact is subscribed to every key category (SECURITY, TECHNICAL, LEGAL, SUSPENSION).',
+                                  'Contacts': 'SECURITY: ops@example.com · TECHNICAL: ops@example.com · LEGAL: ops@example.com · SUSPENSION: ops@example.com'}]
 
 
 def test_check_names_the_missing_categories_with_a_fix(gcp):
