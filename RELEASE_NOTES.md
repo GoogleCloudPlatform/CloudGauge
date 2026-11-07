@@ -8,7 +8,114 @@ the test suite running inside the image, a zero-traffic canary revision scanned
 against a real organization, promotion, and a production scan compared fact for
 fact with the previous version's report.
 
-Versions are the image tags (`v5` … `v18.1`); the commit is the one that shipped.
+Versions are the image tags (`v5` … `v18.2`); the commit is the one that shipped.
+
+---
+
+## v18.2 — GKE upgrade readiness & hygiene
+
+The first themed release of the check-sourcing programme. The widest GKE
+cluster in the support-case evidence is *upgrades* — node pools upgraded in
+business hours because nobody set a maintenance window, freezes that nobody
+declared as an exclusion, upgrades that stall on a PodDisruptionBudget no
+drain can satisfy, security bulletins nobody was told about — and none of its
+causes was checked. Every one is a setting, not an event: readable from the
+cluster resource the v17.1 checks already list in Cloud Asset Inventory, and
+from the Kubernetes `PodDisruptionBudget` objects the inventory indexes for
+every GKE cluster. So v18.2 adds two checks and four hardening rows from two
+inventory listings, with no cluster credentials, no Kubernetes API call and no
+new role.
+
+### Added
+
+- **GKE Upgrade Readiness** (Reliability & Resilience, every scope): from the
+  cluster listing — **no maintenance window** (GKE chooses the time) and
+  **upgrade notifications off** or filtered without the upgrade events and
+  security bulletins, *Investigation Recommended* with the `clusters update`
+  lines; an **active maintenance exclusion** as a calendar row (*Informational*:
+  scope and the date upgrades resume); a Standard node pool whose surge
+  settings **lose capacity** during an upgrade (`maxUnavailable ≥ 1`) or that
+  sits **two minors behind** its control plane (*Investigation* when auto-upgrade
+  is off — the control plane cannot take its next minor until the pool moves;
+  *Informational* when GKE will move it). From one listing of
+  `policy.k8s.io/PodDisruptionBudget` — a budget that **can never be
+  satisfied** (`maxUnavailable: 0`, `minAvailable: 100%`, or an absolute minimum
+  not below the pods it expects) is **Action Required**: no node running that
+  workload can ever be drained, upgrades stall (GKE waits an hour per node,
+  then proceeds) and scale-down never happens; a budget **allowing no
+  disruption right now** (`disruptionsAllowed: 0` with pods expected) is
+  *Investigation Recommended* — a snapshot, since the inventory lags the
+  cluster by minutes. Budgets in `kube-*`, `gke-*`, `gmp-*` and
+  `config-management-*` are Google's and are not judged; Autopilot clusters
+  get the cluster-level rows only. One shape for every row — `Project,
+  Cluster, Location, Node Pool, Issue, Detail, Fix` — a budget named
+  `namespace/name` in `Node Pool` with its spec and status in `Detail` (the
+  first canary wrote wider budget rows that the table and the CSV header
+  could not show); the record's status is the worst row. A budget
+  listing that fails leaves the drain rule under *Projects not checked* and
+  the rest of the check standing. The clusters themselves are re-read from
+  the GKE API (`clusters.list` per project, the call GKE Hygiene already
+  makes): the inventory's copy of a cluster can lag a maintenance-policy
+  change by hours — the probe cluster's exclusion was still absent from it
+  half an hour later — and a window set today must clear the row today; a
+  project whose listing fails keeps the inventory copy and says so.
+- **GKE Observability** (Operational Excellence & Observability, every scope):
+  **system metrics off** (`SYSTEM_COMPONENTS` not among the monitoring
+  components; CIS GKE 5.7.1 / `MONITORING_DISABLED`) is **Action Required**;
+  **control-plane metrics** (API server, scheduler, controller manager) off,
+  **Managed Service for Prometheus** off and, on Standard clusters, **NodeLocal
+  DNSCache** off are *Investigation Recommended* — each with the
+  `--monitoring=` value that keeps what is already on, `--enable-managed-prometheus`
+  or `--update-addons=NodeLocalDNS=ENABLED`. The legacy `monitoringService`
+  field is read when a cluster predates the component configuration.
+
+### Changed
+
+- **GKE Node Hardening**: four more rows, all *Investigation Recommended* —
+  **integrity monitoring off** on a node pool (`INTEGRITY_MONITORING_DISABLED`,
+  `--shielded-integrity-monitoring`), **intra-node visibility off**
+  (`INTRANODE_VISIBILITY_DISABLED`, `--enable-intra-node-visibility`), a
+  **routes-based** cluster (`IP_ALIAS_DISABLED`) and an **alpha** cluster
+  (`ALPHA_CLUSTER_ENABLED`), the last two with the sentence that says nothing
+  can be changed in place. The all-clear row names the new items.
+  `RESHAPED_CHECKS["GKE Node Hardening"] = ("18.2", RULE_CHANGED)`: the first
+  scan after the upgrade says *rule changed*, not *new rows*.
+- `gke_security.list_cluster_facts` is the one cluster listing both modules
+  share; `hardening_fix` renders a pool line, a cluster line or a sentence.
+- README: the two catalogue entries, the hardening additions, the scope-shard
+  list; the roadmap table below (v18.6 numbered). `VERSION = "18.2"`.
+
+### Tests
+
+- `tests/test_gke_operations.py` (new): GKE timestamps; the window and the
+  exclusions with a fixed clock (in force, over, default scope, unreadable);
+  the notification gap (off, no filter, a filter without bulletins); surge
+  settings and version skew; the production cluster's rows and a ready
+  cluster's none; pools, exclusions and Autopilot; budget assets (regional and
+  zonal names, every spec form, the status snapshot, the system namespaces,
+  the fix); the observability rules, the `--monitoring=` value that keeps
+  what is on, the legacy field, Autopilot; the status ladder with
+  Informational; both checks end to end from two listings, with no cluster,
+  with a failed budget listing and with a failed cluster listing; the
+  hardening additions and the 18.2 line.
+- `tests/test_gke_security.py`: the hardened fixture is VPC-native with
+  intra-node visibility; the weak cluster's new row; integrity monitoring,
+  routes-based and alpha as sentences; the new all-clear text.
+- Synthetic world (drawn last; Kubernetes numbers as the inventory delivers
+  them, protobuf floats — the first canary read none of the budgets until the
+  parser accepted `0.0`): per cluster a window, an exclusion, the
+  notification state, `maxUnavailable`, a lagging pool, integrity monitoring,
+  intra-node visibility, the metric components, Managed Prometheus, the DNS
+  cache, and PodDisruptionBudget assets (blocking, exhausted, healthy, a
+  `kube-system` one that must not be judged). 1,040 tests.
+
+### Upgrade notes
+
+- Expect, on the first scan: *GKE Upgrade Readiness* and *GKE Observability*
+  as *new check*; *GKE Node Hardening* as *rule changed*, typically gaining an
+  intra-node-visibility row per Standard cluster.
+- Nothing to grant and no new API: both listings are Cloud Asset Inventory
+  reads under `roles/cloudasset.viewer`.
 
 ---
 
@@ -2244,10 +2351,10 @@ performance; modernization; enablement; roadmap and roadblocks).
 | **v17.3** | Incidents as evidence | *Shipped.* The Service Health briefing off the Scorecard and the executive summary, *Impacted* plus location-specific *Related* by default, switchable; **Incident Exposure** (the customer's zonal assets in the locations and product of each location-specific incident, one row per asset with the incidents as evidence) and **GKE Cluster Resilience** (zonal control planes, single-zone node pools); list cells fixed. No new role, no new API. |
 | **v18** | Legacy checks revalidated | *Shipped.* The twenty-two inherited checks re-read against today's APIs and Security Health Analytics: what was wrong corrected (a constant SCC tier, Monitoring needles no filter contains, list constraints scored as failures, `requireSsl`, deny rules as findings, the Google APIs agent as a finding, OS Config's swallowed errors, stopped VMs' released addresses), verdicts split between *Action Required* and *Investigation Recommended*, a `Fix` on every row that has one, *rule changed* on the Changes card. |
 | **v18.1** | Legacy checks revalidated — what is loose | *Shipped.* Cloud Storage Versioning scoped to log-sink destination buckets (soft delete, lifecycle rules and retention policies as protection); VPC Configuration without proxy-only subnets and with the default network's auto-subnets collapsed; Organization Log Sink's filter, state and `includeChildren`, and a **Data Access Audit Logs** check from the `auditConfigs` of the scanned resource and its ancestors; Essential Contacts without invalid contacts and in every scope; cost recommendations by priority with fix lines, **MIG Rightsizing**; GKE auto-repair; project-global quotas; firewall complexity retired; the best-practices table bundled in the image, replaceable by a `gs://` or `https://` URL and amended by an overrides file in the results bucket, with a provenance line in the report. No new role, no new API. |
-| **v18.2** | GKE upgrade readiness & hygiene | Maintenance windows and exclusions, security-bulletin notifications, surge settings, integrity monitoring, intranode visibility, monitoring components, PDBs that block drains — from the cluster listing the security checks already make. |
+| **v18.2** | GKE upgrade readiness & hygiene | *Shipped.* **GKE Upgrade Readiness** — maintenance windows, active exclusions, upgrade notifications and security bulletins, surge settings, version skew, and the **PodDisruptionBudgets** that block drains, read from Cloud Asset Inventory; **GKE Observability** — system and control-plane metrics, Managed Prometheus, NodeLocal DNSCache; GKE Node Hardening gains integrity monitoring, intra-node visibility, routes-based and alpha clusters. No new role, no new API. |
 | **v18.3** | Network edge & reachability | Interconnect/VPN redundancy, load balancer health-check firewall reachability, Cloud Armor on external load balancers, weak TLS policies and HTTP-only load balancers, DNSSEC, VPC flow logs, DNS logging, firewall policies, Cloud NAT capacity. |
 | **v18.4** | Data governance | Public BigQuery datasets and tables, BigQuery time travel and expiration defaults, Cloud SQL flag packs, AlloyDB exposure and backups, KMS rotation and IAM, API keys. |
 | **v18.5** | VM hardening & identities | Default service accounts and scopes on VMs, OS Login, project-wide SSH keys, serial ports, Shielded VM, public images, non-organization members, administrative and unused service accounts. |
+| **v18.6** | Forecasts, budgets and spend | *Un-held 2026-11-07 (the number taken when the data path was found ready).* A **spend briefing** from the organization's **billing export to BigQuery** (`BILLING_EXPORT=<project>.<dataset>`, a dataset-level read, no billing-account IAM; *Informational — not configured* when unset): spend by project and service, month-to-date against last month, a trend forecast, week-over-week anomaly flags, and the Scorecard's Efficiency line grounded in real spend; **commitment coverage** from the export's credits (committed-use credits against eligible spend); the **spend-based commitment recommendations** from the Recommender export (`RECOMMENDATIONS_EXPORT`) once that export is shown to carry billing-account rows. Budget coverage (Budgets API: billing-account IAM) and Capacity Planner forecasts (an organization-level role) stay out, possible later as optional capabilities behind an operator grant `tools/deploy.sh` never performs. |
 | **v19** | Footprint and detection | A **Platform Footprint** page (what runs where: services, regions, versions); the detective half of the SSRF chain over Cloud Logging — **GKE control-plane activity** (exec, webhooks, RBAC and DaemonSet changes by service accounts or external IPs), **service-account activity signals**; a **Support cases** briefing (its own API and role, its own decision); the deprecations recommender, once confirmed to exist. |
-| On hold | Forecasts, budgets and spend | **Spend-based commitment recommendations** from the organization's **Recommender export to BigQuery** (`RECOMMENDATIONS_EXPORT`; a dataset-level read, no billing-account IAM); **Capacity Planner** forecasts (`capacityplanner.googleapis.com`, `roles/capacityplanner.viewer`); **budget coverage**; a **spend briefing** over the billing export; cost anomalies if an API exists. Numbered when taken up; the export keeps running. |
 | Later | | VM Manager vulnerability summary, Security Command Center findings summary, SLO coverage, PDF export. |

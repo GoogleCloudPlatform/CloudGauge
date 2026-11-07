@@ -267,8 +267,9 @@ def control_plane_issues(cluster):
 
 
 def hardening_issues(cluster):
-    """``[(node pool or "", issue, fix flags)]`` — the defence-in-depth gaps of a cluster and its pools (Standard
-    clusters; Autopilot manages its nodes)."""
+    """``[(node pool or "", issue, fix)]`` — the defence-in-depth gaps of a cluster and its pools (Standard
+    clusters; Autopilot manages its nodes). A fix is the flags of a ``clusters update`` / ``node-pools update``
+    line, or — when nothing can be changed in place (v18.2: a routes-based or an alpha cluster) — a sentence."""
     issues = []
     autopilot = is_autopilot(cluster)
     network = cluster.get("networkConfig") or {}
@@ -284,8 +285,11 @@ def hardening_issues(cluster):
             pool_private = (pool.get("networkConfig") or {}).get("enablePrivateNodes")
             if not (private_default if pool_private is None else pool_private):
                 issues.append((name, "Nodes have public IP addresses.", "--enable-private-nodes"))
-            if not (config.get("shieldedInstanceConfig") or {}).get("enableSecureBoot", False):
+            shielded = config.get("shieldedInstanceConfig") or {}
+            if not shielded.get("enableSecureBoot", False):
                 issues.append((name, "Secure Boot off.", "--shielded-secure-boot"))
+            if not shielded.get("enableIntegrityMonitoring", False):  # v18.2: SHA INTEGRITY_MONITORING_DISABLED
+                issues.append((name, "Integrity monitoring off.", "--shielded-integrity-monitoring"))
             image = config.get("imageType") or ""
             if not image.upper().startswith("COS"):
                 issues.append((name, f"Node image {image or 'unknown'} is not Container-Optimized OS.", "--image-type=COS_CONTAINERD"))
@@ -300,7 +304,25 @@ def hardening_issues(cluster):
         issues.append(("", "Workload vulnerability scanning off.", "--workload-vulnerability-scanning=standard"))
     if (cluster.get("databaseEncryption") or {}).get("state") != "ENCRYPTED":
         issues.append(("", "Application-layer secrets encryption off.", "--database-encryption-key=<KMS key>"))
+    if not autopilot:  # v18.2: three more Security Health Analytics detectors, all cluster-level, Standard clusters (Autopilot has none of them)
+        if not network.get("enableIntraNodeVisibility", False):
+            issues.append(("", "Intra-node visibility off: pod-to-pod traffic on one node is invisible to VPC flow logs and firewall rules.", "--enable-intra-node-visibility"))
+        if not (cluster.get("ipAllocationPolicy") or {}).get("useIpAliases", False):
+            issues.append(("", "Routes-based cluster (not VPC-native).",
+                           "Create a VPC-native cluster (--enable-ip-alias) and migrate the workloads: a routes-based cluster cannot be converted in place."))
+        if cluster.get("enableKubernetesAlpha", False):
+            issues.append(("", "Alpha cluster: alpha APIs on, deleted 30 days after creation; not for production.",
+                           "Recreate the cluster without --enable-kubernetes-alpha: the setting cannot be changed."))
     return issues
+
+
+def hardening_fix(fact, pool, flags):
+    """The fix line of a hardening issue: a ``node-pools update`` for a pool, a ``clusters update`` for the cluster, the sentence as is when it is one."""
+    if not flags.startswith("--"):
+        return flags
+    if pool:
+        return f"gcloud container node-pools update {pool} --cluster={fact['name']} --location={fact['location']} --project={fact['project_id']} {flags}"
+    return cluster_update(fact, flags)
 
 
 def logging_gaps(cluster):
@@ -370,6 +392,14 @@ def _write_error(sink, job_id, check, error):
     sink.write_finding(job_id, check.replace(" ", "_"), {"Check": check, "Finding": [{"Error": str(error)}], "Status": "Error"})
 
 
+def list_cluster_facts(asset_client, parent):
+    """The ``cluster_facts`` of every running cluster under ``parent`` (one Asset Inventory listing; stopping clusters left out).
+    Shared with ``app.checks.gke_operations`` (v18.2)."""
+    request = {"parent": parent, "asset_types": [CLUSTER_ASSET], "content_type": asset_v1.ContentType.RESOURCE}
+    facts = [cluster_facts(asset) for asset in asset_client.list_assets(request=request)]
+    return [fact for fact in facts if (fact["data"].get("status") or "RUNNING") not in ("STOPPING", "DEGRADED_STOPPING")]
+
+
 def check_gke_security(scope, scope_id, job_id, *, sink):
     """The four GKE security findings from one Asset Inventory listing of the scope's clusters (v17.1)."""
     print(f"🛡️ [{job_id}] Checking GKE security posture under {scope} {scope_id}...")
@@ -377,14 +407,12 @@ def check_gke_security(scope, scope_id, job_id, *, sink):
     try:
         credentials, _ = gcp.auth_default(scopes=SCOPES)
         asset_client = gcp.asset_client(credentials)
-        request = {"parent": parent, "asset_types": [CLUSTER_ASSET], "content_type": asset_v1.ContentType.RESOURCE}
-        facts = [cluster_facts(asset) for asset in asset_client.list_assets(request=request)]
+        facts = list_cluster_facts(asset_client, parent)
     except Exception as e:
         logging.error(f"[{job_id}] GKE security posture: could not list the clusters under {parent}: {e}")
         for check in GKE_SECURITY_CHECKS:
             _write_error(sink, job_id, check, e)
         return
-    facts = [fact for fact in facts if (fact["data"].get("status") or "RUNNING") not in ("STOPPING", "DEGRADED_STOPPING")]
 
     # 1. Credential exposure: the roles of every node account, one search each.
     skipped = NotChecked(CREDENTIAL_EXPOSURE_CHECK)
@@ -419,12 +447,11 @@ def check_gke_security(scope, scope_id, job_id, *, sink):
     rows = []
     for fact in facts:
         for pool, issue, flags in hardening_issues(fact["data"]):
-            fix = (f"gcloud container node-pools update {pool} --cluster={fact['name']} --location={fact['location']} --project={fact['project_id']} {flags}"
-                   if pool else cluster_update(fact, flags))
             rows.append({"Project": fact["project_id"], "Cluster": fact["name"], "Node Pool": pool or "(cluster)", "Issue": issue,
-                         "Fix": fix, "_status": "Investigation Recommended"})
+                         "Fix": hardening_fix(fact, pool, flags), "_status": "Investigation Recommended"})
     _write_rows(sink, job_id, NODE_HARDENING_CHECK, rows,
-                "Every cluster has private, Shielded, COS nodes, network policy enforcement, Binary Authorization, posture scanning and secrets encryption.")
+                "Every cluster is VPC-native with private, Shielded, COS nodes (Secure Boot and integrity monitoring on), network policy "
+                "enforcement, intra-node visibility, Binary Authorization, posture scanning and secrets encryption; no alpha cluster.")
 
     # 4. Threat detection and logging.
     skipped = NotChecked(THREAT_DETECTION_CHECK)

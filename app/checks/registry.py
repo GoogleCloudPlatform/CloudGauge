@@ -35,6 +35,7 @@ from app.checks.cost import (
     check_storage_lifecycle,
     run_cost_recommendations,
 )
+from app.checks.gke_operations import UPGRADE_READINESS_CHECK, check_gke_operations
 from app.checks.gke_versions import CHECK_NAME as GKE_VERSIONS_CHECK
 from app.checks.gke_versions import check_gke_supported_versions
 from app.checks.network import run_network_insights
@@ -168,6 +169,8 @@ def build_check_plan(scope, scope_id, job_id, all_projects, active_zones, active
         # v18.1: two checks every scope runs on the scope itself
         CheckSpec("Reliability & Resilience", "Essential Contacts", check_essential_contacts, (scope, scope_id, job_id)),
         CheckSpec("Operational Excellence & Observability", DATA_ACCESS_CHECK, check_data_access_audit_logs, (scope, scope_id, job_id)),
+        # v18.2: GKE Upgrade Readiness and GKE Observability, from the scope's cluster and PodDisruptionBudget listings
+        CheckSpec("Reliability & Resilience", UPGRADE_READINESS_CHECK, check_gke_operations, (scope, scope_id, job_id)),
     ]
 
     if scope == 'organization':
@@ -196,6 +199,7 @@ SCOPE_LEVEL_CHECKS = frozenset({
     "Organization Policies", "Organization IAM Policy", "Security Command Center Status",
     "Organization Audit Logging", "Essential Contacts", DATA_ACCESS_CHECK, RESILIENCE_CHECK,
     SNAPSHOT_SPRAWL_CHECK, SQL_VERSIONS_CHECK, CREDENTIAL_EXPOSURE_CHECK, IMPERSONATION_CHECK, VPC_SC_CHECK,
+    UPGRADE_READINESS_CHECK,  # v18.2: two listings under the scope
 })
 # The checks that do both: scope-wide work plus per-project work. Shards split them
 # with keyword flags: the scope shard runs the first set, the project shards the second

@@ -85,7 +85,8 @@ def cluster(name='prod-a', **overrides):
     data = {'name': name, 'location': 'europe-west1', 'status': 'RUNNING', 'nodePools': [pool(metadata='GKE_METADATA', account='gke-nodes@p1.iam.gserviceaccount.com')],
             'workloadIdentityConfig': {'workloadPool': 'p1.svc.id.goog'}, 'privateClusterConfig': {'enablePrivateNodes': True, 'enablePrivateEndpoint': True},
             'masterAuthorizedNetworksConfig': {'enabled': True, 'cidrBlocks': [{'cidrBlock': '10.0.0.0/8'}]}, 'legacyAbac': {},
-            'masterAuth': {'clusterCaCertificate': 'x'}, 'shieldedNodes': {'enabled': True}, 'networkConfig': {'datapathProvider': 'ADVANCED_DATAPATH'},
+            'masterAuth': {'clusterCaCertificate': 'x'}, 'shieldedNodes': {'enabled': True}, 'networkConfig': {'datapathProvider': 'ADVANCED_DATAPATH', 'enableIntraNodeVisibility': True},
+            'ipAllocationPolicy': {'useIpAliases': True},  # v18.2
             'binaryAuthorization': {'evaluationMode': 'PROJECT_SINGLETON_POLICY_ENFORCE'},
             'securityPostureConfig': {'mode': 'BASIC', 'vulnerabilityMode': 'VULNERABILITY_BASIC'}, 'databaseEncryption': {'state': 'ENCRYPTED'},
             'loggingConfig': {'componentConfig': {'enableComponents': ['SYSTEM_COMPONENTS', 'WORKLOADS']}},
@@ -191,11 +192,18 @@ def test_hardening_issues_standard_and_autopilot():
                    nodePools=[pool('a', secure_boot=False, image='UBUNTU_CONTAINERD'), pool('b', private=True)])
     issues = hardening_issues(weak)
     assert [(p, i.split(' ')[0]) for p, i, _ in issues] == [
-        ('', 'No'), ('', 'Shielded'), ('a', 'Nodes'), ('a', 'Secure'), ('a', 'Node'), ('', 'Binary'), ('', 'Security'), ('', 'Workload'), ('', 'Application-layer')]
+        ('', 'No'), ('', 'Shielded'), ('a', 'Nodes'), ('a', 'Secure'), ('a', 'Node'), ('', 'Binary'), ('', 'Security'), ('', 'Workload'), ('', 'Application-layer'),
+        ('', 'Intra-node')]  # v18.2: networkConfig={} leaves intra-node visibility off; the fixture is VPC-native and not alpha
     assert issues[2][2] == '--enable-private-nodes' and issues[4][1] == 'Node image UBUNTU_CONTAINERD is not Container-Optimized OS.'
     # Pool b is private by its own setting; the classic networkPolicy.enabled counts as enforcement.
     assert all(p != 'b' for p, _, _ in issues)
     assert not any('network policy' in i for _, i, _ in hardening_issues(cluster(networkConfig={}, networkPolicy={'enabled': True})))
+    # v18.2: integrity monitoring per pool; routes-based and alpha clusters as sentences (nothing to update in place).
+    pool_c = pool('c')
+    pool_c['config']['shieldedInstanceConfig']['enableIntegrityMonitoring'] = False
+    v182 = hardening_issues(cluster(nodePools=[pool_c], ipAllocationPolicy={}, enableKubernetesAlpha=True))
+    assert [(p, i.split(' ')[0], f.startswith('--')) for p, i, f in v182] == [('c', 'Integrity', True), ('', 'Routes-based', False), ('', 'Alpha', False)]
+    assert v182[0][2] == '--shielded-integrity-monitoring'
     # Autopilot: only the cluster-level items that apply.
     auto = hardening_issues(cluster(autopilot={'enabled': True}, networkConfig={}, shieldedNodes={}, binaryAuthorization={}, nodePools=[pool(secure_boot=False)]))
     assert [i.split(':')[0] for _, i, _ in auto] == ['Binary Authorization off']
@@ -293,8 +301,9 @@ def test_the_check_writes_the_five_findings_from_one_listing(gcp):
     control = findings[CONTROL_PLANE_CHECK]
     assert control['Status'] == 'Action Required' and [r['Cluster'] for r in control['Finding']] == ['legacy']
     assert control['Finding'][0]['Fix'].startswith('gcloud container clusters update legacy --location=europe-west1-b --project=p1 --enable-master-authorized-networks')
-    assert findings[NODE_HARDENING_CHECK]['Finding'] == [{'Status': 'Every cluster has private, Shielded, COS nodes, network policy enforcement, Binary Authorization, '
-                                                                    'posture scanning and secrets encryption.'}]
+    assert findings[NODE_HARDENING_CHECK]['Finding'] == [{'Status': 'Every cluster is VPC-native with private, Shielded, COS nodes (Secure Boot and integrity monitoring on), '
+                                                                    'network policy enforcement, intra-node visibility, Binary Authorization, posture scanning and secrets '
+                                                                    'encryption; no alpha cluster.'}]
     threat = findings[THREAT_DETECTION_CHECK]
     assert threat['Status'] == 'Action Required'
     assert [(r['Cluster'], r['Signal'], r['State']) for r in threat['Finding']] == [

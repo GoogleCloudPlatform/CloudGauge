@@ -76,6 +76,8 @@ CATEGORY_MAP = {
     # v17.1: the SSRF chain — GKE security posture (app.checks.gke_security), impersonation, perimeters.
     "GKE Credential Exposure": "Security & Identity", "GKE Control Plane Exposure": "Security & Identity",
     "GKE Node Hardening": "Security & Identity", "GKE Threat Detection": "Security & Identity",
+    # v18.2: upgrade readiness (windows, exclusions, notifications, surge, skew, PodDisruptionBudgets) and the metrics side.
+    "GKE Upgrade Readiness": "Reliability & Resilience", "GKE Observability": "Operational Excellence & Observability",
     "Service Account Impersonation": "Security & Identity", "VPC Service Controls Coverage": "Security & Identity",
 
     # B2: error results. These names are only written when a check fails; the

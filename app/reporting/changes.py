@@ -110,6 +110,7 @@ RESHAPED_CHECKS = {
     "MIG Resilience (Zonal)": ("17.3", ROWS_CHANGED),
     # v18 (legacy checks revalidated): rows that vanish were never true, rows that appear were always there — rule changed.
     "Organization Policies": ("18", RULE_CHANGED),  # list constraints evaluate; "won't have" booleans pass when unset
+    "GKE Node Hardening": ("18.2", RULE_CHANGED),  # v18.2: integrity monitoring, intra-node visibility, routes-based and alpha clusters
     "Security Command Center Status": ("18", RULE_CHANGED),  # the real tier, Tier/Subscription/Note row (the old row was a constant)
     "Primitive Roles (Owner or Editor)": ("18", RULE_CHANGED),  # Google-managed agents out; kind, condition, fix
     "Critical Org-Level Roles": ("18", RULE_CHANGED),  # groups are the practice; more roles; kind, condition, fix

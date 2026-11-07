@@ -225,6 +225,23 @@ class GkeHardening:
 
 
 @dataclass(frozen=True)
+class GkeOperations:
+    """v18.2: what the upgrade-readiness and observability rules read from a cluster asset (``provider._cluster_asset``) and its budgets."""
+    maintenance_window: bool
+    exclusion: bool  # an active NO_MINOR_OR_NODE_UPGRADES exclusion ending in two weeks
+    notifications: str  # "off" | "partial" (a filter without security bulletins) | "on"
+    max_unavailable: tuple  # per node pool: maxUnavailable (0 = the default, no row)
+    lagging_pool: bool  # the first node pool two minors behind the control plane
+    integrity_monitoring: bool
+    intranode_visibility: bool
+    system_metrics: bool
+    control_plane_metrics: bool
+    managed_prometheus: bool
+    dns_cache: bool
+    pdbs: tuple  # (namespace, name, kind): kind in blocking / exhausted / healthy / system
+
+
+@dataclass(frozen=True)
 class ProjectProfile:
     index: int
     project_id: str
@@ -287,6 +304,7 @@ class ProjectProfile:
     gke_auto_repair: dict = field(default_factory=dict)  # cluster name -> per node pool, auto-repair on
     project_audit_configs: bool = False  # the project turns Data Access logs on for every service
     project_contact: bool = False  # the project has an Essential Contact of its own (SUSPENSION, LEGAL)
+    gke_operations: dict = field(default_factory=dict)  # v18.2: cluster name -> GkeOperations
 
     @property
     def project_number(self):
@@ -589,6 +607,24 @@ class SyntheticOrg:
         gke_auto_repair = {cluster.name: tuple(_chance(rng, 0.8) for _ in cluster.node_pools) for cluster in gke_clusters}
         project_audit_configs = _chance(rng, 0.15)
         project_contact = _chance(rng, 0.2)
+        # v18.2 (drawn last again): upgrade readiness and observability, per cluster.
+        gke_operations = {}
+        for cluster in gke_clusters:
+            pdbs = []
+            if _chance(rng, 0.5):
+                pdbs.append(("kube-system", "kube-dns-pdb", "system"))
+            if _chance(rng, 0.3):
+                pdbs.append(("payments", "api-pdb", "blocking"))
+            if _chance(rng, 0.2):
+                pdbs.append(("web", "frontend-pdb", "exhausted"))
+            if _chance(rng, 0.6):
+                pdbs.append(("web", "worker-pdb", "healthy"))
+            gke_operations[cluster.name] = GkeOperations(
+                maintenance_window=_chance(rng, 0.5), exclusion=_chance(rng, 0.15),
+                notifications=rng.choice(["off", "off", "partial", "on"]),
+                max_unavailable=tuple(1 if _chance(rng, 0.25) else 0 for _ in cluster.node_pools), lagging_pool=_chance(rng, 0.15),
+                integrity_monitoring=_chance(rng, 0.85), intranode_visibility=_chance(rng, 0.4), system_metrics=_chance(rng, 0.92),
+                control_plane_metrics=_chance(rng, 0.3), managed_prometheus=_chance(rng, 0.6), dns_cache=_chance(rng, 0.4), pdbs=tuple(pdbs))
 
         return ProjectProfile(
             index=index, project_id=project_id, display_name=f"Synthetic Project {index}",
@@ -612,6 +648,7 @@ class SyntheticOrg:
             pap_enforced_buckets=pap_enforced_buckets,
             unprotected_buckets=unprotected_buckets, sink_buckets=sink_buckets, retention_buckets=retention_buckets, proxy_subnet=proxy_subnet,
             gke_auto_repair=gke_auto_repair, project_audit_configs=project_audit_configs, project_contact=project_contact,
+            gke_operations=gke_operations,
         )
 
     # --- organization-level data ---

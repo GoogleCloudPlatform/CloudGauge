@@ -589,12 +589,11 @@ class SyntheticGcp:
         self.call("container", "clusters.list", project_id=project_id, style="http")
         profile, clusters = self.world.project(project_id), []
         for cluster in profile.gke_clusters:
-            entry = {"name": cluster.name, "location": cluster.location,
-                     "currentMasterVersion": cluster.master_version, "currentNodeVersion": cluster.node_pools[0][2],
-                     "nodePools": [{"name": name, "version": version, "management": {"autoUpgrade": auto, "autoRepair": repair}}
-                                   for (name, auto, version), repair in zip(cluster.node_pools, profile.gke_auto_repair.get(cluster.name, (True,) * len(cluster.node_pools)))]}
-            if cluster.release_channel:
-                entry["releaseChannel"] = {"channel": "REGULAR"}
+            # v18.2: the GKE API and the inventory show the same cluster (the API adds auto-repair and the node version).
+            entry = dict(self._cluster_asset(profile, cluster).resource.data)
+            entry["currentNodeVersion"] = cluster.node_pools[0][2]
+            repairs = profile.gke_auto_repair.get(cluster.name, (True,) * len(cluster.node_pools))
+            entry["nodePools"] = [{**pool, "management": {**pool.get("management", {}), "autoRepair": repair}} for pool, repair in zip(entry["nodePools"], repairs)]
             clusters.append(entry)
         return {"clusters": clusters}
 
@@ -783,6 +782,8 @@ class SyntheticGcp:
                 found += [self._cluster_asset(profile, c) for c in profile.gke_clusters]
             if "logging.googleapis.com/LogSink" in asset_types:
                 found += self._sink_assets(profile)
+            if "policy.k8s.io/PodDisruptionBudget" in asset_types:
+                found += [a for c in profile.gke_clusters for a in self._pdb_assets(profile, c)]
             if "compute.googleapis.com/ForwardingRule" in asset_types:
                 found += [SimpleNamespace(name=f"//compute.googleapis.com/projects/{project_id}/regions/{r}/forwardingRules/lb-{r}",
                                           resource=SimpleNamespace(data={"name": f"lb-{r}"})) for r in profile.forwarding_rule_regions]
@@ -796,6 +797,8 @@ class SyntheticGcp:
                 found += [self._cluster_asset(profile, c) for c in profile.gke_clusters]
             if "logging.googleapis.com/LogSink" in asset_types:
                 found += self._sink_assets(profile)
+            if "policy.k8s.io/PodDisruptionBudget" in asset_types:
+                found += [a for c in profile.gke_clusters for a in self._pdb_assets(profile, c)]
         self.call("asset", "listAssets(folder)" if folder_id else "listAssets(org)", pages=max(1, math.ceil(len(found) / PAGE_SIZE)))
         return found
 
@@ -806,9 +809,29 @@ class SyntheticGcp:
                                 resource=SimpleNamespace(data={"name": f"sink-{i}", "destination": f"storage.googleapis.com/{bucket}"}))
                 for i, bucket in enumerate(profile.sink_buckets)]
 
+    @staticmethod
+    def _pdb_assets(profile, cluster):
+        """The cluster's ``policy.k8s.io/PodDisruptionBudget`` assets (v18.2), as the inventory shows Kubernetes objects: spec and status."""
+        o = profile.gke_operations.get(cluster.name)
+        # Numbers as the inventory delivers them: protobuf Struct floats (the first v18.2 canary read none of the budgets for that).
+        shapes = {"system": ({"maxUnavailable": 1.0}, {"disruptionsAllowed": 1.0, "currentHealthy": 2.0, "desiredHealthy": 1.0, "expectedPods": 2.0}),
+                  "blocking": ({"maxUnavailable": 0.0}, {"disruptionsAllowed": 0.0, "currentHealthy": 2.0, "desiredHealthy": 2.0, "expectedPods": 2.0}),
+                  "exhausted": ({"minAvailable": 2.0}, {"disruptionsAllowed": 0.0, "currentHealthy": 2.0, "desiredHealthy": 2.0, "expectedPods": 3.0}),
+                  "healthy": ({"maxUnavailable": "25%"}, {"disruptionsAllowed": 1.0, "currentHealthy": 4.0, "desiredHealthy": 3.0, "expectedPods": 4.0})}
+        assets = []
+        for namespace, name, kind in (o.pdbs if o else ()):
+            spec, status = shapes[kind]
+            assets.append(SimpleNamespace(
+                name=f"//container.googleapis.com/projects/{profile.project_id}/locations/{cluster.location}/clusters/{cluster.name}/k8s/namespaces/{namespace}/policy/poddisruptionbudgets/{name}",
+                resource=SimpleNamespace(data={"apiVersion": "policy/v1", "kind": "PodDisruptionBudget", "metadata": {"name": name, "namespace": namespace},
+                                               "spec": {**spec, "selector": {"matchLabels": {"app": name.rsplit("-", 1)[0]}}}, "status": status},
+                                         parent=f"//cloudresourcemanager.googleapis.com/projects/{profile.project_number}")))
+        return assets
+
     def _cluster_asset(self, profile, cluster):
         """A ``container.googleapis.com/Cluster`` asset with the fields the v17.1 checks read, from the cluster's GkeHardening."""
         h = profile.gke_hardening.get(cluster.name)
+        o = profile.gke_operations.get(cluster.name)  # v18.2
         project_id = profile.project_id
         scopes = ["https://www.googleapis.com/auth/cloud-platform"] if (h and h.cloud_platform_scope) else [
             "https://www.googleapis.com/auth/devstorage.read_only", "https://www.googleapis.com/auth/logging.write", "https://www.googleapis.com/auth/monitoring"]
@@ -818,12 +841,17 @@ class SyntheticGcp:
             config = {"serviceAccount": "default" if (h is None or h.default_service_account) else f"gke-nodes@{project_id}.iam.gserviceaccount.com",
                       "oauthScopes": scopes, "metadata": {"disable-legacy-endpoints": "true"},
                       "imageType": "COS_CONTAINERD" if (h is None or h.cos_image) else "UBUNTU_CONTAINERD",
-                      "shieldedInstanceConfig": {"enableSecureBoot": bool(h and h.secure_boot), "enableIntegrityMonitoring": True}}
+                      "shieldedInstanceConfig": {"enableSecureBoot": bool(h and h.secure_boot), "enableIntegrityMonitoring": o is None or o.integrity_monitoring}}
             if gke_metadata:
                 config["workloadMetadataConfig"] = {"mode": "GKE_METADATA"}
             zones = (profile.gke_pool_zones.get(cluster.name) or ())
+            if o and o.lagging_pool and i == 0:  # v18.2: two minors behind the control plane
+                major, minor, rest = cluster.master_version.split(".", 2)
+                version = f"{major}.{int(minor) - 2}.{rest}"
+            unavailable = o.max_unavailable[i] if (o and i < len(o.max_unavailable)) else 0
             pools.append({"name": name, "version": version, "config": config, "management": {"autoUpgrade": auto},
                           **({"locations": list(zones[i])} if i < len(zones) else {}),  # v17.3
+                          "upgradeSettings": {"strategy": "SURGE", "maxSurge": 1, **({"maxUnavailable": unavailable} if unavailable else {})},  # v18.2
                           "networkConfig": {"enablePrivateNodes": bool(h and h.private_nodes)}})
         data = {"name": cluster.name, "location": cluster.location, "status": "RUNNING", "currentMasterVersion": cluster.master_version,
                 "nodePools": pools, "legacyAbac": {"enabled": bool(h and h.legacy_abac)}, "masterAuth": {"clusterCaCertificate": "c3ludGhldGlj"},
@@ -847,6 +875,24 @@ class SyntheticGcp:
             data["networkConfig"] = {"datapathProvider": "ADVANCED_DATAPATH"}
         if h and h.binary_authorization:
             data["binaryAuthorization"] = {"evaluationMode": "PROJECT_SINGLETON_POLICY_ENFORCE"}
+        # v18.2: what the upgrade-readiness, observability and the three new hardening rules read.
+        data["ipAllocationPolicy"] = {"useIpAliases": True}
+        data.setdefault("networkConfig", {})["enableIntraNodeVisibility"] = bool(h and h.autopilot) or (o is None or o.intranode_visibility)
+        components = (["SYSTEM_COMPONENTS"] if (o is None or o.system_metrics) else []) + (["APISERVER", "SCHEDULER", "CONTROLLER_MANAGER"] if (o and o.control_plane_metrics) else [])
+        data["monitoringConfig"] = {"componentConfig": {"enableComponents": components},
+                                    "managedPrometheusConfig": {"enabled": bool(h and h.autopilot) or (o is None or o.managed_prometheus)}}
+        data["addonsConfig"] = {"dnsCacheConfig": {"enabled": o is None or o.dns_cache}, "gcePersistentDiskCsiDriverConfig": {"enabled": True}}
+        policy = {"resourceVersion": "e3b0c442"}
+        if o and o.maintenance_window:
+            policy["window"] = {"recurringWindow": {"window": {"startTime": "2026-01-03T18:00:00Z", "endTime": "2026-01-03T22:00:00Z"}, "recurrence": "FREQ=WEEKLY;BYDAY=SA,SU"}}
+        if o and o.exclusion:
+            policy.setdefault("window", {})["maintenanceExclusions"] = {"change-freeze": {
+                "startTime": _iso(1), "endTime": _iso(-14), "maintenanceExclusionOptions": {"scope": "NO_MINOR_OR_NODE_UPGRADES"}}}
+        data["maintenancePolicy"] = policy
+        notifications = o.notifications if o else "on"
+        data["notificationConfig"] = {"pubsub": {"enabled": True, "topic": f"projects/{project_id}/topics/gke-notifications",
+                                                 **({"filter": {"eventType": ["UPGRADE_AVAILABLE_EVENT"]}} if notifications == "partial" else {})}
+                                      if notifications != "off" else {}}
         return SimpleNamespace(name=f"//container.googleapis.com/projects/{project_id}/locations/{cluster.location}/clusters/{cluster.name}",
                                resource=SimpleNamespace(data=data, parent=f"//cloudresourcemanager.googleapis.com/projects/{profile.project_number}"),
                                ancestors=[f"projects/{profile.project_number}", f"folders/{profile.folder_id}", f"organizations/{self.world.org_id}"])

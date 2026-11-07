@@ -236,7 +236,8 @@ def test_rows_are_not_comparable_with_a_previous_scan_by_an_older_release(previo
         assert rows_reshaped_since(check, summary('job-1', {}, {}, release=previous_release)) == \
             (None if release_tuple(previous_release) >= (17, 3) else ROWS_CHANGED)
     assert {name: line for name, line in RESHAPED_CHECKS.items() if line[0] not in ('18', '18.1')} == {
-        RESHAPED: ('16.1', RULE_CHANGED), 'Cloud SQL High Availability': ('17.3', ROWS_CHANGED), 'MIG Resilience (Zonal)': ('17.3', ROWS_CHANGED)}
+        RESHAPED: ('16.1', RULE_CHANGED), 'Cloud SQL High Availability': ('17.3', ROWS_CHANGED), 'MIG Resilience (Zonal)': ('17.3', ROWS_CHANGED),
+        'GKE Node Hardening': ('18.2', RULE_CHANGED)}  # v18.2: four more hardening rows (tests/test_gke_operations.py)
     # v18: the legacy checks revalidated (tests/test_revalidated_checks.py pins the list); v18.1: the loose rules (tests/test_loose_rules.py);
     # against any earlier scan their rows are not compared.
     assert {line for name, line in RESHAPED_CHECKS.items() if line[0] == '18'} == {('18', RULE_CHANGED), ('18', ROWS_CHANGED)}
