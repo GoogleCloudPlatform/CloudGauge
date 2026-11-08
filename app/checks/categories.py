@@ -78,6 +78,9 @@ CATEGORY_MAP = {
     "GKE Node Hardening": "Security & Identity", "GKE Threat Detection": "Security & Identity",
     # v18.2: upgrade readiness (windows, exclusions, notifications, surge, skew, PodDisruptionBudgets) and the metrics side.
     "GKE Upgrade Readiness": "Reliability & Resilience", "GKE Observability": "Operational Excellence & Observability",
+    # v18.3: the network edge.
+    "Hybrid Connectivity": "Reliability & Resilience", "VPC Peering & Cloud NAT": "Reliability & Resilience",
+    "Load Balancer Edge": "Security & Identity", "DNS Posture": "Security & Identity", "VPC Flow Logs": "Operational Excellence & Observability",
     "Service Account Impersonation": "Security & Identity", "VPC Service Controls Coverage": "Security & Identity",
 
     # B2: error results. These names are only written when a check fails; the

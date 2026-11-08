@@ -401,8 +401,9 @@ def test_an_overrides_file_that_cannot_be_read_or_parsed_is_the_checks_error_not
 # --- The release's rule changes -----------------------------------------------------------------------------------
 
 def test_every_loose_rule_draws_its_line_at_v18_1():
-    for name in ['Cloud Storage Versioning', 'VPC Configuration', 'Organization Log Sink', 'Essential Contacts', 'Quota Utilization (>80%)', 'GKE Hygiene',
+    for name in ['Cloud Storage Versioning', 'Organization Log Sink', 'Essential Contacts', 'Quota Utilization (>80%)', 'GKE Hygiene',
                  *(name for name in cost.COST_RECOMMENDERS if name != 'MIG Rightsizing')]:
         assert RESHAPED_CHECKS[name] == ('18.1', RULE_CHANGED), name
+    assert RESHAPED_CHECKS['VPC Configuration'] == ('18.3', RULE_CHANGED)  # redrawn again in v18.3 (legacy networks)
     for name in ('Data Access Audit Logs', 'MIG Rightsizing'):
         assert name not in RESHAPED_CHECKS, name  # a new check is "new check" on the Changes card by the existing rule

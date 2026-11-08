@@ -338,7 +338,9 @@ V17_CHECKS = set(V17_COMMON_CHECKS) | set(V17_1_CHECKS)
 V18_1_CHECKS = ['check_essential_contacts', 'check_data_access_audit_logs']
 # v18.2: GKE Upgrade Readiness and GKE Observability (one function, two records), scope-level, after the v18.1 pair.
 V18_2_CHECKS = ['check_gke_operations']
-LATER_CHECKS = V14_CHECKS | V15_CHECKS | V15_6_CHECKS | V17_CHECKS | set(V18_1_CHECKS) | set(V18_2_CHECKS)
+# v18.3: the network edge, five scope-level checks after GKE Upgrade Readiness.
+V18_3_CHECKS = ['check_hybrid_connectivity', 'check_load_balancer_edge', 'check_dns_posture', 'check_flow_logs', 'check_peering_and_nat']
+LATER_CHECKS = V14_CHECKS | V15_CHECKS | V15_6_CHECKS | V17_CHECKS | set(V18_1_CHECKS) | set(V18_2_CHECKS) | set(V18_3_CHECKS)
 
 
 def finished_checks(progress_updates):
@@ -356,7 +358,7 @@ def test_runner_runs_the_beta_v1_check_plan(scope, scope_id, beta, monkeypatch):
     specs = registry.build_check_plan(scope, scope_id, JOB_ID, PROJECTS, zones, regions)
     names = [spec.func.__name__ for spec in specs]
     v17_names = {spec.name for spec in specs if spec.func.__name__ in V17_CHECKS}
-    assert len(names) == (39 if scope == 'organization' else 36)
+    assert len(names) == (44 if scope == 'organization' else 41)
     # Same order as beta v1's plan lists, which append the four checks after "Service Quota Limits".
     beta_plan = ast.parse(textwrap.dedent(inspect.getsource(beta.run_all_checks)))
     beta_lists = [[entry.elts[2].id for entry in node.elts if isinstance(entry, ast.Tuple)]
@@ -371,7 +373,8 @@ def test_runner_runs_the_beta_v1_check_plan(scope, scope_id, beta, monkeypatch):
     assert names[29:32] == V17_1_CHECKS
     assert names[32:34] == V18_1_CHECKS
     assert names[34:35] == V18_2_CHECKS
-    assert names[-2:] == (['check_audit_logging', 'check_org_advisories'] if scope == 'organization' else ['check_gke_operations', 'check_project_advisories'])
+    assert names[35:40] == V18_3_CHECKS
+    assert names[-2:] == (['check_audit_logging', 'check_org_advisories'] if scope == 'organization' else ['check_peering_and_nat', 'check_project_advisories'])
     calls = {'beta': {}, 'new': {}}
     sink = RecordingSink()
 
@@ -400,7 +403,7 @@ def test_runner_runs_the_beta_v1_check_plan(scope, scope_id, beta, monkeypatch):
     for name in shared:
         beta_args, beta_kwargs = calls['beta'][name]
         args, kwargs = calls['new'][name]
-        if name == 'check_storage_versioning':
+        if name in ('check_storage_versioning', 'check_open_firewall_rules'):  # v18.1 / v18.3: the scope first (one listing of the scope's sinks / firewall policies)
             assert (args, beta_args, kwargs) == ((scope, scope_id, PROJECTS, JOB_ID), (scope_id, PROJECTS, JOB_ID), {'sink': sink})
             continue
         assert (args[:len(beta_args)], beta_kwargs, kwargs) == (beta_args, {}, {'sink': sink}), name
@@ -413,7 +416,8 @@ def test_runner_runs_the_beta_v1_check_plan(scope, scope_id, beta, monkeypatch):
     assert len(progress) == len(names) and len(beta_progress) == len(beta_names)
     assert progress[-1]['progress'] == beta_progress[-1]['progress'] == 95
     later = {registry.SERVICE_HEALTH_CHECK, registry.GKE_VERSIONS_CHECK, registry.ADVISORIES_CHECK, registry.RESILIENCE_CHECK} | v17_names
-    later |= {'Essential Contacts', registry.DATA_ACCESS_CHECK, registry.UPGRADE_READINESS_CHECK}  # v18.1 and v18.2: every scope, so out of the comparison on both sides
+    later |= {'Essential Contacts', registry.DATA_ACCESS_CHECK, registry.UPGRADE_READINESS_CHECK,  # v18.1 and v18.2: every scope, so out of the comparison on both sides
+              registry.HYBRID_CHECK, registry.EDGE_CHECK, registry.DNS_CHECK, registry.FLOW_LOGS_CHECK, registry.PEERING_NAT_CHECK}  # v18.3
     assert finished_checks(progress) - later == finished_checks(beta_progress) - {'Personalized Service Health', registry.RESILIENCE_CHECK, 'Essential Contacts'}
     assert sink.findings == []
 
@@ -426,7 +430,7 @@ def test_check_plan_is_the_legacy_plan_plus_the_beta_v1_checks(scope, legacy):
     legacy_names = set(legacy.run_all_checks.__code__.co_names)
     advisories = 'check_org_advisories' if scope == 'organization' else 'check_project_advisories'
     assert [name for name in names if name not in legacy_names] == \
-           BETA_V1_CHECKS + ['check_service_health_incidents', 'check_gke_supported_versions'] + V17_COMMON_CHECKS + V17_1_CHECKS + ['check_data_access_audit_logs', 'check_gke_operations', advisories]
+           BETA_V1_CHECKS + ['check_service_health_incidents', 'check_gke_supported_versions'] + V17_COMMON_CHECKS + V17_1_CHECKS + ['check_data_access_audit_logs', 'check_gke_operations'] + V18_3_CHECKS + [advisories]
     if scope == 'organization':  # the one legacy check the plan no longer runs
         assert {name for name in legacy_names if name.startswith('check_')} - set(names) == RETIRED_CHECKS
 
@@ -462,13 +466,14 @@ def test_runner_runs_the_scope_level_checks_when_there_is_no_project(scope, scop
     # recommendations of its own (the scope half of the split check). v17.1: the three SSRF-chain checks are scope-level.
     scope_level = ['Organization Policies', registry.RESILIENCE_CHECK, 'Snapshot Sprawl', 'Cloud SQL Extended Support',
                    'GKE Credential Exposure', 'Service Account Impersonation', 'VPC Service Controls Coverage',
-                   'Essential Contacts', 'Data Access Audit Logs', 'GKE Upgrade Readiness']  # v18.1: the contacts and audit pair; v18.2: GKE upgrade readiness
+                   'Essential Contacts', 'Data Access Audit Logs', 'GKE Upgrade Readiness',  # v18.1: the contacts and audit pair; v18.2: GKE upgrade readiness
+                   'Hybrid Connectivity', 'Load Balancer Edge', 'DNS Posture', 'VPC Flow Logs', 'VPC Peering & Cloud NAT']  # v18.3: the network edge
     if scope == 'organization':
-        assert ran[:11] == scope_level + ['Organization IAM Policy'] and registry.MISCELLANEOUS_CHECK in ran and 'IAM Least Privilege' in ran
+        assert ran[:16] == scope_level + ['Organization IAM Policy'] and registry.MISCELLANEOUS_CHECK in ran and 'IAM Least Privilege' in ran
     elif scope == 'folder':
-        assert ran == scope_level + ['IAM Least Privilege']
+        assert ran == scope_level + ['Open Firewall Rules', 'IAM Least Privilege']  # the split halves: firewall policies (v18.3), the folder's IAM recommendations
     else:
-        assert ran == scope_level
+        assert ran == scope_level + ['Open Firewall Rules']
 
 
 def test_runner_runs_checks_concurrently(one_project, monkeypatch):

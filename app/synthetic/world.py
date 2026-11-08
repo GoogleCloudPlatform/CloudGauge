@@ -242,6 +242,23 @@ class GkeOperations:
 
 
 @dataclass(frozen=True)
+class NetworkEdge:
+    """v18.3: what the network-edge rules read from a project's ``vpc-main`` and its edge (``provider._edge_assets``)."""
+    flow_logs: tuple  # per subnet (the profile's order): flow logs on
+    mtu: int  # of vpc-main: 1460 or 1500
+    peer_index: int  # -1: no peering; else the project whose vpc-main this one peers with
+    peering_active: bool  # the other side peered back
+    nat: str  # "none" | "default" (logging off, static 64 ports) | "tuned"
+    vpn: str  # "none" | "ha-one" (one tunnel on interface 0, not established) | "ha-two" (both interfaces, established) | "classic"
+    interconnect: str  # "none" | "single" (one attachment) | "redundant" (two, in two availability domains)
+    lb: str  # "none" | "http" (HTTP-only, no Cloud Armor, logging off) | "https-weak" (no SSL policy) | "https-modern"
+    dns_zone: str  # "none" | "plain" (public, DNSSEC off) | "signed" | "rsasha1"
+    dns_logging: bool  # a DNS policy with logging on vpc-main
+    firewall_policy: bool  # a network firewall policy with an open tcp:22 rule, attached to vpc-main
+    legacy_network: bool  # a legacy (subnet-less) network besides vpc-main
+
+
+@dataclass(frozen=True)
 class ProjectProfile:
     index: int
     project_id: str
@@ -305,6 +322,7 @@ class ProjectProfile:
     project_audit_configs: bool = False  # the project turns Data Access logs on for every service
     project_contact: bool = False  # the project has an Essential Contact of its own (SUSPENSION, LEGAL)
     gke_operations: dict = field(default_factory=dict)  # v18.2: cluster name -> GkeOperations
+    network_edge: NetworkEdge = None  # v18.3
 
     @property
     def project_number(self):
@@ -626,6 +644,15 @@ class SyntheticOrg:
                 integrity_monitoring=_chance(rng, 0.85), intranode_visibility=_chance(rng, 0.4), system_metrics=_chance(rng, 0.92),
                 control_plane_metrics=_chance(rng, 0.3), managed_prometheus=_chance(rng, 0.6), dns_cache=_chance(rng, 0.4), pdbs=tuple(pdbs))
 
+        # v18.3 (drawn last again): the network edge.
+        network_edge = NetworkEdge(
+            flow_logs=tuple(_chance(rng, 0.4) for _ in subnets), mtu=rng.choice([1460, 1460, 1500]),
+            peer_index=(index + 1) % self.n_projects if self.n_projects > 1 and _chance(rng, 0.35) else -1, peering_active=_chance(rng, 0.8),
+            nat=rng.choice(["none", "default", "default", "tuned"]), vpn=rng.choice(["none", "none", "ha-one", "ha-two", "classic"]),
+            interconnect=rng.choice(["none", "none", "none", "single", "redundant"]), lb=rng.choice(["none", "none", "http", "https-weak", "https-modern"]),
+            dns_zone=rng.choice(["none", "none", "plain", "signed", "rsasha1"]), dns_logging=_chance(rng, 0.3),
+            firewall_policy=_chance(rng, 0.15), legacy_network=_chance(rng, 0.05))
+
         return ProjectProfile(
             index=index, project_id=project_id, display_name=f"Synthetic Project {index}",
             folder_id=self.folder_of(index), denied=denied, osconfig_disabled=osconfig_disabled,
@@ -648,7 +675,7 @@ class SyntheticOrg:
             pap_enforced_buckets=pap_enforced_buckets,
             unprotected_buckets=unprotected_buckets, sink_buckets=sink_buckets, retention_buckets=retention_buckets, proxy_subnet=proxy_subnet,
             gke_auto_repair=gke_auto_repair, project_audit_configs=project_audit_configs, project_contact=project_contact,
-            gke_operations=gke_operations,
+            gke_operations=gke_operations, network_edge=network_edge,
         )
 
     # --- organization-level data ---

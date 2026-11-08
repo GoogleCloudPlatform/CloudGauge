@@ -245,8 +245,9 @@ def test_scan_completes_against_the_synthetic_organization(gcp, scope):
     # (v17.1), all under the scope; the perimeters (v17.1) come from the Access Context Manager API.
     # ... and the log sinks of the scope (v18.1: Cloud Storage Versioning's sink-destination rule); v18.2: the clusters again and
     # their PodDisruptionBudgets (GKE Upgrade Readiness).
-    assert by_method.get('asset.listAssets(org)', 0) == (10 if scope == 'organization' else 0)
-    assert by_method.get('asset.listAssets(folder)', 0) == (10 if scope == 'folder' else 0)
+    # v18.3: the five network-edge listings (and Open Firewall Rules' firewall-policy listing).
+    assert by_method.get('asset.listAssets(org)', 0) == (16 if scope == 'organization' else 0)
+    assert by_method.get('asset.listAssets(folder)', 0) == (16 if scope == 'folder' else 0)
     assert by_method.get('accesscontextmanager.servicePerimeters.list', 0) == 1
     metrics = provider.metrics.snapshot()
     assert metrics['total_calls'] > 50 and metrics['errors'] == {}

@@ -116,7 +116,7 @@ RESHAPED_CHECKS = {
     "Critical Org-Level Roles": ("18", RULE_CHANGED),  # groups are the practice; more roles; kind, condition, fix
     "Service Account Key Rotation": ("18", RULE_CHANGED),  # disabled and expired keys out; key ID, age, origin, fix
     "Public GCS Buckets": ("18", RULE_CHANGED),  # Public Access Prevention read; principal, roles, fix
-    "Open Firewall Rules": ("18", RULE_CHANGED),  # allow rules only, ::/0, ports, targets, fix
+    "Open Firewall Rules": ("18.3", RULE_CHANGED),  # v18.3: firewall policies judged like VPC rules
     "Cloud SQL Security": ("18", RULE_CHANGED),  # sslMode, authorized networks, kind, fix
     "VM External IPs": ("18", RULE_CHANGED),  # addresses held, not access configs; one row per instance
     "OS Config Agent Coverage": ("18", RULE_CHANGED),  # one row per VM; errors routed; Autopilot and worker fleets out
@@ -125,7 +125,7 @@ RESHAPED_CHECKS = {
     "Unattended Projects": ("18", ROWS_CHANGED),  # the project ID instead of its number
     # v18.1 (what is loose): the rules that now ask for the right thing.
     "Cloud Storage Versioning": ("18.1", RULE_CHANGED),  # sink/retention buckets Action Required; soft delete and lifecycle protect the rest
-    "VPC Configuration": ("18.1", RULE_CHANGED),  # proxy-only subnets out; the default network's subnets fold; PGA a look; Region, Fix
+    "VPC Configuration": ("18.3", RULE_CHANGED),  # v18.3: legacy networks (v18.1: proxy-only subnets, the default network folded)
     "Organization Log Sink": ("18.1", RULE_CHANGED),  # the built-in sinks no longer count; qualification per sink
     "Essential Contacts": ("18.1", RULE_CHANGED),  # invalid contacts out; every scope
     "Quota Utilization (>80%)": ("18.1", RULE_CHANGED),  # project-global quotas join (supersedes v17 rows changed, v18 COMMITTED_* out)

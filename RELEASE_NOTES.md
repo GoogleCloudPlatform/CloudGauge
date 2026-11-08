@@ -8,7 +8,110 @@ the test suite running inside the image, a zero-traffic canary revision scanned
 against a real organization, promotion, and a production scan compared fact for
 fact with the previous version's report.
 
-Versions are the image tags (`v5` … `v18.2`); the commit is the one that shipped.
+Versions are the image tags (`v5` … `v18.3`); the commit is the one that shipped.
+
+---
+
+## v18.3 — Network edge & reachability
+
+The second themed release. Interconnect and VPN outages and VM-to-VM
+connectivity are the widest networking clusters in the support-case evidence,
+and CIS §3 was the largest block of the benchmark the tool did not read. Every
+item is a setting in Cloud Asset Inventory — one listing per check under the
+scanned scope — except the *state* of a VPN tunnel, re-read from the Compute
+API per project that has tunnels (the inventory's copy of state can lag). No
+new API, no new role.
+
+### Added
+
+- **Hybrid Connectivity** (Reliability & Resilience, every scope): a VPN
+  tunnel that is not `ESTABLISHED` (**Action Required**, with the API's
+  detailed status); an HA VPN gateway whose tunnels all sit on one interface,
+  or that has none (**Action Required** — no redundancy, no SLA); a Classic
+  VPN gateway (*Investigation*: deprecated); Dedicated/Partner Interconnect
+  with fewer than two attachments per Cloud Router or all in one edge
+  availability domain, or an attachment that is not `OS_ACTIVE` (**Action
+  Required**); a Cloud Router with one BGP peer for two links
+  (*Investigation*). Rows `Project, Network, Region, Resource, Issue, Detail,
+  Fix`. Tunnel state comes from `vpnTunnels.aggregatedList` per project with
+  tunnels; a failed read keeps the inventory copy and says so.
+- **Load Balancer Edge** (Security & Identity, every scope): an **HTTP-only**
+  external load balancer (a forwarding rule to a target HTTP proxy whose URL
+  map has no HTTPS rule; `HTTP_LOAD_BALANCER`); **weak TLS** — a target HTTPS
+  or SSL proxy without an SSL policy, or with one below TLS 1.2 or on the
+  `COMPATIBLE` profile (CIS 3.9; `WEAK_SSL_POLICY`); an external backend
+  service, global or regional, **without Cloud Armor** or **without logging**
+  (`LOAD_BALANCER_LOGGING_DISABLED`) — all *Investigation Recommended*, each
+  with its `gcloud` line. Internal load balancers are not judged.
+- **DNS Posture** (Security & Identity, every scope): a public zone with
+  DNSSEC off (CIS 3.3, *Investigation*); a zone signing with `RSASHA1` (CIS
+  3.4/3.5, **Action Required**); a VPC network without a Cloud DNS server
+  policy that enables logging (CIS 2.12, *Investigation*).
+- **VPC Flow Logs** (Operational Excellence & Observability, every scope): a
+  VM subnet (`PRIVATE` purpose; proxy-only, PSC, NAT and GKE endpoint subnets
+  exempt) without flow logs (CIS 3.8, *Investigation*), with the sampled
+  (`0.5`, 5-second aggregation) fix.
+- **VPC Peering & Cloud NAT** (Reliability & Resilience, every scope): a
+  peering that is not `ACTIVE` (the other side has not peered back); peered
+  networks with different MTUs (absent = 1460; reported once per pair; private
+  services access and other Google-managed peers not judged); a Cloud NAT
+  with logging off; a Cloud NAT with static port allocation at the default 64
+  ports per VM — all *Investigation Recommended*. Secure Web Proxy's
+  auto-generated NATs are Google's and are not judged.
+
+### Changed
+
+- **Open Firewall Rules**: hierarchical and network **firewall policies**
+  under the scope (one inventory listing of
+  `compute.googleapis.com/FirewallPolicy`) are judged like VPC rules — enabled
+  *ingress allow* rules from `0.0.0.0/0` or `::/0`, the verdict by port family,
+  the policy named with where it is attached, the `firewall-policies rules
+  update` fix; a folder or project scan sees the policies under it, not the
+  ones inherited from above. In a sharded scan the scope shard reads the
+  policies and the project shards the VPC rules (`registry.SPLIT_CHECKS`).
+  `RESHAPED_CHECKS["Open Firewall Rules"] = ("18.3", RULE_CHANGED)`.
+- **VPC Configuration**: a **legacy network** (`IPv4Range`, no subnets) is
+  **Action Required** (CIS 3.2) — no subnets, no peering, no Private Google
+  Access; the fix is a new VPC network and migration.
+  `RESHAPED_CHECKS["VPC Configuration"] = ("18.3", RULE_CHANGED)`.
+- README: the five catalogue entries, the two extensions, the scope-shard
+  list; the roadmap row below. `VERSION = "18.3"`.
+
+### Tests
+
+- `tests/test_network_edge.py` (new): asset facts and link keys across API
+  versions; the production gateway (one tunnel, interface 0, down) and a
+  redundant one; one BGP peer for two links; a gateway without a tunnel; a
+  Classic gateway; Interconnect single, same-domain, redundant and
+  non-active; the fresh tunnel read and its failure; HTTP-only, weak TLS
+  (none / COMPATIBLE / TLS 1.1 / MODERN / RESTRICTED), Cloud Armor and
+  logging, internal schemes ignored, regional backend services; DNSSEC off,
+  RSASHA1, private zones, logging policies with and without logging; flow logs
+  by purpose and the legacy field; peerings (inactive, MTU mismatch once per
+  pair, peers outside the listing), NAT defaults and the `swg-autogen-`
+  exemption; the five checks end to end, the all-clear rows and the Error;
+  firewall-policy rules by port family, association and kind (network,
+  hierarchical, regional); legacy networks; the 18.3 lines.
+- Synthetic world (drawn last): per project an MTU, a peering (active or
+  not), flow logs per subnet, a NAT (default or tuned) beside a Secure Web
+  Proxy one, HA VPN with one or two tunnels, a Classic gateway, Interconnect
+  single or redundant, an external load balancer of three shapes, public zones
+  of three shapes, a DNS logging policy, a network firewall policy with an open
+  rule, a legacy network; the provider answers `vpnTunnels.aggregatedList`.
+  A listing the inventory refuses for one asset type is retried type by type
+  (the first canary named `RegionTargetHttpProxy`, which is no asset type, and
+  the whole check read Error). 1,052 tests.
+
+### Upgrade notes
+
+- Expect, on the first scan: the five names as *new check*; *Open Firewall
+  Rules* and *VPC Configuration* as *rule changed*. Where an HA VPN runs on
+  one tunnel, where a public zone is unsigned, where subnets have no flow logs
+  and a NAT runs on its defaults, the new checks will say so — those are the
+  cases behind the release.
+- Nothing to grant and no new API: inventory reads under
+  `roles/cloudasset.viewer`, the tunnel state under
+  `roles/compute.networkViewer`.
 
 ---
 
@@ -2352,7 +2455,7 @@ performance; modernization; enablement; roadmap and roadblocks).
 | **v18** | Legacy checks revalidated | *Shipped.* The twenty-two inherited checks re-read against today's APIs and Security Health Analytics: what was wrong corrected (a constant SCC tier, Monitoring needles no filter contains, list constraints scored as failures, `requireSsl`, deny rules as findings, the Google APIs agent as a finding, OS Config's swallowed errors, stopped VMs' released addresses), verdicts split between *Action Required* and *Investigation Recommended*, a `Fix` on every row that has one, *rule changed* on the Changes card. |
 | **v18.1** | Legacy checks revalidated — what is loose | *Shipped.* Cloud Storage Versioning scoped to log-sink destination buckets (soft delete, lifecycle rules and retention policies as protection); VPC Configuration without proxy-only subnets and with the default network's auto-subnets collapsed; Organization Log Sink's filter, state and `includeChildren`, and a **Data Access Audit Logs** check from the `auditConfigs` of the scanned resource and its ancestors; Essential Contacts without invalid contacts and in every scope; cost recommendations by priority with fix lines, **MIG Rightsizing**; GKE auto-repair; project-global quotas; firewall complexity retired; the best-practices table bundled in the image, replaceable by a `gs://` or `https://` URL and amended by an overrides file in the results bucket, with a provenance line in the report. No new role, no new API. |
 | **v18.2** | GKE upgrade readiness & hygiene | *Shipped.* **GKE Upgrade Readiness** — maintenance windows, active exclusions, upgrade notifications and security bulletins, surge settings, version skew, and the **PodDisruptionBudgets** that block drains, read from Cloud Asset Inventory; **GKE Observability** — system and control-plane metrics, Managed Prometheus, NodeLocal DNSCache; GKE Node Hardening gains integrity monitoring, intra-node visibility, routes-based and alpha clusters. No new role, no new API. |
-| **v18.3** | Network edge & reachability | Interconnect/VPN redundancy, load balancer health-check firewall reachability, Cloud Armor on external load balancers, weak TLS policies and HTTP-only load balancers, DNSSEC, VPC flow logs, DNS logging, firewall policies, Cloud NAT capacity. |
+| **v18.3** | Network edge & reachability | *Shipped.* **Hybrid Connectivity** (tunnels down, HA VPN on one interface, Classic VPN, Interconnect without a redundant attachment, one BGP peer for two links), **Load Balancer Edge** (HTTP-only, weak TLS, no Cloud Armor, logging off), **DNS Posture** (DNSSEC, RSASHA1, Cloud DNS logging), **VPC Flow Logs**, **VPC Peering & Cloud NAT** (inactive peerings, MTU mismatch, NAT logging and port allocation); Open Firewall Rules reads firewall policies; VPC Configuration flags legacy networks. No new role, no new API. |
 | **v18.4** | Data governance | Public BigQuery datasets and tables, BigQuery time travel and expiration defaults, Cloud SQL flag packs, AlloyDB exposure and backups, KMS rotation and IAM, API keys. |
 | **v18.5** | VM hardening & identities | Default service accounts and scopes on VMs, OS Login, project-wide SSH keys, serial ports, Shielded VM, public images, non-organization members, administrative and unused service accounts. |
 | **v18.6** | Forecasts, budgets and spend | *Un-held 2026-11-07 (the number taken when the data path was found ready).* A **spend briefing** from the organization's **billing export to BigQuery** (`BILLING_EXPORT=<project>.<dataset>`, a dataset-level read, no billing-account IAM; *Informational — not configured* when unset): spend by project and service, month-to-date against last month, a trend forecast, week-over-week anomaly flags, and the Scorecard's Efficiency line grounded in real spend; **commitment coverage** from the export's credits (committed-use credits against eligible spend); the **spend-based commitment recommendations** from the Recommender export (`RECOMMENDATIONS_EXPORT`) once that export is shown to carry billing-account rows. Budget coverage (Budgets API: billing-account IAM) and Capacity Planner forecasts (an organization-level role) stay out, possible later as optional capabilities behind an operator grant `tools/deploy.sh` never performs. |

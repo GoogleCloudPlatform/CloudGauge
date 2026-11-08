@@ -39,6 +39,18 @@ from app.checks.gke_operations import UPGRADE_READINESS_CHECK, check_gke_operati
 from app.checks.gke_versions import CHECK_NAME as GKE_VERSIONS_CHECK
 from app.checks.gke_versions import check_gke_supported_versions
 from app.checks.network import run_network_insights
+from app.checks.network_edge import (
+    DNS_CHECK,
+    EDGE_CHECK,
+    FLOW_LOGS_CHECK,
+    HYBRID_CHECK,
+    PEERING_NAT_CHECK,
+    check_dns_posture,
+    check_flow_logs,
+    check_hybrid_connectivity,
+    check_load_balancer_edge,
+    check_peering_and_nat,
+)
 from app.checks.operations import (
     DATA_ACCESS_CHECK,
     QUOTA_RECOMMENDATIONS_CHECK,
@@ -136,7 +148,7 @@ def build_check_plan(scope, scope_id, job_id, all_projects, active_zones, active
         CheckSpec("Security & Identity", "Project IAM Hygiene", check_project_iam_policy, (scope_id, all_projects, job_id)),
         CheckSpec("Security & Identity", "Service Account Key Rotation", check_sa_key_rotation, (scope_id, all_projects, job_id)),
         CheckSpec("Security & Identity", "Public GCS Buckets", check_public_buckets, (scope_id, all_projects, job_id)),
-        CheckSpec("Security & Identity", "Open Firewall Rules", check_open_firewall_rules, (scope_id, all_projects, job_id)),
+        CheckSpec("Security & Identity", "Open Firewall Rules", check_open_firewall_rules, (scope, scope_id, all_projects, job_id)),  # v18.3: + the scope's firewall policies
         CheckSpec("Cost Optimization", "Cost-Saving Recommendations", run_cost_recommendations, (scope_id, all_projects, active_zones, active_regions, job_id, location_errors)),
         CheckSpec("Reliability & Resilience", "GCS Bucket Versioning", check_storage_versioning, (scope, scope_id, all_projects, job_id)),
         CheckSpec("Reliability & Resilience", "GKE Hygiene", check_gke_hygiene, (scope_id, all_projects, job_id)),
@@ -171,6 +183,12 @@ def build_check_plan(scope, scope_id, job_id, all_projects, active_zones, active
         CheckSpec("Operational Excellence & Observability", DATA_ACCESS_CHECK, check_data_access_audit_logs, (scope, scope_id, job_id)),
         # v18.2: GKE Upgrade Readiness and GKE Observability, from the scope's cluster and PodDisruptionBudget listings
         CheckSpec("Reliability & Resilience", UPGRADE_READINESS_CHECK, check_gke_operations, (scope, scope_id, job_id)),
+        # v18.3: the network edge, from the scope's inventory (five listings) and one tunnel-state read per project with tunnels
+        CheckSpec("Reliability & Resilience", HYBRID_CHECK, check_hybrid_connectivity, (scope, scope_id, job_id)),
+        CheckSpec("Security & Identity", EDGE_CHECK, check_load_balancer_edge, (scope, scope_id, job_id)),
+        CheckSpec("Security & Identity", DNS_CHECK, check_dns_posture, (scope, scope_id, job_id)),
+        CheckSpec("Operational Excellence & Observability", FLOW_LOGS_CHECK, check_flow_logs, (scope, scope_id, job_id)),
+        CheckSpec("Reliability & Resilience", PEERING_NAT_CHECK, check_peering_and_nat, (scope, scope_id, job_id)),
     ]
 
     if scope == 'organization':
@@ -200,6 +218,7 @@ SCOPE_LEVEL_CHECKS = frozenset({
     "Organization Audit Logging", "Essential Contacts", DATA_ACCESS_CHECK, RESILIENCE_CHECK,
     SNAPSHOT_SPRAWL_CHECK, SQL_VERSIONS_CHECK, CREDENTIAL_EXPOSURE_CHECK, IMPERSONATION_CHECK, VPC_SC_CHECK,
     UPGRADE_READINESS_CHECK,  # v18.2: two listings under the scope
+    HYBRID_CHECK, EDGE_CHECK, DNS_CHECK, FLOW_LOGS_CHECK, PEERING_NAT_CHECK,  # v18.3: one listing each
 })
 # The checks that do both: scope-wide work plus per-project work. Shards split them
 # with keyword flags: the scope shard runs the first set, the project shards the second
@@ -207,7 +226,9 @@ SCOPE_LEVEL_CHECKS = frozenset({
 # half of each runs in the scopes listed: the organization's insights exist for an
 # organization only; an organization or a folder has IAM recommendations of its own.
 MISCELLANEOUS_CHECK = "Miscellaneous Checks"
-SPLIT_CHECKS = {
+SPLIT_CHECKS = {  # in plan order
+    # v18.3: the scope's firewall policies (one inventory listing) in the scope shard, the VPC rules per project shard.
+    "Open Firewall Rules": (("organization", "folder", "project"), {"project_rules": False}, {"policies": False}),
     MISCELLANEOUS_CHECK: (("organization",), {"project_checks": False}, {"org_insights": False}),
     IAM_CHECK: (("organization", "folder"), {"project_level": False}, {"scope_level": False}),
 }

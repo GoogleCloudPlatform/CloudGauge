@@ -784,9 +784,7 @@ class SyntheticGcp:
                 found += self._sink_assets(profile)
             if "policy.k8s.io/PodDisruptionBudget" in asset_types:
                 found += [a for c in profile.gke_clusters for a in self._pdb_assets(profile, c)]
-            if "compute.googleapis.com/ForwardingRule" in asset_types:
-                found += [SimpleNamespace(name=f"//compute.googleapis.com/projects/{project_id}/regions/{r}/forwardingRules/lb-{r}",
-                                          resource=SimpleNamespace(data={"name": f"lb-{r}"})) for r in profile.forwarding_rule_regions]
+            found += self._edge_assets(profile, asset_types)
             return found
         # Folder- or organization-wide listing: one pass over the projects in scope.
         folder_id = parent.split("/", 1)[1] if parent.startswith("folders/") else None
@@ -799,6 +797,7 @@ class SyntheticGcp:
                 found += self._sink_assets(profile)
             if "policy.k8s.io/PodDisruptionBudget" in asset_types:
                 found += [a for c in profile.gke_clusters for a in self._pdb_assets(profile, c)]
+            found += self._edge_assets(profile, asset_types)
         self.call("asset", "listAssets(folder)" if folder_id else "listAssets(org)", pages=max(1, math.ceil(len(found) / PAGE_SIZE)))
         return found
 
@@ -808,6 +807,112 @@ class SyntheticGcp:
         return [SimpleNamespace(name=f"//logging.googleapis.com/projects/{profile.project_id}/sinks/sink-{i}",
                                 resource=SimpleNamespace(data={"name": f"sink-{i}", "destination": f"storage.googleapis.com/{bucket}"}))
                 for i, bucket in enumerate(profile.sink_buckets)]
+
+    def _edge_assets(self, profile, asset_types):
+        """The project's network-edge assets (v18.3) for the asset types asked: its ``vpc-main`` network and subnets, a legacy network,
+        a Cloud Router with a NAT, HA or Classic VPN, Interconnect attachments, an external load balancer, DNS zones and policies, a
+        firewall policy — as Asset Inventory shows them (``NetworkEdge``). ``ForwardingRule`` assets double as the Incident Exposure
+        footprint of earlier releases (``forwarding_rule_regions``)."""
+        edge, project_id, number = profile.network_edge, profile.project_id, profile.project_number
+        if edge is None:
+            return []
+        compute = f"https://www.googleapis.com/compute/v1/projects/{project_id}"
+        region = profile.subnets[0][1] if profile.subnets else "us-central1"
+        found = []
+
+        def asset(service, path, data):
+            found.append(SimpleNamespace(name=f"//{service}.googleapis.com/projects/{project_id}/{path}",
+                                         resource=SimpleNamespace(data=data, parent=f"//cloudresourcemanager.googleapis.com/projects/{number}")))
+
+        if "compute.googleapis.com/Network" in asset_types:
+            peerings = []
+            if edge.peer_index >= 0:
+                peer_id = self.world.project_id(edge.peer_index)
+                peerings.append({"name": f"to-{peer_id}", "network": f"https://www.googleapis.com/compute/v1/projects/{peer_id}/global/networks/vpc-main",
+                                 "state": "ACTIVE" if edge.peering_active else "INACTIVE"})
+            peerings.append({"name": "servicenetworking-googleapis-com", "network": "https://www.googleapis.com/compute/v1/projects/p-google/global/networks/sn", "state": "ACTIVE"})
+            asset("compute", "global/networks/vpc-main", {"name": "vpc-main", "selfLink": f"{compute}/global/networks/vpc-main", "mtu": edge.mtu, "peerings": peerings})
+            if edge.legacy_network:
+                asset("compute", "global/networks/legacy-net", {"name": "legacy-net", "selfLink": f"{compute}/global/networks/legacy-net", "IPv4Range": "10.240.0.0/16"})
+        if "compute.googleapis.com/Subnetwork" in asset_types:
+            for (name, subnet_region, pga), logs in zip(profile.subnets, edge.flow_logs):
+                asset("compute", f"regions/{subnet_region}/subnetworks/{name}",
+                      {"name": name, "region": f"{compute}/regions/{subnet_region}", "network": f"{compute}/global/networks/vpc-main", "purpose": "PRIVATE",
+                       "privateIpGoogleAccess": pga, "enableFlowLogs": logs, "logConfig": {"enable": logs}})
+            if profile.proxy_subnet and profile.subnets:
+                asset("compute", f"regions/{region}/subnetworks/proxy-only", {"name": "proxy-only", "region": f"{compute}/regions/{region}", "purpose": "REGIONAL_MANAGED_PROXY",
+                                                                             "network": f"{compute}/global/networks/vpc-main", "enableFlowLogs": False})
+        if "compute.googleapis.com/Router" in asset_types and (edge.nat != "none" or edge.vpn.startswith("ha") or edge.interconnect != "none"):
+            nats = [] if edge.nat == "none" else [{"name": "nat-main", "natIpAllocateOption": "AUTO_ONLY", "logConfig": {"enable": edge.nat == "tuned", "filter": "ERRORS_ONLY"},
+                                                   **({"enableDynamicPortAllocation": True, "minPortsPerVm": 64, "maxPortsPerVm": 4096} if edge.nat == "tuned" else {})}]
+            if edge.nat != "none":
+                nats.append({"name": "swg-autogen-nat", "natIpAllocateOption": "AUTO_ONLY", "logConfig": {"enable": True, "filter": "ERRORS_ONLY"}})
+            peers = [{"name": "peer-0", "enable": "TRUE"}] + ([{"name": "peer-1", "enable": "TRUE"}] if edge.vpn == "ha-two" or edge.interconnect == "redundant" else [])
+            asset("compute", f"regions/{region}/routers/router-main", {"name": "router-main", "region": f"{compute}/regions/{region}", "network": f"{compute}/global/networks/vpc-main",
+                                                                        "selfLink": f"{compute}/regions/{region}/routers/router-main", "bgp": {"asn": 65001}, "bgpPeers": peers, "nats": nats})
+        router = f"{compute}/regions/{region}/routers/router-main"
+        if "compute.googleapis.com/VpnGateway" in asset_types and edge.vpn.startswith("ha"):
+            asset("compute", f"regions/{region}/vpnGateways/vpn-gw", {"name": "vpn-gw", "region": f"{compute}/regions/{region}", "network": f"{compute}/global/networks/vpc-main",
+                                                                       "selfLink": f"{compute}/regions/{region}/vpnGateways/vpn-gw", "vpnInterfaces": [{"id": 0}, {"id": 1}]})
+        if "compute.googleapis.com/VpnTunnel" in asset_types and edge.vpn.startswith("ha"):
+            for interface in ([0] if edge.vpn == "ha-one" else [0, 1]):
+                asset("compute", f"regions/{region}/vpnTunnels/tunnel-{interface}",
+                      {"name": f"tunnel-{interface}", "region": f"{compute}/regions/{region}", "vpnGateway": f"{compute}/regions/{region}/vpnGateways/vpn-gw",
+                       "vpnGatewayInterface": interface, "router": router, **self._tunnel_state(edge, interface)})
+        if "compute.googleapis.com/TargetVpnGateway" in asset_types and edge.vpn == "classic":
+            asset("compute", f"regions/{region}/targetVpnGateways/classic-gw", {"name": "classic-gw", "region": f"{compute}/regions/{region}", "network": f"{compute}/global/networks/vpc-main"})
+        if "compute.googleapis.com/InterconnectAttachment" in asset_types and edge.interconnect != "none":
+            for n, domain in enumerate(["AVAILABILITY_DOMAIN_1"] + (["AVAILABILITY_DOMAIN_2"] if edge.interconnect == "redundant" else [])):
+                asset("compute", f"regions/{region}/interconnectAttachments/attach-{n}", {"name": f"attach-{n}", "region": f"{compute}/regions/{region}", "router": router,
+                                                                                         "edgeAvailabilityDomain": domain, "operationalStatus": "OS_ACTIVE", "type": "DEDICATED"})
+        if "compute.googleapis.com/ForwardingRule" in asset_types:
+            for r in profile.forwarding_rule_regions:  # the Incident Exposure footprint: internal passthrough rules, no edge rows
+                asset("compute", f"regions/{r}/forwardingRules/lb-{r}", {"name": f"lb-{r}", "loadBalancingScheme": "INTERNAL", "region": f"{compute}/regions/{r}"})
+        if edge.lb != "none" and "compute.googleapis.com/GlobalForwardingRule" in asset_types:
+            proxy_kind = "targetHttpProxies" if edge.lb == "http" else "targetHttpsProxies"
+            asset("compute", "global/forwardingRules/edge-fr", {"name": "edge-fr", "loadBalancingScheme": "EXTERNAL", "portRange": "80-80" if edge.lb == "http" else "443-443",
+                                                               "IPProtocol": "TCP", "target": f"{compute}/global/{proxy_kind}/edge-proxy"})
+        if edge.lb == "http" and "compute.googleapis.com/TargetHttpProxy" in asset_types:
+            asset("compute", "global/targetHttpProxies/edge-proxy", {"name": "edge-proxy", "selfLink": f"{compute}/global/targetHttpProxies/edge-proxy", "urlMap": f"{compute}/global/urlMaps/edge-map"})
+        if edge.lb.startswith("https") and "compute.googleapis.com/TargetHttpsProxy" in asset_types:
+            asset("compute", "global/targetHttpsProxies/edge-proxy", {"name": "edge-proxy", "selfLink": f"{compute}/global/targetHttpsProxies/edge-proxy", "urlMap": f"{compute}/global/urlMaps/edge-map",
+                                                                     **({"sslPolicy": f"{compute}/global/sslPolicies/modern-tls"} if edge.lb == "https-modern" else {})})
+        if edge.lb == "https-modern" and "compute.googleapis.com/SslPolicy" in asset_types:
+            asset("compute", "global/sslPolicies/modern-tls", {"name": "modern-tls", "selfLink": f"{compute}/global/sslPolicies/modern-tls", "profile": "MODERN", "minTlsVersion": "TLS_1_2"})
+        if edge.lb != "none" and "compute.googleapis.com/BackendService" in asset_types:
+            armored = edge.lb == "https-modern"
+            asset("compute", "global/backendServices/edge-bes", {"name": "edge-bes", "loadBalancingScheme": "EXTERNAL", "protocol": "HTTP", "logConfig": {"enable": armored},
+                                                                **({"securityPolicy": f"{compute}/global/securityPolicies/edge"} if armored else {})})
+        if edge.dns_zone != "none" and "dns.googleapis.com/ManagedZone" in asset_types:
+            config = {"none": {}, "plain": {"state": "off"}, "signed": {"state": "on", "defaultKeySpecs": [{"algorithm": "ecdsap256sha256", "keyType": "keySigning"}]},
+                      "rsasha1": {"state": "on", "defaultKeySpecs": [{"algorithm": "rsasha1", "keyType": "keySigning"}, {"algorithm": "rsasha1", "keyType": "zoneSigning"}]}}[edge.dns_zone]
+            asset("dns", "managedZones/public-zone", {"name": "public-zone", "dnsName": f"{project_id}.example.", "visibility": "public", "dnssecConfig": config})
+        if edge.dns_logging and "dns.googleapis.com/Policy" in asset_types:
+            asset("dns", "policies/dns-logging", {"name": "dns-logging", "enableLogging": True, "networks": [{"networkUrl": f"{compute}/global/networks/vpc-main"}]})
+        if edge.firewall_policy and "compute.googleapis.com/FirewallPolicy" in asset_types:
+            asset("compute", "global/firewallPolicies/900001", {"name": "900001", "displayName": "edge-policy", "shortName": "edge-policy",
+                                                              "associations": [{"name": "vpc-main", "attachmentTarget": f"projects/{project_id}/global/networks/vpc-main"}],
+                                                              "rules": [{"priority": 100, "direction": "INGRESS", "action": "allow", "disabled": False,
+                                                                         "match": {"srcIpRanges": ["0.0.0.0/0"], "layer4Configs": [{"ipProtocol": "tcp", "ports": ["22"]}]}},
+                                                                        {"priority": 2147483647, "direction": "INGRESS", "action": "goto_next", "match": {"srcIpRanges": ["0.0.0.0/0"], "layer4Configs": [{"ipProtocol": "all"}]}}]})
+        return found
+
+    @staticmethod
+    def _tunnel_state(edge, interface):
+        """The state of a synthetic tunnel: established on an ``ha-two`` gateway, waiting on an ``ha-one`` one."""
+        if edge.vpn == "ha-two":
+            return {"status": "ESTABLISHED", "detailedStatus": "Tunnel is up and running."}
+        return {"status": "NO_INCOMING_PACKETS", "detailedStatus": "No incoming packets from peer"}
+
+    def _h_compute_vpnTunnels_aggregatedList(self, kw, project_id):
+        """The tunnels' current state (v18.3: *Hybrid Connectivity* re-reads it from the API; the synthetic world agrees with its inventory)."""
+        self.call("compute", "vpnTunnels.aggregatedList", project_id=project_id, style="http")
+        profile, items = self.world.project(project_id), {}
+        edge = profile.network_edge
+        if edge and edge.vpn.startswith("ha"):
+            region = profile.subnets[0][1] if profile.subnets else "us-central1"
+            items[f"regions/{region}"] = {"vpnTunnels": [{"name": f"tunnel-{i}", **self._tunnel_state(edge, i)} for i in ([0] if edge.vpn == "ha-one" else [0, 1])]}
+        return {"items": items}
 
     @staticmethod
     def _pdb_assets(profile, cluster):

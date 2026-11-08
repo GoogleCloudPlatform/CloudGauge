@@ -28,6 +28,7 @@ import logging
 import re
 from datetime import datetime, timezone
 
+from google.cloud import asset_v1
 from googleapiclient.errors import HttpError
 
 from app.config import SCOPES
@@ -541,7 +542,7 @@ IAP_RANGE = "35.235.240.0/20"  # Identity-Aware Proxy TCP forwarding: the source
 SENSITIVE_PORTS = frozenset({21, 22, 23, 25, 53, 110, 135, 137, 138, 139, 143, 389, 445, 636, 1433, 1434, 1521, 2049, 2375, 2376,
                              3306, 3389, 5432, 5900, 5901, 6379, 7000, 7001, 8086, 9042, 9092, 9200, 9300, 10250, 11211, 27017, 27018})
 WEB_PORTS = frozenset({80, 443, 8080, 8443})
-FIREWALL_ALL_CLEAR = "No enabled ingress rule allows traffic from the internet (0.0.0.0/0 or ::/0)."
+FIREWALL_ALL_CLEAR = "No enabled ingress rule — in a VPC firewall or a firewall policy — allows traffic from the internet (0.0.0.0/0 or ::/0)."
 
 
 def rule_protocols(rule):
@@ -632,21 +633,67 @@ def open_firewall_rows(project_id, rules):
     return rows
 
 
-def check_open_firewall_rules(scope_id, all_projects, job_id, *, sink):
+FIREWALL_POLICY_ASSET = "compute.googleapis.com/FirewallPolicy"
+
+
+def policy_rule_as_vpc_rule(policy, rule):
+    """A firewall-policy rule in the shape of a VPC rule, so ``open_rule_status`` and ``rule_protocols`` judge both alike."""
+    match = rule.get("match") or {}
+    return {"name": f"{policy.get('displayName') or policy.get('shortName') or policy.get('name')} #{rule.get('priority')}",
+            "direction": rule.get("direction", "INGRESS"), "disabled": rule.get("disabled", False),
+            "allowed": [{"IPProtocol": c.get("ipProtocol"), "ports": c.get("ports") or []} for c in (match.get("layer4Configs") or [])] if str(rule.get("action") or "").lower() == "allow" else [],
+            "sourceRanges": match.get("srcIpRanges") or [], "priority": rule.get("priority"),
+            "targetServiceAccounts": rule.get("targetServiceAccounts") or [], "targetTags": [t.get("name", "") for t in (rule.get("targetSecureTags") or [])]}
+
+
+def firewall_policy_rows(asset_name, policy):
+    """The rows of a hierarchical or network firewall policy's enabled *ingress allow* rules open to the internet (v18.3):
+    the same verdict by port family as a VPC rule, the policy named with where it is attached."""
+    parts = asset_name.split("/")
+    project_id = parts[parts.index("projects") + 1] if "projects" in parts else "(hierarchical)"
+    targets = ", ".join("/".join(str((a or {}).get("attachmentTarget") or "").rsplit("/", 2)[-2:]) for a in (policy.get("associations") or [])) or "not attached"
+    kind = "network-firewall-policies" if "projects" in parts else "firewall-policies"
+    region = parts[parts.index("regions") + 1] if "regions" in parts else ""
+    rows = []
+    for rule in policy.get("rules") or []:
+        shaped = policy_rule_as_vpc_rule(policy, rule)
+        for row in open_firewall_rows(project_id, [shaped]):
+            flags = f"--firewall-policy={policy.get('name')} --src-ip-ranges=<your CIDRs>" + (f" --region={region}" if region else " --global-firewall-policy" if kind == "network-firewall-policies" else "")
+            row["VPC"] = f"policy → {targets}"
+            row["Fix"] = f"gcloud compute {kind} rules update {rule.get('priority')} {flags}" + (f" --project={project_id}" if project_id != "(hierarchical)" else "")
+            row["Rule"] = shaped["name"]
+            rows.append(row)
+    return rows
+
+
+def check_open_firewall_rules(scope, scope_id, all_projects, job_id, *, sink, policies=True, project_rules=True):
     """
     Scans all projects for VPC firewall rules open to the internet.
 
     v18: only enabled *ingress allow* rules from ``0.0.0.0/0`` or ``::/0`` are findings (deny rules
     were counted before, IPv6 was not), every page of rules is read, the row shows what the rule
     opens and to whom, the verdict depends on the ports (``open_rule_status``), and the fix is the
-    IAP range for SSH/RDP rules. Firewall policies (hierarchical and network) are a later release.
+    IAP range for SSH/RDP rules. v18.3: hierarchical and network **firewall policies** under the scope
+    (one Asset Inventory listing) are judged the same way; a folder or project scan sees the policies
+    under it, not the ones inherited from above. A sharded scan splits the two halves (``registry.SPLIT_CHECKS``):
+    the scope shard runs with ``project_rules=False``, the project shards with ``policies=False``.
 
     Args:
+        scope (str): ``organization``, ``folder`` or ``project``.
         scope_id (str): The scope ID.
         all_projects (list): A list of project dictionaries.
     """
     print(f"🔥 [{job_id}] Checking for {FIREWALL_CHECK} in parallel...")
     skipped = NotChecked(FIREWALL_CHECK, resource_apis=("compute.googleapis.com",))
+    policy_findings = []
+    if policies:
+        try:
+            credentials, _ = gcp.auth_default(scopes=SCOPES)
+            request = {"parent": f"{scope}s/{scope_id}", "asset_types": [FIREWALL_POLICY_ASSET], "content_type": asset_v1.ContentType.RESOURCE}
+            for asset in gcp.asset_client(credentials).list_assets(request=request):
+                policy_findings.extend(firewall_policy_rows(getattr(asset, "name", "") or "", getattr(getattr(asset, "resource", None), "data", None) or {}))
+        except Exception as e:
+            skipped.add(f"{scope}s/{scope_id}", e, detail="firewall policies (the VPC rules were still read)")
 
     def check_project(p):
         project_id = p['projectId']
@@ -663,8 +710,8 @@ def check_open_firewall_rules(scope_id, all_projects, job_id, *, sink):
             skipped.add(project_id, e)
             return []
 
-    all_findings = []
-    for project in all_projects:
+    all_findings = list(policy_findings)
+    for project in (all_projects if project_rules else []):
         all_findings.extend(check_project(project))
     sink.write_finding(job_id, "Open_Firewall_Rules", result_record(FIREWALL_CHECK, all_findings, FIREWALL_ALL_CLEAR))
     skipped.write(sink, job_id)
@@ -759,7 +806,7 @@ IPV6_PGA_VALUES = ("ENABLE_OUTBOUND_VM_ACCESS_TO_GOOGLE", "ENABLE_BIDIRECTIONAL_
 # The subnet GKE creates for a cluster's private control-plane endpoint (``gke-<cluster>-<hash>-pe-subnet``, purpose PRIVATE,
 # no PGA): Google's, carries no VM, cannot usefully be changed — never a row. Seen on the v18.1 probe cluster.
 GKE_ENDPOINT_SUBNET_DESCRIPTION = "Control Plane Endpoint Subnetwork"
-VPC_ALL_CLEAR = "No default VPC network, and every subnet that can have Private Google Access has it."
+VPC_ALL_CLEAR = "No default or legacy VPC network, and every subnet that can have Private Google Access has it."
 
 
 def subnet_has_private_google_access(subnet):
@@ -787,6 +834,11 @@ def vpc_rows(project_id, networks, subnets):
     """
     default_networks = {str(n.get("selfLink") or n.get("name")).rsplit("/", 1)[-1] for n in networks if n.get("name") == "default"}
     rows, folded = [], 0
+    for network in networks:  # v18.3: a legacy network (CIS 3.2) — subnet-less, no peering, no Private Google Access, no regional firewalls
+        if network.get("IPv4Range"):
+            rows.append({"Project": project_id, "Network / Subnet": f"{network.get('name')} (legacy network)", "Region": "global",
+                         "Issue": f"Legacy network ({network.get('IPv4Range')}): no subnets, no peering, no Private Google Access.",
+                         "Fix": "Create a VPC network and migrate the instances: a legacy network cannot be converted in place.", "_status": ACTION_REQUIRED})
     for subnet in subnets:
         if subnet_is_exempt(subnet) or subnet_has_private_google_access(subnet):
             continue

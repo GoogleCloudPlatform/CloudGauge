@@ -386,10 +386,10 @@ def test_firewall_check_reads_every_page_and_writes_the_all_clear_row(gcp):
 
     gcp.discovery.apis['compute'] = Compute()
     sink = Sink()
-    security.check_open_firewall_rules('1', [{'projectId': 'web-prod'}], JOB, sink=sink)
+    security.check_open_firewall_rules('organization', '1', [{'projectId': 'web-prod'}], JOB, sink=sink)
     assert [r['Rule'] for r in sink.by_check()['Open Firewall Rules']['Finding']] == ['allow-all']  # from the second page
     sink = Sink()
-    security.check_open_firewall_rules('1', [{'projectId': 'clean'}], JOB, sink=sink)
+    security.check_open_firewall_rules('organization', '1', [{'projectId': 'clean'}], JOB, sink=sink)
     assert sink.by_check()['Open Firewall Rules'] == {'Check': 'Open Firewall Rules', 'Finding': [{'Status': security.FIREWALL_ALL_CLEAR}], 'Status': C}
 
 
@@ -768,10 +768,11 @@ def test_a_policy_level_that_cannot_be_listed_is_an_error_not_a_silent_pass(gcp)
 
 def test_every_revalidated_check_draws_its_line_at_v18():
     revalidated = ['Organization Policies', 'Security Command Center Status', 'Primitive Roles (Owner or Editor)', 'Critical Org-Level Roles', 'Service Account Key Rotation',
-                   'Public GCS Buckets', 'Open Firewall Rules', 'Cloud SQL Security', 'VM External IPs', 'OS Config Agent Coverage',
+                   'Public GCS Buckets', 'Cloud SQL Security', 'VM External IPs', 'OS Config Agent Coverage',
                    'Monitoring Alert Coverage', *network.NETWORK_INSIGHT_TYPES]
     assert {name: RESHAPED_CHECKS[name] for name in revalidated} == {name: ('18', RULE_CHANGED) for name in revalidated}
     assert RESHAPED_CHECKS['GKE Hygiene'] == RESHAPED_CHECKS['Quota Utilization (>80%)'] == ('18.1', RULE_CHANGED)  # redrawn again in v18.1
+    assert RESHAPED_CHECKS['Open Firewall Rules'] == ('18.3', RULE_CHANGED)  # redrawn again in v18.3 (firewall policies)
     assert RESHAPED_CHECKS['Unattended Projects'] == ('18', 'rows changed')
     for name in revalidated + ['Unattended Projects']:
         assert name in CATEGORY_MAP

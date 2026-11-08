@@ -163,6 +163,11 @@ def test_scope_and_project_plans_partition_the_full_plan(scope):
     assert misc_in_project.func.keywords == {'org_insights': False} and misc_in_project.args[2] is plist
     iam_in_project = next(spec for spec in project_plan if spec.name == 'IAM Least Privilege')
     assert iam_in_project.func.keywords == {'scope_level': False} and iam_in_project.args[2] is plist
+    # v18.3: Open Firewall Rules reads the scope's firewall policies in the scope shard and the VPC rules per project shard.
+    fw_in_scope = next(spec for spec in split if spec.name == 'Open Firewall Rules')
+    assert fw_in_scope.func.keywords == {'project_rules': False} and fw_in_scope.args[2] == []
+    fw_in_project = next(spec for spec in project_plan if spec.name == 'Open Firewall Rules')
+    assert fw_in_project.func.keywords == {'policies': False} and fw_in_project.args[2] is plist
 
 
 def test_project_plan_passes_the_shard_projects_and_locations():
