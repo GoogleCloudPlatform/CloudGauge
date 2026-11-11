@@ -76,6 +76,12 @@ variable "cost_allocation_labels" {
   default     = []
 }
 
+variable "trusted_domains" {
+  description = "Domains besides the organization's primary one whose users and groups the External Principals check does not list, e.g. [\"partner.example\"]. Empty: the primary domain alone."
+  type        = list(string)
+  default     = []
+}
+
 variable "bigquery_dataset" {
   description = "Export every finished scan to this BigQuery dataset in the project (created in the region). Empty: no export."
   type        = string

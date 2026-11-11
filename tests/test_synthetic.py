@@ -246,8 +246,8 @@ def test_scan_completes_against_the_synthetic_organization(gcp, scope):
     # ... and the log sinks of the scope (v18.1: Cloud Storage Versioning's sink-destination rule); v18.2: the clusters again and
     # their PodDisruptionBudgets (GKE Upgrade Readiness).
     # v18.3: the five network-edge listings (and Open Firewall Rules' firewall-policy listing).
-    assert by_method.get('asset.listAssets(org)', 0) == (21 if scope == 'organization' else 0)
-    assert by_method.get('asset.listAssets(folder)', 0) == (21 if scope == 'folder' else 0)
+    assert by_method.get('asset.listAssets(org)', 0) == (22 if scope == 'organization' else 0)  # v18.5: the identity checks search instead
+    assert by_method.get('asset.listAssets(folder)', 0) == (22 if scope == 'folder' else 0)
     assert by_method.get('accesscontextmanager.servicePerimeters.list', 0) == 1
     metrics = provider.metrics.snapshot()
     assert metrics['total_calls'] > 50 and metrics['errors'] == {}

@@ -342,7 +342,10 @@ V18_2_CHECKS = ['check_gke_operations']
 V18_3_CHECKS = ['check_hybrid_connectivity', 'check_load_balancer_edge', 'check_dns_posture', 'check_flow_logs', 'check_peering_and_nat']
 # v18.4: data governance, five scope-level checks after the network edge.
 V18_4_CHECKS = ['check_bigquery_governance', 'check_sql_flags', 'check_alloydb_posture', 'check_kms_keys', 'check_api_keys']
-LATER_CHECKS = V14_CHECKS | V15_CHECKS | V15_6_CHECKS | V17_CHECKS | set(V18_1_CHECKS) | set(V18_2_CHECKS) | set(V18_3_CHECKS) | set(V18_4_CHECKS)
+# v18.5: VM hardening & identities — two scope-level functions of two records each, and the per-project unused-accounts check.
+V18_5_CHECKS = ['check_vm_posture', 'check_identity_hygiene', 'check_unused_service_accounts']
+LATER_CHECKS = (V14_CHECKS | V15_CHECKS | V15_6_CHECKS | V17_CHECKS | set(V18_1_CHECKS) | set(V18_2_CHECKS) | set(V18_3_CHECKS) | set(V18_4_CHECKS)
+                | set(V18_5_CHECKS))
 
 
 def finished_checks(progress_updates):
@@ -360,7 +363,7 @@ def test_runner_runs_the_beta_v1_check_plan(scope, scope_id, beta, monkeypatch):
     specs = registry.build_check_plan(scope, scope_id, JOB_ID, PROJECTS, zones, regions)
     names = [spec.func.__name__ for spec in specs]
     v17_names = {spec.name for spec in specs if spec.func.__name__ in V17_CHECKS}
-    assert len(names) == (49 if scope == 'organization' else 46)
+    assert len(names) == (52 if scope == 'organization' else 49)
     # Same order as beta v1's plan lists, which append the four checks after "Service Quota Limits".
     beta_plan = ast.parse(textwrap.dedent(inspect.getsource(beta.run_all_checks)))
     beta_lists = [[entry.elts[2].id for entry in node.elts if isinstance(entry, ast.Tuple)]
@@ -377,7 +380,8 @@ def test_runner_runs_the_beta_v1_check_plan(scope, scope_id, beta, monkeypatch):
     assert names[34:35] == V18_2_CHECKS
     assert names[35:40] == V18_3_CHECKS
     assert names[40:45] == V18_4_CHECKS
-    assert names[-2:] == (['check_audit_logging', 'check_org_advisories'] if scope == 'organization' else ['check_api_keys', 'check_project_advisories'])
+    assert names[45:48] == V18_5_CHECKS
+    assert names[-2:] == (['check_audit_logging', 'check_org_advisories'] if scope == 'organization' else ['check_unused_service_accounts', 'check_project_advisories'])
     calls = {'beta': {}, 'new': {}}
     sink = RecordingSink()
 
@@ -421,7 +425,8 @@ def test_runner_runs_the_beta_v1_check_plan(scope, scope_id, beta, monkeypatch):
     later = {registry.SERVICE_HEALTH_CHECK, registry.GKE_VERSIONS_CHECK, registry.ADVISORIES_CHECK, registry.RESILIENCE_CHECK} | v17_names
     later |= {'Essential Contacts', registry.DATA_ACCESS_CHECK, registry.UPGRADE_READINESS_CHECK,  # v18.1 and v18.2: every scope, so out of the comparison on both sides
               registry.HYBRID_CHECK, registry.EDGE_CHECK, registry.DNS_CHECK, registry.FLOW_LOGS_CHECK, registry.PEERING_NAT_CHECK,  # v18.3
-              registry.BIGQUERY_CHECK, registry.SQL_FLAGS_CHECK, registry.ALLOYDB_CHECK, registry.KMS_CHECK, registry.API_KEYS_CHECK}  # v18.4
+              registry.BIGQUERY_CHECK, registry.SQL_FLAGS_CHECK, registry.ALLOYDB_CHECK, registry.KMS_CHECK, registry.API_KEYS_CHECK,  # v18.4
+              registry.VM_SA_CHECK, registry.SA_PRIVILEGES_CHECK, registry.UNUSED_SA_CHECK}  # v18.5
     assert finished_checks(progress) - later == finished_checks(beta_progress) - {'Personalized Service Health', registry.RESILIENCE_CHECK, 'Essential Contacts'}
     assert sink.findings == []
 
@@ -434,7 +439,7 @@ def test_check_plan_is_the_legacy_plan_plus_the_beta_v1_checks(scope, legacy):
     legacy_names = set(legacy.run_all_checks.__code__.co_names)
     advisories = 'check_org_advisories' if scope == 'organization' else 'check_project_advisories'
     assert [name for name in names if name not in legacy_names] == \
-           BETA_V1_CHECKS + ['check_service_health_incidents', 'check_gke_supported_versions'] + V17_COMMON_CHECKS + V17_1_CHECKS + ['check_data_access_audit_logs', 'check_gke_operations'] + V18_3_CHECKS + V18_4_CHECKS + [advisories]
+           BETA_V1_CHECKS + ['check_service_health_incidents', 'check_gke_supported_versions'] + V17_COMMON_CHECKS + V17_1_CHECKS + ['check_data_access_audit_logs', 'check_gke_operations'] + V18_3_CHECKS + V18_4_CHECKS + V18_5_CHECKS + [advisories]
     if scope == 'organization':  # the one legacy check the plan no longer runs
         assert {name for name in legacy_names if name.startswith('check_')} - set(names) == RETIRED_CHECKS
 
@@ -472,9 +477,10 @@ def test_runner_runs_the_scope_level_checks_when_there_is_no_project(scope, scop
                    'GKE Credential Exposure', 'Service Account Impersonation', 'VPC Service Controls Coverage',
                    'Essential Contacts', 'Data Access Audit Logs', 'GKE Upgrade Readiness',  # v18.1: the contacts and audit pair; v18.2: GKE upgrade readiness
                    'Hybrid Connectivity', 'Load Balancer Edge', 'DNS Posture', 'VPC Flow Logs', 'VPC Peering & Cloud NAT',  # v18.3: the network edge
-                   'BigQuery Governance', 'Cloud SQL Flags', 'AlloyDB Posture', 'KMS Keys', 'API Keys']  # v18.4: data governance
+                   'BigQuery Governance', 'Cloud SQL Flags', 'AlloyDB Posture', 'KMS Keys', 'API Keys',  # v18.4: data governance
+                   'VM Service Accounts', 'Service Account Privileges']  # v18.5: VM posture and identity hygiene (two records each)
     if scope == 'organization':
-        assert ran[:21] == scope_level + ['Organization IAM Policy'] and registry.MISCELLANEOUS_CHECK in ran and 'IAM Least Privilege' in ran
+        assert ran[:23] == scope_level + ['Organization IAM Policy'] and registry.MISCELLANEOUS_CHECK in ran and 'IAM Least Privilege' in ran
     elif scope == 'folder':
         assert ran == scope_level + ['Open Firewall Rules', 'IAM Least Privilege']  # the split halves: firewall policies (v18.3), the folder's IAM recommendations
     else:

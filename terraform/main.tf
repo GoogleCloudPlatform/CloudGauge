@@ -73,6 +73,7 @@ locals {
     var.extra_env,
     local.export ? { BIGQUERY_DATASET = var.bigquery_dataset } : {},
     length(var.cost_allocation_labels) > 0 ? { COST_ALLOCATION_LABELS = join(",", var.cost_allocation_labels) } : {},
+    length(var.trusted_domains) > 0 ? { TRUSTED_DOMAINS = join(",", var.trusted_domains) } : {},
   )
 }
 

@@ -84,6 +84,9 @@ CATEGORY_MAP = {
     # v18.4: data governance.
     "BigQuery Governance": "Security & Identity", "Cloud SQL Flags": "Security & Identity", "KMS Keys": "Security & Identity", "API Keys": "Security & Identity",
     "AlloyDB Posture": "Reliability & Resilience",
+    # v18.5: VM hardening & identities.
+    "VM Service Accounts": "Security & Identity", "VM Hardening": "Security & Identity", "Service Account Privileges": "Security & Identity",
+    "External Principals": "Security & Identity", "Unused Service Accounts": "Security & Identity",
     "Service Account Impersonation": "Security & Identity", "VPC Service Controls Coverage": "Security & Identity",
 
     # B2: error results. These names are only written when a check fails; the

@@ -43,6 +43,8 @@
 #   COST_ALLOCATION_LABELS
 #                     the label keys every project must carry, comma-separated (cost-center,environment,owner);
 #                     its own variable because EXTRA_ENV values cannot contain commas
+#   TRUSTED_DOMAINS   domains besides the organization's primary one whose users and groups External Principals
+#                     does not list, comma-separated (partner.example,acquired.example); its own variable for the same reason
 #   SCHEDULES         scheduled scans, semicolon-separated NAME=SCOPE/SCOPE_ID@CRON (cron in UTC), e.g.
 #                     "weekly-org=organization/123456789012@30 0 * * 1;nightly-prod=project/my-prod@0 2 * * *"
 #   SKIP_SETUP=1      skip step 1 (updating a deployment that works)
@@ -77,6 +79,7 @@ OPERATORS="${OPERATORS:-}"
 EXTRA_ENV="${EXTRA_ENV:-}"
 BIGQUERY_DATASET="${BIGQUERY_DATASET:-}"
 COST_ALLOCATION_LABELS="${COST_ALLOCATION_LABELS:-}"
+TRUSTED_DOMAINS="${TRUSTED_DOMAINS:-}"
 SCHEDULES="${SCHEDULES:-}"
 DRY_RUN="${DRY_RUN:-0}"
 if [[ -n "$BIGQUERY_DATASET" && ! "$BIGQUERY_DATASET" =~ ^[A-Za-z0-9_]+$ ]]; then
@@ -139,6 +142,7 @@ note "queue / bucket   ${QUEUE} / gs://${BUCKET}"
 note "operators        ${MEMBERS:-(none: grant access afterwards, see the end)}"
 note "BigQuery export  ${BIGQUERY_DATASET:-(off: set BIGQUERY_DATASET to export every scan)}"
 note "label keys       ${COST_ALLOCATION_LABELS:-(none: Cost Allocation Labels stays Informational)}"
+note "trusted domains  ${TRUSTED_DOMAINS:-(none: the primary domain alone)}"
 note "schedules        ${SCHEDULES:-(none)}"
 if [[ "$DRY_RUN" == 1 ]]; then note "DRY RUN: nothing is executed"; fi
 
@@ -155,9 +159,9 @@ WORKER_URL="https://${WORKER_SERVICE}-${PROJECT_NUMBER}.${REGION}.run.app"
 WEB_URL="https://${SERVICE}-${PROJECT_NUMBER}.${REGION}.run.app"
 IAP_AGENT="service-${PROJECT_NUMBER}@gcp-sa-iap.iam.gserviceaccount.com"
 # The services' variables, joined with "|" behind gcloud's "^|^" delimiter prefix so that a value may contain
-# commas (COST_ALLOCATION_LABELS). EXTRA_ENV is comma-separated pairs whose values have none, so its commas
+# commas (COST_ALLOCATION_LABELS, TRUSTED_DOMAINS). EXTRA_ENV is comma-separated pairs whose values have none, so its commas
 # become the separator.
-COMMON_ENV="^|^PROJECT_ID=${PROJECT_ID}|LOCATION=${REGION}|TASK_QUEUE=${QUEUE}|RESULTS_BUCKET=${BUCKET}|SERVICE_ACCOUNT_EMAIL=${SA_EMAIL}${EXTRA_ENV:+|${EXTRA_ENV//,/|}}${BIGQUERY_DATASET:+|BIGQUERY_DATASET=${BIGQUERY_DATASET}}${COST_ALLOCATION_LABELS:+|COST_ALLOCATION_LABELS=${COST_ALLOCATION_LABELS}}"
+COMMON_ENV="^|^PROJECT_ID=${PROJECT_ID}|LOCATION=${REGION}|TASK_QUEUE=${QUEUE}|RESULTS_BUCKET=${BUCKET}|SERVICE_ACCOUNT_EMAIL=${SA_EMAIL}${EXTRA_ENV:+|${EXTRA_ENV//,/|}}${BIGQUERY_DATASET:+|BIGQUERY_DATASET=${BIGQUERY_DATASET}}${COST_ALLOCATION_LABELS:+|COST_ALLOCATION_LABELS=${COST_ALLOCATION_LABELS}}${TRUSTED_DOMAINS:+|TRUSTED_DOMAINS=${TRUSTED_DOMAINS}}"
 
 # --- 1. setup -----------------------------------------------------------------------------------
 if [[ "${SKIP_SETUP:-0}" != 1 ]]; then

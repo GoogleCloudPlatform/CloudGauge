@@ -4,9 +4,10 @@ Network edge & reachability (v18.3).
 The widest networking clusters in the case evidence are Interconnect and VPN
 outages and VM-to-VM connectivity, and CIS §3 is the largest block of the
 benchmark the tool did not read. Every item is a setting in Cloud Asset
-Inventory — one listing per check under the scanned scope — except the *state*
-of a VPN tunnel, which is re-read from the Compute API per project that has
-tunnels (the inventory's copy of state can lag; the v18.2 lesson):
+Inventory — one read per check under the scanned scope: the search index,
+which reflects changes within minutes, with the listing as the fallback (v18.5;
+``list_assets``) — except the *state* of a VPN tunnel, which is re-read from
+the Compute API per project that has tunnels (the v18.2 lesson):
 
 - **Hybrid Connectivity** (Reliability): tunnels that are not established,
   HA VPN gateways with tunnels on one interface, Classic VPN gateways,
@@ -27,6 +28,7 @@ services access peerings — are not judged. Every check reaches a verdict or an
 all-clear row; a listing that fails is the check's Error.
 """
 import logging
+from types import SimpleNamespace
 
 from google.cloud import asset_v1
 
@@ -70,10 +72,55 @@ PEERING_NAT_ALL_CLEAR = "Every peering is active with matching MTUs, and every C
 
 # --- assets ----------------------------------------------------------------------------------------------------------
 
+def search_assets(asset_client, parent, asset_types):
+    """The resources of ``asset_types`` under ``parent`` from the **search index**, per type: ``{asset_type: [record]}``, each record
+    shaped like a listed asset (``name``, ``asset_type``, ``resource.data``, ``update_time``) from its versioned resource. A type the
+    index returns without content maps to ``None``: the listing has to serve it.
+
+    v18.5: the index reflects a change within minutes (its ``createTime`` is the real one); ``listAssets`` is refreshed by periodic
+    snapshots and was observed hours behind (a new VM after 95 minutes, a project's metadata the next morning).
+    """
+    found = {asset_type: [] for asset_type in asset_types}
+    request = {"scope": parent, "asset_types": list(asset_types), "read_mask": "*", "page_size": 500}
+    for result in asset_client.search_all_resources(request=request):
+        asset_type = str(getattr(result, "asset_type", "") or "")
+        versions = list(getattr(result, "versioned_resources", None) or [])
+        if not versions or found.get(asset_type) is None:
+            found[asset_type] = None
+            continue
+        version = versions[0]
+        data = version.get("resource") if isinstance(version, dict) else asset_v1.VersionedResource.to_dict(version).get("resource")
+        found[asset_type].append(SimpleNamespace(name=str(getattr(result, "name", "") or ""), asset_type=asset_type, update_time=getattr(result, "update_time", None),
+                                                 resource=SimpleNamespace(data=data or {}, parent=str(getattr(result, "parent_full_resource_name", "") or ""))))
+    return found
+
+
 def list_assets(asset_client, parent, asset_types):
-    """One inventory listing of ``asset_types`` under ``parent``, as a list. A listing the API refuses for one of its asset types
-    (``No RESOURCE found that matches asset type``) is retried type by type, the refused type left out — a release that names a type
-    the inventory has retired must not take the whole check down."""
+    """The resources of ``asset_types`` under ``parent``: from the search index where it carries their content (fresh), from the
+    inventory listing for the rest — the types the index returns no content for, the types it has nothing of (the listing confirms),
+    and everything when the search fails. A listing the API refuses for one of its asset types (``No RESOURCE found that matches
+    asset type``) is retried type by type, the refused type left out — a release that names a type the inventory has retired must
+    not take the whole check down."""
+    asset_types = list(asset_types)
+    try:
+        indexed = search_assets(asset_client, parent, asset_types)
+    except Exception as e:
+        logging.warning(f"Asset search under {parent} failed ({e}); reading the listing instead")
+        indexed = {}
+    found, listed_types = [], []
+    for asset_type in asset_types:
+        records = indexed.get(asset_type)
+        if records:
+            found += records
+        else:
+            listed_types.append(asset_type)
+    if listed_types:
+        found += _list_assets(asset_client, parent, listed_types)
+    return found
+
+
+def _list_assets(asset_client, parent, asset_types):
+    """One inventory listing of ``asset_types`` under ``parent``, as a list, with the type-by-type retry of :func:`list_assets`."""
     request = {"parent": parent, "asset_types": list(asset_types), "content_type": asset_v1.ContentType.RESOURCE}
     try:
         return list(asset_client.list_assets(request=request))

@@ -345,7 +345,22 @@ class SyntheticGcp:
         for role, member in profile.primitive_bindings:
             by_role.setdefault(role, []).append(member)
         bindings += [{"role": role, "members": members} for role, members in by_role.items()]
-        return bindings + self._project_level_impersonation(profile)
+        return bindings + self._project_level_impersonation(profile) + self._posture_bindings(profile)
+
+    @staticmethod
+    def _posture_bindings(profile):
+        """v18.5: the bindings the identity rules read — administrative roles on service accounts, one principal with both
+        iam.serviceAccountAdmin and iam.serviceAccountUser, principals outside the organization."""
+        posture = profile.posture
+        if posture is None:
+            return []
+        by_role = {}
+        for role, member in posture.admin_sa_roles + posture.external_members:
+            by_role.setdefault(role, []).append(member)
+        if posture.separation_member:
+            by_role.setdefault("roles/iam.serviceAccountAdmin", []).append(posture.separation_member)
+            by_role.setdefault("roles/iam.serviceAccountUser", []).append(posture.separation_member)
+        return [{"role": role, "members": members} for role, members in by_role.items()]
 
     def _project_level_impersonation(self, profile):
         """v17.1: the project-level bindings of the impersonation table, the custom roles, the privileged node account."""
@@ -413,7 +428,7 @@ class SyntheticGcp:
                 "zone": f"https://www.googleapis.com/compute/v1/projects/{project_id}/zones/{vm.zone}",
                 "machineType": MACHINE_TYPE_URL.format(project=project_id, zone=vm.zone, machine_type=vm.machine_type),
                 "networkInterfaces": [{"name": "nic0", "network": "vpc-main", **({"accessConfigs": access} if access else {})}],
-                "labels": {}, "metadata": {"items": ([{"key": "created-by", "value": f"projects/{project_id}/zones/{vm.zone}/instanceGroupManagers/mig-{vm.zone}"}] if vm.in_mig else [])},
+                **self._instance_posture_fields(profile, index, vm),  # v18.5: labels, metadata, service account, Shielded settings
             }
             items.setdefault(f"zones/{vm.zone}", {"instances": []})["instances"].append(instance)
         return {"items": items}
@@ -550,12 +565,25 @@ class SyntheticGcp:
         return {"items": items}
 
     def _h_compute_projects_get(self, kw, project_id):
-        """The project's global Compute quotas (v18.1): FIREWALLS near its limit for the projects with many rules."""
+        """The project's global Compute quotas (v18.1): FIREWALLS near its limit for the projects with many rules; v18.5: the common
+        instance metadata the VM Hardening check reads from the API (the inventory omits ssh-keys)."""
         self.call("compute", "projects.get", project_id=project_id, style="http")
         profile = self.world.project(project_id)
         rules = len(profile.firewall_rules) + 1
         return {"name": project_id, "quotas": [{"metric": "FIREWALLS", "usage": float(rules), "limit": 200.0},
-                                               {"metric": "NETWORKS", "usage": 2.0, "limit": 15.0}, {"metric": "IMAGES", "usage": 3.0, "limit": 2000.0}]}
+                                               {"metric": "NETWORKS", "usage": 2.0, "limit": 15.0}, {"metric": "IMAGES", "usage": 3.0, "limit": 2000.0}],
+                "commonInstanceMetadata": {"items": self._project_metadata_items(profile)}}
+
+    @staticmethod
+    def _project_metadata_items(profile):
+        """v18.5: the project's common instance metadata as the Compute API (and, without ssh-keys, the inventory) shows it."""
+        posture = profile.posture
+        if posture is None:
+            return []
+        items = [{"key": "enable-oslogin", "value": "TRUE" if posture.project_oslogin else "FALSE"}]
+        if posture.project_ssh_keys:
+            items.append({"key": "ssh-keys", "value": "ops:ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFakeKeyForTheSyntheticWorld ops@example.com"})
+        return items
 
     def _h_iam_projects_serviceAccounts_list(self, kw, project_id):
         self.call("iam", "serviceAccounts.list", project_id=project_id, style="http")
@@ -786,6 +814,7 @@ class SyntheticGcp:
                 found += [a for c in profile.gke_clusters for a in self._pdb_assets(profile, c)]
             found += self._edge_assets(profile, asset_types)
             found += self._governance_assets(profile, asset_types)
+            found += self._posture_assets(profile, asset_types)
             return found
         # Folder- or organization-wide listing: one pass over the projects in scope.
         folder_id = parent.split("/", 1)[1] if parent.startswith("folders/") else None
@@ -800,7 +829,72 @@ class SyntheticGcp:
                 found += [a for c in profile.gke_clusters for a in self._pdb_assets(profile, c)]
             found += self._edge_assets(profile, asset_types)
             found += self._governance_assets(profile, asset_types)
+            found += self._posture_assets(profile, asset_types)
         self.call("asset", "listAssets(folder)" if folder_id else "listAssets(org)", pages=max(1, math.ceil(len(found) / PAGE_SIZE)))
+        return found
+
+    def _policy_results(self, scope, asset_types):
+        """v18.5: the IAM policies under ``scope`` as the IAM-policy search returns them (an empty query): projects named by ID, each
+        result with its project number, folders and organization; the folder(s) with empty policies; the organization's own policy in an
+        organization search."""
+        org = f"organizations/{self.world.org_id}"
+
+        def result(name, asset_type, bindings, project="", folders=()):
+            return SimpleNamespace(resource=f"//cloudresourcemanager.googleapis.com/{name}", asset_type=f"cloudresourcemanager.googleapis.com/{asset_type}",
+                                   project=project, folders=list(folders), organization=org,
+                                   policy=SimpleNamespace(bindings=[SimpleNamespace(role=b["role"], members=list(b["members"]), condition=None) for b in bindings]))
+        if scope.startswith("projects/"):
+            profiles, folders, with_org = [self.world.project(scope.split("/", 1)[1])], [], False
+        else:
+            folder_id = scope.split("/", 1)[1] if scope.startswith("folders/") else None
+            profiles = self.world.projects(folder_id)
+            folders, with_org = ([folder_id] if folder_id else list(self.world.folder_ids)), folder_id is None
+        found = []
+        if with_org and "cloudresourcemanager.googleapis.com/Organization" in asset_types:
+            found.append(result(org, "Organization", self.world.org_iam_bindings()))
+        if "cloudresourcemanager.googleapis.com/Folder" in asset_types:
+            found += [result(f"folders/{fid}", "Folder", [], folders=[f"folders/{fid}"]) for fid in folders]
+        if "cloudresourcemanager.googleapis.com/Project" in asset_types:
+            found += [result(f"projects/{p.project_id}", "Project", self._project_policy_bindings(p), project=f"projects/{p.project_number}", folders=[f"folders/{p.folder_id}"])
+                      for p in profiles]
+        return found
+
+    @staticmethod
+    def _instance_posture_fields(profile, index, vm):
+        """v18.5: what the VM checks read of an instance — labels (GKE nodes labelled), metadata items, the service account and its scopes,
+        IP forwarding, the Shielded settings — the same from the inventory and from ``instances.aggregatedList``."""
+        posture, project_id, number = profile.posture, profile.project_id, profile.project_number
+        items = [{"key": "created-by", "value": f"projects/{project_id}/zones/{vm.zone}/instanceGroupManagers/mig-{vm.zone}"}] if vm.in_mig else []
+        if posture is None:
+            return {"labels": {"goog-gke-node": ""} if vm.gke else {}, "metadata": {"items": items}}
+        account, loose = posture.vm_accounts[index], posture.vm_loose[index]
+        email = f"{number}-compute@developer.gserviceaccount.com" if account.startswith("default") else f"vm-{index}@{project_id}.iam.gserviceaccount.com"
+        scopes = ["https://www.googleapis.com/auth/cloud-platform"] if account in ("default-full", "dedicated") else [
+            "https://www.googleapis.com/auth/devstorage.read_only", "https://www.googleapis.com/auth/logging.write", "https://www.googleapis.com/auth/monitoring.write"]
+        if "serial" in loose:
+            items.append({"key": "serial-port-enable", "value": "TRUE"})
+        if "oslogin-off" in loose:
+            items.append({"key": "enable-oslogin", "value": "FALSE"})
+        shielded = {} if "no-shielded" in loose else {"enableSecureBoot": "no-secure-boot" not in loose, "enableVtpm": True, "enableIntegrityMonitoring": True}
+        return {"labels": {"goog-gke-node": ""} if vm.gke else {}, "serviceAccounts": [{"email": email, "scopes": scopes}], "metadata": {"items": items},
+                "canIpForward": vm.gke or "ipfwd" in loose, "shieldedInstanceConfig": shielded}
+
+    def _posture_assets(self, profile, asset_types):
+        """v18.5: the project's instances (as the VM checks read them: service accounts and scopes, metadata, IP forwarding, Shielded
+        settings; GKE nodes labelled as such) and its compute project (the common instance metadata)."""
+        posture, project_id, number = profile.posture, profile.project_id, profile.project_number
+        if posture is None:
+            return []
+        found = []
+        if "compute.googleapis.com/Instance" in asset_types:
+            for index, vm in enumerate(profile.vms):
+                found.append(SimpleNamespace(name=f"//compute.googleapis.com/projects/{project_id}/zones/{vm.zone}/instances/{vm.name}", resource=SimpleNamespace(data={
+                    "name": vm.name, "status": "TERMINATED" if vm.name in profile.stopped_vms else "RUNNING",
+                    "zone": f"https://www.googleapis.com/compute/v1/projects/{project_id}/zones/{vm.zone}", **self._instance_posture_fields(profile, index, vm)})))
+        if "compute.googleapis.com/Project" in asset_types:  # the inventory's copy: without the ssh-keys item, as the real one
+            items = [i for i in self._project_metadata_items(profile) if i["key"] != "ssh-keys"]
+            found.append(SimpleNamespace(name=f"//compute.googleapis.com/projects/{project_id}", resource=SimpleNamespace(data={
+                "name": project_id, "defaultServiceAccount": f"{number}-compute@developer.gserviceaccount.com", "commonInstanceMetadata": {"items": items}})))
         return found
 
     @staticmethod
@@ -1055,6 +1149,10 @@ class SyntheticGcp:
         profiles = [self.world.project(scope.split("/", 1)[1])] if scope.startswith("projects/") else self.world.projects(folder_id)
         email = query.split('"')[1] if query.startswith('policy:"') else None
         results = []
+        if not query and any(t.startswith("cloudresourcemanager.googleapis.com/") for t in request.get("asset_types") or []):  # v18.5: every policy under the scope
+            results = self._policy_results(scope, set(request.get("asset_types") or []))
+            self.call("asset", "searchAllIamPolicies", pages=max(1, math.ceil(len(results) / PAGE_SIZE)))
+            return results
         if query.startswith("memberTypes:") or query.startswith("roles:(roles/cloudkms"):  # v18.4: public access; KMS separation of duties
             for profile in profiles:
                 g = profile.data_governance
@@ -1216,6 +1314,11 @@ class SyntheticGcp:
         profile = self.world.project(project_id)
         if insight_type == RECENT_CHANGE_INSIGHT:
             return [recommender_v1.Insight({"name": f"{parent}/insights/{i}", "description": text}) for i, text in enumerate(profile.recent_changes)]
+        if insight_type == "google.iam.serviceAccount.Insight":  # v18.5: the accounts nobody authenticated as in the window
+            return [recommender_v1.Insight({"name": f"{parent}/insights/{i}", "description": f"Service account {email} was inactive.", "insight_subtype": "SERVICE_ACCOUNT_USAGE",
+                                            "severity": "LOW", "state_info": {"state": "ACTIVE"},
+                                            "content": {"email": email, **({"lastAuthenticatedTime": _iso(days)} if days is not None else {})}})
+                    for i, (email, days) in enumerate(profile.posture.unused_accounts if profile.posture else ())]
         check = NETWORK_INSIGHT_IDS.get(insight_type)
         insights = []
         for i, (kind, payload) in enumerate(profile.network_insights.get((check, location), []) if check else []):

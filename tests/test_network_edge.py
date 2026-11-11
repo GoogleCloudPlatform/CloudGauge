@@ -354,6 +354,47 @@ def test_a_listing_refused_for_one_asset_type_is_retried_type_by_type():
         raise AssertionError('a 503 must propagate')
 
 
+def indexed(name, asset_type, data, versions=('v1',)):
+    """A resource search result with the resource content in ``versioned_resources`` (``read_mask='*'``)."""
+    return SimpleNamespace(name=name, asset_type=asset_type, update_time=None, parent_full_resource_name='//cloudresourcemanager.googleapis.com/projects/1',
+                           versioned_resources=[{'version': v, 'resource': dict(data)} for v in versions])
+
+
+def test_list_assets_reads_the_search_index_first_and_the_listing_for_the_rest():
+    """v18.5: the index reflects a change within minutes and carries the content of most types; the listing lagged hours. A type the
+    index returns without content, a type it has nothing of, and a failed search fall back to the listing."""
+    class Both:
+        def __init__(self, index, listing, search_error=None):
+            self.index, self.listing, self.search_error, self.searches, self.listings = index, listing, search_error, [], []
+
+        def search_all_resources(self, request):
+            self.searches.append(request)
+            if self.search_error:
+                raise self.search_error
+            return iter([r for r in self.index if r.asset_type in request['asset_types']])
+
+        def list_assets(self, request):
+            self.listings.append(list(request['asset_types']))
+            return [a for a in self.listing if a.name.split('/')[-2] in Assets.wanted(request['asset_types'])]
+    fresh_zone = indexed(f'//dns.googleapis.com/projects/stark-nw-prod/managedZones/aura-public-zone', 'dns.googleapis.com/ManagedZone', {'name': 'aura-public-zone', 'visibility': 'public', 'dnssecConfig': {'state': 'on'}})
+    policy_without_content = SimpleNamespace(name='//dns.googleapis.com/projects/stark-nw-prod/policies/logging', asset_type='dns.googleapis.com/Policy', update_time=None, versioned_resources=[])
+    client = Both([fresh_zone, policy_without_content], [zone(), dns_policy(['stark-nw-prod-shared-vpc']), network('stark-nw-prod-shared-vpc')])
+    found = edge.list_assets(client, 'organizations/1', edge.DNS_TYPES)
+    # The zone came from the index (DNSSEC on, where the stale listing says off); the policy and the network from the listing.
+    by_name = {a.name.split('/')[-1]: a for a in found}
+    assert set(by_name) == {'aura-public-zone', 'dns-logging', 'stark-nw-prod-shared-vpc'} and by_name['aura-public-zone'].resource.data['dnssecConfig'] == {'state': 'on'}
+    assert client.searches == [{'scope': 'organizations/1', 'asset_types': edge.DNS_TYPES, 'read_mask': '*', 'page_size': 500}]
+    assert client.listings == [['dns.googleapis.com/Policy', 'compute.googleapis.com/Network']]
+    # The facts read the same from either source.
+    assert edge.asset_fact(by_name['aura-public-zone'])['kind'] == 'managedZones' and edge.asset_fact(by_name['aura-public-zone'])['project_id'] == 'stark-nw-prod'
+    # A failed search: the listing serves everything (a warning, not an Error).
+    client = Both([fresh_zone], [zone(), network('stark-nw-prod-shared-vpc')], search_error=RuntimeError('429 quota'))
+    found = edge.list_assets(client, 'organizations/1', edge.DNS_TYPES)
+    assert sorted(a.name.split('/')[-1] for a in found) == ['aura-public-zone', 'stark-nw-prod-shared-vpc'] and client.listings == [edge.DNS_TYPES]
+    # A client without a search (the older fakes): the listing, as before.
+    assert [a.name.split('/')[-1] for a in edge.list_assets(Assets([zone()]), 'organizations/1', ['dns.googleapis.com/ManagedZone'])] == ['aura-public-zone']
+
+
 # --- the security extensions -------------------------------------------------------------------------------------------
 
 def test_firewall_policy_rules_are_judged_like_vpc_rules():

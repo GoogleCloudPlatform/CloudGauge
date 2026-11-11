@@ -281,6 +281,8 @@ class Inventory:
         return iter([r for r in answer if not services or r.resource.split('/')[2] in services])
 
     def search_all_resources(self, request):
+        if request.get('read_mask'):  # v18.5: list_assets asks the index first; this fake's index carries no content, so the listing serves
+            return iter([])
         self.resource_searches.append(request)
         if isinstance(self.projects, Exception):
             raise self.projects

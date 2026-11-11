@@ -17,6 +17,9 @@ operators = ["group:cloud-team@example.com", "user:alice@example.com"]
 # The label keys every project must carry (the Cost Allocation Labels check).
 # cost_allocation_labels = ["cost-center", "environment", "owner"]
 
+# Domains besides the organization's primary one that the External Principals check counts as the organization's (v18.5).
+# trusted_domains = ["partner.example"]
+
 # Scheduled scans, cron in UTC.
 # schedules = {
 #   weekly-org = { scope = "organization", scope_id = "123456789012", cron = "30 0 * * 1" }

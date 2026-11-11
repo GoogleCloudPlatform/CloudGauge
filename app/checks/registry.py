@@ -35,6 +35,7 @@ from app.checks.cost import (
     check_storage_lifecycle,
     run_cost_recommendations,
 )
+from app.checks.vm_hardening import VM_SA_CHECK, check_vm_posture
 from app.checks.data_governance import (
     ALLOYDB_CHECK,
     API_KEYS_CHECK,
@@ -48,6 +49,7 @@ from app.checks.data_governance import (
     check_sql_flags,
 )
 from app.checks.gke_operations import UPGRADE_READINESS_CHECK, check_gke_operations
+from app.checks.identity_hygiene import SA_PRIVILEGES_CHECK, UNUSED_SA_CHECK, check_identity_hygiene, check_unused_service_accounts
 from app.checks.gke_versions import CHECK_NAME as GKE_VERSIONS_CHECK
 from app.checks.gke_versions import check_gke_supported_versions
 from app.checks.network import run_network_insights
@@ -207,6 +209,11 @@ def build_check_plan(scope, scope_id, job_id, all_projects, active_zones, active
         CheckSpec("Reliability & Resilience", ALLOYDB_CHECK, check_alloydb_posture, (scope, scope_id, job_id)),
         CheckSpec("Security & Identity", KMS_CHECK, check_kms_keys, (scope, scope_id, job_id)),
         CheckSpec("Security & Identity", API_KEYS_CHECK, check_api_keys, (scope, scope_id, job_id)),
+        # v18.5: VM hardening & identities — VM Service Accounts + VM Hardening from one listing of the scope's instances and compute projects,
+        # Service Account Privileges + External Principals from one listing of the IAM policies under the scope, Unused Service Accounts per project
+        CheckSpec("Security & Identity", VM_SA_CHECK, check_vm_posture, (scope, scope_id, job_id)),
+        CheckSpec("Security & Identity", SA_PRIVILEGES_CHECK, check_identity_hygiene, (scope, scope_id, job_id)),
+        CheckSpec("Security & Identity", UNUSED_SA_CHECK, check_unused_service_accounts, (scope_id, all_projects, job_id)),
     ]
 
     if scope == 'organization':
@@ -238,6 +245,7 @@ SCOPE_LEVEL_CHECKS = frozenset({
     UPGRADE_READINESS_CHECK,  # v18.2: two listings under the scope
     HYBRID_CHECK, EDGE_CHECK, DNS_CHECK, FLOW_LOGS_CHECK, PEERING_NAT_CHECK,  # v18.3: one listing each
     BIGQUERY_CHECK, SQL_FLAGS_CHECK, ALLOYDB_CHECK, KMS_CHECK, API_KEYS_CHECK,  # v18.4: one listing each
+    VM_SA_CHECK, SA_PRIVILEGES_CHECK,  # v18.5: one listing each (two records each: VM Hardening, External Principals)
 })
 # The checks that do both: scope-wide work plus per-project work. Shards split them
 # with keyword flags: the scope shard runs the first set, the project shards the second

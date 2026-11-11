@@ -26,7 +26,7 @@ from dataclasses import dataclass
 # The release, as the image tag names it ("15.6" for v15.6; tests/test_packaging.py pins it to the newest entry
 # of RELEASE_NOTES.md). The report's footer shows it, and every scan summary records it so the next scan can tell
 # a check that is new to the release from one that merely had nothing to check last time (app.reporting.changes).
-VERSION = "18.4"
+VERSION = "18.5"
 # The policy table of the Organization Policies check (v18.1): by default the one shipped with the release
 # (assets/gcp_best_practices.csv, copied into the image), so a scan never depends on GitHub and the rules move only
 # with a release. BEST_PRACTICES_CSV_URL set to a gs:// object (read as the service account) or an https:// URL
@@ -125,6 +125,10 @@ DEFAULT_ADVISORY_WINDOW_DAYS = 365
 DEFAULT_SNAPSHOT_MAX_AGE_DAYS = 90
 DEFAULT_RESERVATION_COVERAGE_MIN_VCPUS = 32
 
+# --- Identities (v18.5) ---
+# TRUSTED_DOMAINS: domains besides the organization's primary one whose users and groups External Principals
+# does not list ("partner.example,acquired.example"). Unset: the primary domain alone is the organization's.
+
 # --- History and analytics (v17) ---
 # BIGQUERY_DATASET: the dataset (in PROJECT_ID) every finished scan is loaded into, as two tables,
 # ``scans`` and ``findings`` (app.services.bigquery_export). Unset: nothing is exported.
@@ -182,6 +186,15 @@ def _label_keys(value):
             raise ValueError(f"COST_ALLOCATION_LABELS has an invalid label key '{key}': a key is 1-63 lowercase letters, digits, "
                              f"underscores or dashes and starts with a letter")
     return keys
+
+
+def _domains(value):
+    """``TRUSTED_DOMAINS`` as a tuple of lower-case domains (comma-separated, de-duplicated); empty when unset."""
+    domains = tuple(dict.fromkeys(d.strip().lower() for d in (value or '').split(',') if d.strip()))
+    for domain in domains:
+        if not re.fullmatch(r'[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+', domain):
+            raise ValueError(f"TRUSTED_DOMAINS has an invalid domain '{domain}': a domain is labels of letters, digits and dashes joined by dots")
+    return domains
 
 
 def _dataset(value):
@@ -260,6 +273,7 @@ class Settings:
     advisory_window_days: int = DEFAULT_ADVISORY_WINDOW_DAYS
     # FinOps and capacity (v17; see the constants above)
     cost_allocation_labels: tuple = ()
+    trusted_domains: tuple = ()  # TRUSTED_DOMAINS (v18.5): domains counted as the organization's by External Principals
     snapshot_max_age_days: int = DEFAULT_SNAPSHOT_MAX_AGE_DAYS
     reservation_coverage_min_vcpus: int = DEFAULT_RESERVATION_COVERAGE_MIN_VCPUS
     # History and analytics (v17): the BigQuery dataset scans are exported to, in PROJECT_ID. None: no export.
@@ -320,6 +334,7 @@ class Settings:
             service_health_incidents=_switch(env.get('SERVICE_HEALTH_INCIDENTS'), 'SERVICE_HEALTH_INCIDENTS'),
             advisory_window_days=_number(env, 'ADVISORY_WINDOW_DAYS', DEFAULT_ADVISORY_WINDOW_DAYS, int, minimum=1, maximum=3660),
             cost_allocation_labels=_label_keys(env.get('COST_ALLOCATION_LABELS')),
+            trusted_domains=_domains(env.get('TRUSTED_DOMAINS')),
             snapshot_max_age_days=_number(env, 'SNAPSHOT_MAX_AGE_DAYS', DEFAULT_SNAPSHOT_MAX_AGE_DAYS, int, minimum=1, maximum=3660),
             reservation_coverage_min_vcpus=_number(env, 'RESERVATION_COVERAGE_MIN_VCPUS', DEFAULT_RESERVATION_COVERAGE_MIN_VCPUS, int, minimum=1),
             bigquery_dataset=_dataset(env.get('BIGQUERY_DATASET')),

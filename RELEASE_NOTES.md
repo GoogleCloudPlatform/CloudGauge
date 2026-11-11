@@ -8,7 +8,159 @@ the test suite running inside the image, a zero-traffic canary revision scanned
 against a real organization, promotion, and a production scan compared fact for
 fact with the previous version's report.
 
-Versions are the image tags (`v5` … `v18.4`); the commit is the one that shipped.
+Versions are the image tags (`v5` … `v18.5`); the commit is the one that shipped.
+
+---
+
+## v18.5 — VM hardening & identities
+
+The fourth themed release. CIS §4 (Compute) and §1 (IAM) Level-1 items and the
+matching Security Health Analytics detectors that the identity checks of v17.1
+and v18 do not cover: who VMs run as and how they are reachable, which service
+accounts hold administrative power, who in the IAM policies is not of the
+organization, and which service accounts nobody uses. Two Cloud Asset Inventory
+listings under the scope (instances with compute projects; the IAM policies of
+organization, folders and projects), one IAM-policy search (public images), the
+account-roles search GKE Credential Exposure already runs, and the IAM
+recommender's service-account insights per project. No new API, no new role;
+one optional setting (`TRUSTED_DOMAINS`).
+
+### Added
+
+- **VM Service Accounts** (Security & Identity, every scope): a VM that runs
+  as the Compute Engine or App Engine **default service account** —
+  **Action Required** when the account holds a privileged role (the v17.1 list:
+  owner, editor, the IAM and service-account admin roles, container and compute
+  admin, storage and Secret Manager admin) or the VM has the `cloud-platform`
+  scope (`FULL_API_ACCESS`, CIS 4.2); *Investigation* otherwise
+  (`DEFAULT_SERVICE_ACCOUNT_USED`, CIS 4.1). The Detail names the privileged
+  role and what the scopes let a stolen token call; stopped instances are
+  judged and say so. A dedicated account is never a row. Fix:
+  `set-service-account` on the stopped instance, or the instance template for
+  an instance a managed instance group created. Rows `Project, Instance, Zone,
+  Status, Service Account, Scopes, Issue, Detail, Fix`.
+- **VM Hardening** (Security & Identity, every scope), *Investigation
+  Recommended*: per **project** (one row each, the metadata from the Compute
+  API) OS Login off
+  (`OS_LOGIN_DISABLED`, CIS 4.4, with how many instances rely on metadata
+  keys), project-wide SSH keys in use while OS Login is off
+  (`COMPUTE_PROJECT_WIDE_SSH_KEYS_ALLOWED`, CIS 4.3, with how many instances
+  they reach), the serial console enabled project-wide (CIS 4.5); per
+  **instance** an OS Login opt-out, the serial console
+  (`COMPUTE_SERIAL_PORTS_ENABLED`), IP forwarding (`IP_FORWARDING_ENABLED`,
+  CIS 4.6 — legitimate for a router or NAT appliance, the row says so),
+  Shielded VM off (`SHIELDED_VM_DISABLED`, CIS 4.8: vTPM or integrity
+  monitoring, or an image that is not Shielded-capable), Secure Boot off
+  (`COMPUTE_SECURE_BOOT_DISABLED`). Rows `Project, Instance ("(project)" for
+  project rows), Zone, Status, Issue, Detail, Fix`.
+- **Service Account Privileges** (Security & Identity, every scope): a service
+  account holding a predefined **administrative role** (`roles/*.admin`,
+  `roles/*Admin`) at project, folder or organization level — except what
+  Primitive Roles and Critical Org-Level Roles report already — *Investigation*;
+  **Action Required** when the role grants the power to change who may do what
+  (`iam.securityAdmin`, `resourcemanager.projectIamAdmin`,
+  `iam.serviceAccountAdmin`, `iam.serviceAccountKeyAdmin`,
+  `orgpolicy.policyAdmin`, `iam.denyAdmin`, `iam.organizationRoleAdmin`,
+  `resourcemanager.folderAdmin`, `resourcemanager.organizationAdmin`,
+  `billing.admin`) or the holder is a **default service account**
+  (`ADMIN_SERVICE_ACCOUNT`, CIS 1.5); one principal holding
+  `iam.serviceAccountAdmin` **and** `iam.serviceAccountUser` or Token Creator
+  on one resource (`SERVICE_ACCOUNT_ROLE_SEPARATION`, CIS 1.8). Custom roles
+  are not judged by name; Google-managed service agents are never rows. Rows
+  `Resource, Principal, Type, Role, Issue, Detail, Fix`, projects named by ID
+  (one resource search).
+- **External Principals** (Security & Identity, every scope): users and groups
+  outside the organization's primary domain and `TRUSTED_DOMAINS`
+  (*Investigation*: an acquired company's domain as often as a stranger),
+  consumer accounts and external `domain:` grants (**Action Required**;
+  `NON_ORG_IAM_MEMBER`, CIS 1.1), deleted principals still bound, a folder open
+  to the public (**Action Required**; projects are Primitive Roles' subject,
+  the organization Public Org-Level Access'), a custom image open to the public
+  (**Action Required**; `PUBLIC_COMPUTE_IMAGE`). One row per (resource,
+  principal) with the roles joined. The organization's domain comes from
+  `organizations.get` (the organization of the scope, read from the policies'
+  ancestors); when it cannot be read the rule is noted under *Projects not
+  checked* and the rest of the check stands.
+- **Unused Service Accounts** (Security & Identity, per project): the IAM
+  recommender's `SERVICE_ACCOUNT_USAGE` insights — accounts without an
+  authentication in Google's 90-day window — one *Investigation* row each with
+  the last authentication date (or *never*), default accounts included (disable,
+  never delete), `gcloud iam service-accounts disable` as the fix.
+- **`TRUSTED_DOMAINS`** (optional): domains besides the organization's primary
+  one that External Principals counts as the organization's
+  (`tools/deploy.sh`, `terraform/` `trusted_domains`, README configuration
+  reference).
+- **Fresh reads.** The first canary showed Cloud Asset Inventory's two read
+  paths apart: the search index had the probe VMs within minutes (its
+  `createTime` is the real one), the listing every inventory check used
+  showed them 95 minutes later and the project's metadata change only the next
+  morning — refreshed by periodic snapshots, not by events. `list_assets`
+  (shared by the network-edge, data-governance and VM checks) now reads the
+  **search index first** (`searchAllResources` with the versioned resource
+  content, which the index carries for every type these checks read) and
+  falls back to the listing for a type the index returns no content for, a
+  type it has nothing of, or a failed search; the identity checks read the IAM
+  policies from `searchAllIamPolicies` (which also names projects by ID, so
+  the number lookup went away). The index is prompt about a resource's
+  *existence*; a *change* to an existing resource reached neither path for a
+  long time in the same measurements, so the VM checks read each project's
+  instances and common instance metadata from the **Compute API**
+  (`instances.aggregatedList`, `projects.get`; the inventory says which
+  projects have VMs and stands in when a read is refused, noted under
+  *Projects not checked*) — the inventory also **omits the `ssh-keys` item on
+  both read paths** (measured against the API). A finding fixed minutes before
+  a scan is gone from the scan. README › *Data freshness*.
+
+### Changed
+
+- README: the five catalogue entries, the scope-shard list, the scope note,
+  the fixes paragraph, the configuration rows; the roadmap row below.
+  `VERSION = "18.5"`.
+
+### Tests
+
+- `tests/test_vm_hardening.py` (new): the instance facts (accounts and scopes,
+  metadata, Shielded settings, the fleets by label and by name, the
+  instance-group origin); default-account rows by scopes and privileged roles
+  (v17.1's order), roles not read, dedicated accounts and fleets left out,
+  stopped instances, the template fix; project rows for OS Login, project-wide
+  keys and the serial console with their counts, no project row where OS Login
+  is on, the instance opt-out; instance rows for the serial console, IP
+  forwarding, a non-Shielded image, vTPM off, Secure Boot off; the check end to
+  end with the roles search and the Compute API as the copy of record (a VM
+  moved to a dedicated account, one deleted, one new, the project's key the
+  inventory never shows), each read's failure under *Projects not checked*,
+  the all-clear rows and the Errors.
+- `tests/test_identity_hygiene.py` (new): policy facts, resource labels, the
+  organization from the ancestors, the admin-role name test, the removal lines
+  with conditions; administrative roles by holder and level with every
+  exclusion (primitive, critical at the organization, not admin-named, custom,
+  agents); role separation at project and folder level; external principals by
+  kind, domain and trust, with and without the organization's domain; public
+  images; the insights as protos and dicts, dismissed and other subtypes
+  skipped, the default-account fix; both checks end to end with the side reads
+  failing one by one.
+- `tests/test_network_edge.py`: `list_assets` from the search index with the
+  listing for the rest, a failed search, a client without a search.
+- Synthetic world (drawn last): per VM the account (dedicated, default, default
+  with `cloud-platform`) and the loose settings, per project OS Login and
+  project-wide keys, administrative roles on accounts, a role-separation
+  principal, external, consumer and deleted principals, unused-account insights;
+  the provider answers the IAM-policy search (projects by ID, with their
+  number, folders and organization) and the service-account insight type.
+  1,080 tests.
+
+### Upgrade notes
+
+- Expect, on the first scan: the five names as *new check*. Where VMs run as
+  the default compute account, VM Service Accounts will list them — and Service
+  Account Privileges will show what that account has been granted; where the
+  IAM policies carry partner or consultant identities, External Principals will
+  list them until `TRUSTED_DOMAINS` names their domains.
+- Nothing to grant and no new API: inventory listings and searches under
+  `roles/cloudasset.viewer`, `organizations.get` under
+  `roles/resourcemanager.organizationViewer`, the insights under
+  `roles/recommender.iamViewer`.
 
 ---
 
@@ -2557,7 +2709,7 @@ performance; modernization; enablement; roadmap and roadblocks).
 | **v18.2** | GKE upgrade readiness & hygiene | *Shipped.* **GKE Upgrade Readiness** — maintenance windows, active exclusions, upgrade notifications and security bulletins, surge settings, version skew, and the **PodDisruptionBudgets** that block drains, read from Cloud Asset Inventory; **GKE Observability** — system and control-plane metrics, Managed Prometheus, NodeLocal DNSCache; GKE Node Hardening gains integrity monitoring, intra-node visibility, routes-based and alpha clusters. No new role, no new API. |
 | **v18.3** | Network edge & reachability | *Shipped.* **Hybrid Connectivity** (tunnels down, HA VPN on one interface, Classic VPN, Interconnect without a redundant attachment, one BGP peer for two links), **Load Balancer Edge** (HTTP-only, weak TLS, no Cloud Armor, logging off), **DNS Posture** (DNSSEC, RSASHA1, Cloud DNS logging), **VPC Flow Logs**, **VPC Peering & Cloud NAT** (inactive peerings, MTU mismatch, NAT logging and port allocation); Open Firewall Rules reads firewall policies; VPC Configuration flags legacy networks. No new role, no new API. |
 | **v18.4** | Data governance | *Shipped.* **BigQuery Governance** (public datasets and tables, the time-travel window), **Cloud SQL Flags** (the CIS flag pack of each engine, unset flags read as their defaults, the patch line keeping the flags already set), **AlloyDB Posture** (backups, zonal primaries, public IP, TLS, log flags), **KMS Keys** (90-day rotation of symmetric keys, public rings and keys, separation of duties), **API Keys** (application and API restrictions, age). No new role, no new API. |
-| **v18.5** | VM hardening & identities | Default service accounts and scopes on VMs, OS Login, project-wide SSH keys, serial ports, Shielded VM, public images, non-organization members, administrative and unused service accounts. |
+| **v18.5** | VM hardening & identities | *Shipped.* **VM Service Accounts** (the default account, by its roles and scopes), **VM Hardening** (OS Login and project-wide keys per project; serial console, IP forwarding, Shielded VM and Secure Boot per instance), **Service Account Privileges** (administrative roles on service accounts, separation of duties), **External Principals** (users, groups and domains outside the organization and `TRUSTED_DOMAINS`, consumer accounts, deleted principals, public folders and images), **Unused Service Accounts** (the IAM recommender's 90-day insights). No new role, no new API. |
 | **v18.6** | Forecasts, budgets and spend | *Un-held 2026-11-07 (the number taken when the data path was found ready).* A **spend briefing** from the organization's **billing export to BigQuery** (`BILLING_EXPORT=<project>.<dataset>`, a dataset-level read, no billing-account IAM; *Informational — not configured* when unset): spend by project and service, month-to-date against last month, a trend forecast, week-over-week anomaly flags, and the Scorecard's Efficiency line grounded in real spend; **commitment coverage** from the export's credits (committed-use credits against eligible spend); the **spend-based commitment recommendations** from the Recommender export (`RECOMMENDATIONS_EXPORT`) once that export is shown to carry billing-account rows. Budget coverage (Budgets API: billing-account IAM) and Capacity Planner forecasts (an organization-level role) stay out, possible later as optional capabilities behind an operator grant `tools/deploy.sh` never performs. |
 | **v19** | Footprint and detection | A **Platform Footprint** page (what runs where: services, regions, versions); the detective half of the SSRF chain over Cloud Logging — **GKE control-plane activity** (exec, webhooks, RBAC and DaemonSet changes by service accounts or external IPs), **service-account activity signals**; a **Support cases** briefing (its own API and role, its own decision); the deprecations recommender, once confirmed to exist. |
 | Later | | VM Manager vulnerability summary, Security Command Center findings summary, SLO coverage, PDF export. |

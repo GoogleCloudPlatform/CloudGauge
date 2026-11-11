@@ -270,6 +270,19 @@ class DataGovernance:
 
 
 @dataclass(frozen=True)
+class Posture:
+    """v18.5: what the VM and identity rules read (``provider._posture_assets``, the IAM-policy listing, the service-account insights)."""
+    vm_accounts: tuple  # per VM, in ``vms`` order: "dedicated" | "default" | "default-full" (the default account with cloud-platform)
+    vm_loose: tuple  # per VM: the flags set from ("serial", "ipfwd", "no-secure-boot", "no-shielded", "oslogin-off")
+    project_oslogin: bool  # enable-oslogin=TRUE in the project's common instance metadata
+    project_ssh_keys: bool  # project-wide ssh-keys in the common instance metadata
+    admin_sa_roles: tuple  # (role, member): administrative roles held by service accounts in the project's IAM policy
+    separation_member: str  # a principal holding iam.serviceAccountAdmin and iam.serviceAccountUser on the project ("" for none)
+    external_members: tuple  # (role, member): principals outside example.com in the project's IAM policy
+    unused_accounts: tuple  # (email, days since the last authentication, or None for never): the recommender's SERVICE_ACCOUNT_USAGE insights
+
+
+@dataclass(frozen=True)
 class ProjectProfile:
     index: int
     project_id: str
@@ -335,6 +348,7 @@ class ProjectProfile:
     gke_operations: dict = field(default_factory=dict)  # v18.2: cluster name -> GkeOperations
     network_edge: NetworkEdge = None  # v18.3
     data_governance: DataGovernance = None  # v18.4
+    posture: Posture = None  # v18.5
 
     @property
     def project_number(self):
@@ -672,6 +686,30 @@ class SyntheticOrg:
             kms=rng.choice(["none", "none", "unrotated", "rotated"]), kms_role_separation=_chance(rng, 0.2),
             api_keys=tuple((f"key-{i}", _chance(rng, 0.4), rng.choice([10, 120])) for i in range(rng.choice([0, 0, 1, 2]))))
 
+        # v18.5 (drawn last again): VM posture and identity hygiene.
+        number, admin_sa_roles = self.project_number(index), []
+        if _chance(rng, 0.3):
+            admin_sa_roles.append(("roles/compute.admin", f"serviceAccount:{number}-compute@developer.gserviceaccount.com"))
+        if _chance(rng, 0.3):
+            admin_sa_roles.append(("roles/storage.admin", f"serviceAccount:app@{project_id}.iam.gserviceaccount.com"))
+        if _chance(rng, 0.15):
+            admin_sa_roles.append(("roles/iam.securityAdmin", f"serviceAccount:ci@{project_id}.iam.gserviceaccount.com"))
+        external_members = []
+        if _chance(rng, 0.3):
+            external_members.append(("roles/viewer", "user:contractor@partner.example"))
+        if _chance(rng, 0.1):
+            external_members.append(("roles/logging.viewer", "user:someone@gmail.com"))
+        if _chance(rng, 0.1):
+            external_members.append(("roles/viewer", "group:ops@acquired.example"))
+        if _chance(rng, 0.1):
+            external_members.append(("roles/viewer", "deleted:user:gone@example.com?uid=123456789"))
+        posture = Posture(
+            vm_accounts=tuple(rng.choice(["dedicated", "default", "default", "default-full"]) for _ in vms),
+            vm_loose=tuple(tuple(flag for flag in ("serial", "ipfwd", "no-secure-boot", "no-shielded", "oslogin-off") if _chance(rng, 0.1)) for _ in vms),
+            project_oslogin=_chance(rng, 0.6), project_ssh_keys=_chance(rng, 0.4), admin_sa_roles=tuple(admin_sa_roles),
+            separation_member="user:platform@example.com" if _chance(rng, 0.15) else "", external_members=tuple(external_members),
+            unused_accounts=tuple((sa.email, rng.choice([None, 120, 200])) for sa in service_accounts if _chance(rng, 0.3)))
+
         return ProjectProfile(
             index=index, project_id=project_id, display_name=f"Synthetic Project {index}",
             folder_id=self.folder_of(index), denied=denied, osconfig_disabled=osconfig_disabled,
@@ -694,7 +732,7 @@ class SyntheticOrg:
             pap_enforced_buckets=pap_enforced_buckets,
             unprotected_buckets=unprotected_buckets, sink_buckets=sink_buckets, retention_buckets=retention_buckets, proxy_subnet=proxy_subnet,
             gke_auto_repair=gke_auto_repair, project_audit_configs=project_audit_configs, project_contact=project_contact,
-            gke_operations=gke_operations, network_edge=network_edge, data_governance=data_governance,
+            gke_operations=gke_operations, network_edge=network_edge, data_governance=data_governance, posture=posture,
         )
 
     # --- organization-level data ---
