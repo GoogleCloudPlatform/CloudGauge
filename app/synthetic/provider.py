@@ -785,6 +785,7 @@ class SyntheticGcp:
             if "policy.k8s.io/PodDisruptionBudget" in asset_types:
                 found += [a for c in profile.gke_clusters for a in self._pdb_assets(profile, c)]
             found += self._edge_assets(profile, asset_types)
+            found += self._governance_assets(profile, asset_types)
             return found
         # Folder- or organization-wide listing: one pass over the projects in scope.
         folder_id = parent.split("/", 1)[1] if parent.startswith("folders/") else None
@@ -798,6 +799,7 @@ class SyntheticGcp:
             if "policy.k8s.io/PodDisruptionBudget" in asset_types:
                 found += [a for c in profile.gke_clusters for a in self._pdb_assets(profile, c)]
             found += self._edge_assets(profile, asset_types)
+            found += self._governance_assets(profile, asset_types)
         self.call("asset", "listAssets(folder)" if folder_id else "listAssets(org)", pages=max(1, math.ceil(len(found) / PAGE_SIZE)))
         return found
 
@@ -914,6 +916,50 @@ class SyntheticGcp:
             items[f"regions/{region}"] = {"vpnTunnels": [{"name": f"tunnel-{i}", **self._tunnel_state(edge, i)} for i in ([0] if edge.vpn == "ha-one" else [0, 1])]}
         return {"items": items}
 
+    def _governance_assets(self, profile, asset_types):
+        """The project's data-governance assets (v18.4): BigQuery datasets, an AlloyDB cluster and instance, KMS keys, API keys."""
+        g, project_id, number = profile.data_governance, profile.project_id, profile.project_number
+        if g is None:
+            return []
+        region = profile.subnets[0][1] if profile.subnets else "us-central1"
+        found = []
+
+        def asset(service, path, data):
+            found.append(SimpleNamespace(name=f"//{service}.googleapis.com/projects/{project_id}/{path}",
+                                         resource=SimpleNamespace(data=data, parent=f"//cloudresourcemanager.googleapis.com/projects/{number}")))
+
+        if "bigquery.googleapis.com/Dataset" in asset_types:
+            for dataset_id, hours, public in g.datasets:
+                access = [{"role": "OWNER", "specialGroup": "projectOwners"}, {"role": "READER", "specialGroup": "projectReaders"}]
+                if public:
+                    access.append({"role": "READER", "specialGroup": "allAuthenticatedUsers"})
+                asset("bigquery", f"datasets/{dataset_id}", {"datasetReference": {"datasetId": dataset_id, "projectId": project_id}, "access": access,
+                                                             **({"maxTimeTravelHours": str(hours)} if hours != 168 else {}), "location": "US"})
+        if g.alloydb != "none":
+            good = g.alloydb == "regional-good"
+            if "alloydb.googleapis.com/Cluster" in asset_types:
+                asset("alloydb", f"locations/{region}/clusters/alloy-main", {"name": f"projects/{project_id}/locations/{region}/clusters/alloy-main",
+                                                                           "automatedBackupPolicy": {"enabled": good}, "continuousBackupConfig": {"enabled": good}})
+            if "alloydb.googleapis.com/Instance" in asset_types:
+                asset("alloydb", f"locations/{region}/clusters/alloy-main/instances/alloy-primary",
+                      {"name": f"projects/{project_id}/locations/{region}/clusters/alloy-main/instances/alloy-primary", "instanceType": "PRIMARY",
+                       "availabilityType": "REGIONAL" if good else "ZONAL", "networkConfig": {"enablePublicIp": not good},
+                       "clientConnectionConfig": {"sslConfig": {"sslMode": "ENCRYPTED_ONLY" if good else "ALLOW_UNENCRYPTED_AND_ENCRYPTED"}},
+                       "databaseFlags": {"log_connections": "on", "log_disconnections": "on"} if good else {}})
+        if g.kms != "none" and "cloudkms.googleapis.com/CryptoKey" in asset_types:
+            asset("cloudkms", f"locations/{region}/keyRings/ring-main/cryptoKeys/data-key",
+                  {"name": f"projects/{project_id}/locations/{region}/keyRings/ring-main/cryptoKeys/data-key", "purpose": "ENCRYPT_DECRYPT", "primary": {"state": "ENABLED"},
+                   **({"rotationPeriod": "7776000s", "nextRotationTime": _iso(-30)} if g.kms == "rotated" else {})})
+            asset("cloudkms", f"locations/{region}/keyRings/ring-main/cryptoKeys/signing-key",
+                  {"name": f"projects/{project_id}/locations/{region}/keyRings/ring-main/cryptoKeys/signing-key", "purpose": "ASYMMETRIC_SIGN", "primary": {"state": "ENABLED"}})
+        if "apikeys.googleapis.com/Key" in asset_types:
+            for i, (display, restricted, age) in enumerate(g.api_keys):  # the inventory names API keys by project number
+                found.append(SimpleNamespace(name=f"//apikeys.googleapis.com/projects/{number}/locations/global/keys/{project_id}-k{i}",
+                                             resource=SimpleNamespace(parent=f"//cloudresourcemanager.googleapis.com/projects/{number}", data={
+                                                 "name": f"projects/{number}/locations/global/keys/{project_id}-k{i}", "uid": f"{project_id}-k{i}", "displayName": display, "createTime": _iso(age),
+                                                 "restrictions": ({"apiTargets": [{"service": "storage.googleapis.com"}], "serverKeyRestrictions": {"allowedIps": ["203.0.113.0/24"]}} if restricted else {})})))
+        return found
+
     @staticmethod
     def _pdb_assets(profile, cluster):
         """The cluster's ``policy.k8s.io/PodDisruptionBudget`` assets (v18.2), as the inventory shows Kubernetes objects: spec and status."""
@@ -1009,6 +1055,23 @@ class SyntheticGcp:
         profiles = [self.world.project(scope.split("/", 1)[1])] if scope.startswith("projects/") else self.world.projects(folder_id)
         email = query.split('"')[1] if query.startswith('policy:"') else None
         results = []
+        if query.startswith("memberTypes:") or query.startswith("roles:(roles/cloudkms"):  # v18.4: public access; KMS separation of duties
+            for profile in profiles:
+                g = profile.data_governance
+                if g is None:
+                    continue
+                common = {"project": f"projects/{profile.project_number}", "organization": f"organizations/{self.world.org_id}", "folders": [f"folders/{profile.folder_id}"]}
+                if query.startswith("memberTypes:"):
+                    for dataset_id, hours, public in g.datasets:
+                        if public and "bigquery.googleapis.com/Dataset" in (request.get("asset_types") or ["bigquery.googleapis.com/Dataset"]):
+                            results.append(SimpleNamespace(asset_type="bigquery.googleapis.com/Dataset", resource=f"//bigquery.googleapis.com/projects/{profile.project_id}/datasets/{dataset_id}",
+                                                           policy=SimpleNamespace(bindings=[SimpleNamespace(role="roles/bigquery.dataViewer", members=["allAuthenticatedUsers"])]), **common))
+                elif g.kms_role_separation:
+                    results.append(SimpleNamespace(asset_type="cloudresourcemanager.googleapis.com/Project", resource=f"//cloudresourcemanager.googleapis.com/projects/{profile.project_id}",
+                                                   policy=SimpleNamespace(bindings=[SimpleNamespace(role="roles/cloudkms.admin", members=["user:dba@example.com"]),
+                                                                                    SimpleNamespace(role="roles/cloudkms.cryptoKeyEncrypterDecrypter", members=["user:dba@example.com", "serviceAccount:app@x.iam.gserviceaccount.com"])]), **common))
+            self.call("asset", "searchAllIamPolicies", pages=max(1, math.ceil(len(results) / PAGE_SIZE)))
+            return results
         for profile in profiles:
             project_bindings = self._project_policy_bindings(profile)
             common = {"project": f"projects/{profile.project_number}", "organization": f"organizations/{self.world.org_id}", "folders": [f"folders/{profile.folder_id}"]}
@@ -1068,6 +1131,13 @@ class SyntheticGcp:
         data = {"name": sql.name, "databaseVersion": sql.database_version, "region": region, "settings": {
             "availabilityType": "ZONAL" if sql.zonal else "REGIONAL",
             "backupConfiguration": {"enabled": sql.backups, "pointInTimeRecoveryEnabled": sql.pitr, "retainedBackupsCount": sql.retained_backups}}}
+        governance = profile.data_governance  # v18.4: the CIS flag pack, or the engine defaults
+        if governance and governance.sql_flags == "pack":
+            packs = {"POSTGRES": [("log_connections", "on"), ("log_disconnections", "on"), ("log_statement", "ddl"), ("cloudsql.enable_pgaudit", "on")],
+                     "MYSQL": [("local_infile", "off"), ("skip_show_database", "on")],
+                     "SQLSERVER": [("remote access", "off"), ("3625", "on")]}
+            engine = next((e for e in packs if sql.database_version.upper().startswith(e)), "POSTGRES")
+            data["settings"]["databaseFlags"] = [{"name": n, "value": v} for n, v in packs[engine]]
         return SimpleNamespace(name=f"//cloudsql.googleapis.com/projects/{profile.project_id}/instances/{sql.name}",
                                resource=SimpleNamespace(data=data))
 

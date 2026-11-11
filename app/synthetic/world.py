@@ -259,6 +259,17 @@ class NetworkEdge:
 
 
 @dataclass(frozen=True)
+class DataGovernance:
+    """v18.4: what the data-governance rules read (``provider._governance_assets``)."""
+    datasets: tuple  # (dataset id, time-travel hours, public)
+    sql_flags: str  # "bare" (engine defaults) | "pack" (the CIS flags set)
+    alloydb: str  # "none" | "zonal-bare" (zonal, backups off, public IP, TLS not enforced) | "regional-good"
+    kms: str  # "none" | "unrotated" | "rotated"
+    kms_role_separation: bool  # a user holding both cloudkms.admin and cryptoKeyEncrypterDecrypter on the project
+    api_keys: tuple  # (display name, restricted, age in days)
+
+
+@dataclass(frozen=True)
 class ProjectProfile:
     index: int
     project_id: str
@@ -323,6 +334,7 @@ class ProjectProfile:
     project_contact: bool = False  # the project has an Essential Contact of its own (SUSPENSION, LEGAL)
     gke_operations: dict = field(default_factory=dict)  # v18.2: cluster name -> GkeOperations
     network_edge: NetworkEdge = None  # v18.3
+    data_governance: DataGovernance = None  # v18.4
 
     @property
     def project_number(self):
@@ -653,6 +665,13 @@ class SyntheticOrg:
             dns_zone=rng.choice(["none", "none", "plain", "signed", "rsasha1"]), dns_logging=_chance(rng, 0.3),
             firewall_policy=_chance(rng, 0.15), legacy_network=_chance(rng, 0.05))
 
+        # v18.4 (drawn last again): data governance.
+        datasets = tuple((f"ds_{i}", rng.choice([168, 168, 48]), _chance(rng, 0.1)) for i in range(rng.choice([0, 1, 2])))
+        data_governance = DataGovernance(
+            datasets=datasets, sql_flags=rng.choice(["bare", "bare", "pack"]), alloydb=rng.choice(["none", "none", "none", "zonal-bare", "regional-good"]),
+            kms=rng.choice(["none", "none", "unrotated", "rotated"]), kms_role_separation=_chance(rng, 0.2),
+            api_keys=tuple((f"key-{i}", _chance(rng, 0.4), rng.choice([10, 120])) for i in range(rng.choice([0, 0, 1, 2]))))
+
         return ProjectProfile(
             index=index, project_id=project_id, display_name=f"Synthetic Project {index}",
             folder_id=self.folder_of(index), denied=denied, osconfig_disabled=osconfig_disabled,
@@ -675,7 +694,7 @@ class SyntheticOrg:
             pap_enforced_buckets=pap_enforced_buckets,
             unprotected_buckets=unprotected_buckets, sink_buckets=sink_buckets, retention_buckets=retention_buckets, proxy_subnet=proxy_subnet,
             gke_auto_repair=gke_auto_repair, project_audit_configs=project_audit_configs, project_contact=project_contact,
-            gke_operations=gke_operations, network_edge=network_edge,
+            gke_operations=gke_operations, network_edge=network_edge, data_governance=data_governance,
         )
 
     # --- organization-level data ---

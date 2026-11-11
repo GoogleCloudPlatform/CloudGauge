@@ -246,8 +246,8 @@ def test_scan_completes_against_the_synthetic_organization(gcp, scope):
     # ... and the log sinks of the scope (v18.1: Cloud Storage Versioning's sink-destination rule); v18.2: the clusters again and
     # their PodDisruptionBudgets (GKE Upgrade Readiness).
     # v18.3: the five network-edge listings (and Open Firewall Rules' firewall-policy listing).
-    assert by_method.get('asset.listAssets(org)', 0) == (16 if scope == 'organization' else 0)
-    assert by_method.get('asset.listAssets(folder)', 0) == (16 if scope == 'folder' else 0)
+    assert by_method.get('asset.listAssets(org)', 0) == (21 if scope == 'organization' else 0)
+    assert by_method.get('asset.listAssets(folder)', 0) == (21 if scope == 'folder' else 0)
     assert by_method.get('accesscontextmanager.servicePerimeters.list', 0) == 1
     metrics = provider.metrics.snapshot()
     assert metrics['total_calls'] > 50 and metrics['errors'] == {}
@@ -331,7 +331,9 @@ def test_denied_projects_and_quota_errors_do_not_break_the_scan(gcp):
     assert html.count('<strong>Projects not checked</strong>') == 4  # one item on each category page
     assert 'Not assessed — no' not in html  # the item above makes each page a listed page, not an empty one
     rows = [row for row in csv.reader(io.StringIO(store.read_report('syn-job', scope_id, 'csv'))) if row[:2] == ['Projects not checked', 'Error']]
-    assert {row[2] for row in rows} == {p.project_id for p in provider.world.projects()}  # every project, by ID
+    # Every project, by ID. A v18.4 check whose scope-level policy or resource search drew a 429 records the scanned scope itself
+    # (it has no project list), so the scope's own name may appear beside the projects.
+    assert {row[2] for row in rows} - {f'organizations/{scope_id}'} == {p.project_id for p in provider.world.projects()}
     # Location discovery fails for every project too, so no zone or region is found and the cost
     # recommenders are never queried: the project is reported with the discovery error rather
     # than passing as compliant. Network Insights always queries 'global', so its queries fail.

@@ -35,6 +35,18 @@ from app.checks.cost import (
     check_storage_lifecycle,
     run_cost_recommendations,
 )
+from app.checks.data_governance import (
+    ALLOYDB_CHECK,
+    API_KEYS_CHECK,
+    BIGQUERY_CHECK,
+    KMS_CHECK,
+    SQL_FLAGS_CHECK,
+    check_alloydb_posture,
+    check_api_keys,
+    check_bigquery_governance,
+    check_kms_keys,
+    check_sql_flags,
+)
 from app.checks.gke_operations import UPGRADE_READINESS_CHECK, check_gke_operations
 from app.checks.gke_versions import CHECK_NAME as GKE_VERSIONS_CHECK
 from app.checks.gke_versions import check_gke_supported_versions
@@ -189,6 +201,12 @@ def build_check_plan(scope, scope_id, job_id, all_projects, active_zones, active
         CheckSpec("Security & Identity", DNS_CHECK, check_dns_posture, (scope, scope_id, job_id)),
         CheckSpec("Operational Excellence & Observability", FLOW_LOGS_CHECK, check_flow_logs, (scope, scope_id, job_id)),
         CheckSpec("Reliability & Resilience", PEERING_NAT_CHECK, check_peering_and_nat, (scope, scope_id, job_id)),
+        # v18.4: data governance, from the scope's inventory (five listings, two IAM-policy searches)
+        CheckSpec("Security & Identity", BIGQUERY_CHECK, check_bigquery_governance, (scope, scope_id, job_id)),
+        CheckSpec("Security & Identity", SQL_FLAGS_CHECK, check_sql_flags, (scope, scope_id, job_id)),
+        CheckSpec("Reliability & Resilience", ALLOYDB_CHECK, check_alloydb_posture, (scope, scope_id, job_id)),
+        CheckSpec("Security & Identity", KMS_CHECK, check_kms_keys, (scope, scope_id, job_id)),
+        CheckSpec("Security & Identity", API_KEYS_CHECK, check_api_keys, (scope, scope_id, job_id)),
     ]
 
     if scope == 'organization':
@@ -219,6 +237,7 @@ SCOPE_LEVEL_CHECKS = frozenset({
     SNAPSHOT_SPRAWL_CHECK, SQL_VERSIONS_CHECK, CREDENTIAL_EXPOSURE_CHECK, IMPERSONATION_CHECK, VPC_SC_CHECK,
     UPGRADE_READINESS_CHECK,  # v18.2: two listings under the scope
     HYBRID_CHECK, EDGE_CHECK, DNS_CHECK, FLOW_LOGS_CHECK, PEERING_NAT_CHECK,  # v18.3: one listing each
+    BIGQUERY_CHECK, SQL_FLAGS_CHECK, ALLOYDB_CHECK, KMS_CHECK, API_KEYS_CHECK,  # v18.4: one listing each
 })
 # The checks that do both: scope-wide work plus per-project work. Shards split them
 # with keyword flags: the scope shard runs the first set, the project shards the second

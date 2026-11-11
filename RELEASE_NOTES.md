@@ -8,7 +8,107 @@ the test suite running inside the image, a zero-traffic canary revision scanned
 against a real organization, promotion, and a production scan compared fact for
 fact with the previous version's report.
 
-Versions are the image tags (`v5` … `v18.3`); the commit is the one that shipped.
+Versions are the image tags (`v5` … `v18.4`); the commit is the one that shipped.
+
+---
+
+## v18.4 — Data governance
+
+The third themed release. The Security Health Analytics Standard detectors
+and the CIS Level-1 items for the data plane — public datasets, Cloud SQL
+flags, KMS rotation, API keys — were the largest block of the benchmark the
+tool did not read, and a leaked key or an open dataset is the shortest path
+from a misconfiguration to an incident. Every item is a setting in Cloud Asset
+Inventory — one listing per check under the scanned scope — plus one
+IAM-policy search where the question is *who* may reach the data. No new API,
+no new role.
+
+### Added
+
+- **BigQuery Governance** (Security & Identity, every scope): a dataset whose
+  ACL admits `allUsers` or `allAuthenticatedUsers`, and a dataset or **table**
+  whose IAM policy does (one `searchAllIamPolicies` under the scope, the
+  dataset's own ACL not repeated) — **Action Required**
+  (`PUBLIC_DATASET`, CIS 7.1); a dataset whose **time-travel window** is
+  below the seven-day default (*Investigation*: a dropped table or a bad
+  `DELETE` is recoverable for that long only). Rows `Project, Resource,
+  Issue, Detail, Fix`.
+- **Cloud SQL Flags** (Security & Identity, every scope): the CIS §6 flag
+  pack of each engine, an unset flag read as its **engine default** — MySQL
+  `local_infile` (**Action Required**) and `skip_show_database`; PostgreSQL
+  `log_connections`, `log_disconnections`, `log_error_verbosity`,
+  `log_min_messages`, `log_min_error_statement`,
+  `log_min_duration_statement`, `log_statement`, `cloudsql.enable_pgaudit`
+  (the level flags judged on their ordered scales: *warning or stricter*,
+  *ddl or stricter*); SQL Server `external scripts enabled`, `cross db
+  ownership chaining`, `remote access`, `contained database authentication`
+  (**Action Required**), `user connections`, `user options`, trace flag
+  `3625`. One row per failing flag with the CIS item; the fix is the
+  `gcloud sql instances patch --database-flags=` line with **the flags
+  already set included** (patch replaces the whole list). Read replicas
+  inherit their primary's flags and are not repeated.
+- **AlloyDB Posture** (Reliability & Resilience, every scope): a cluster
+  without **automated backups** (**Action Required**) or without
+  **continuous backup** (*Investigation*: no point-in-time recovery); a
+  **zonal primary**; an instance with a **public IP**; an instance whose
+  `sslMode` is not `ENCRYPTED_ONLY`; the PostgreSQL log flags
+  (`log_connections`, `log_disconnections`, `log_error_verbosity`,
+  `log_min_messages`, `log_min_error_statement`) — *Investigation
+  Recommended*, each with its `gcloud alloydb … update` line.
+- **KMS Keys** (Security & Identity, every scope): a **symmetric** key with
+  no rotation period, with one above 90 days, or whose next rotation is
+  overdue (CIS 1.10, *Investigation*; asymmetric, MAC, disabled and destroyed
+  keys have no rotation and are not judged); a key ring or key whose IAM
+  policy admits the public (**Action Required**, `KMS_PUBLIC_KEY`); a
+  principal holding `roles/cloudkms.admin` **and** an encrypter or decrypter
+  role on the same resource (CIS 1.11, separation of duties, *Investigation*)
+  — from one `searchAllIamPolicies` on the KMS roles under the scope.
+- **API Keys** (Security & Identity, every scope): a key **without an
+  application restriction** (CIS 1.13), **without an API restriction** (CIS
+  1.14), or **older than 90 days** (CIS 1.15) — *Investigation Recommended*,
+  with the `gcloud services api-keys update` line. That a project has API
+  keys at all is not a row. The inventory names API keys by project
+  *number*; the rows name the project by ID (one resource search under the
+  scope; if it fails the rows keep the number and *Projects not checked*
+  says so).
+
+### Changed
+
+- README: the five catalogue entries, the scope-shard list, the scope note,
+  the fixes paragraph; the roadmap row below. `VERSION = "18.4"`.
+
+### Tests
+
+- `tests/test_data_governance.py` (new): the engine and flag readers; the
+  three flag packs on bare instances (what the engine defaults fail) and on
+  set flags, the ordered PostgreSQL scales and an unknown level; replicas
+  skipped and the patch line keeping the flags already set; public datasets
+  by ACL and by policy search (deduplicated), public tables, the time-travel
+  window; AlloyDB backups, zonal primary, public IP, TLS and log flags, a
+  read pool not judged as a primary; KMS rotation (none, above 90 days,
+  overdue, in time), asymmetric, MAC and destroyed keys skipped, public rings
+  and keys, separation of duties at project and ring level; API keys by
+  restriction and age, a key without a creation time, project numbers
+  resolved to IDs; the five checks end to
+  end with the inventory and both searches, the all-clear rows, the Error,
+  and a failed policy search left under *Projects not checked* with the rest
+  of the check standing; the five names as new checks.
+- Synthetic world (drawn last): per project BigQuery datasets (a short
+  time-travel window, a public one), Cloud SQL flags bare or the CIS pack, an
+  AlloyDB cluster of two shapes, a KMS ring with an unrotated or a rotated
+  key beside a signing key, a user holding both KMS roles, API keys
+  restricted or not; the provider answers the public-member and KMS-role
+  policy searches. 1,064 tests.
+
+### Upgrade notes
+
+- Expect, on the first scan: the five names as *new check*. Where a
+  PostgreSQL instance runs on its default flags, the Cloud SQL Flags check
+  will list the four items the defaults fail; where API keys were created
+  without restrictions, API Keys will list them — those are the cases behind
+  the release.
+- Nothing to grant and no new API: inventory reads and IAM-policy searches
+  under `roles/cloudasset.viewer`.
 
 ---
 
@@ -2456,7 +2556,7 @@ performance; modernization; enablement; roadmap and roadblocks).
 | **v18.1** | Legacy checks revalidated — what is loose | *Shipped.* Cloud Storage Versioning scoped to log-sink destination buckets (soft delete, lifecycle rules and retention policies as protection); VPC Configuration without proxy-only subnets and with the default network's auto-subnets collapsed; Organization Log Sink's filter, state and `includeChildren`, and a **Data Access Audit Logs** check from the `auditConfigs` of the scanned resource and its ancestors; Essential Contacts without invalid contacts and in every scope; cost recommendations by priority with fix lines, **MIG Rightsizing**; GKE auto-repair; project-global quotas; firewall complexity retired; the best-practices table bundled in the image, replaceable by a `gs://` or `https://` URL and amended by an overrides file in the results bucket, with a provenance line in the report. No new role, no new API. |
 | **v18.2** | GKE upgrade readiness & hygiene | *Shipped.* **GKE Upgrade Readiness** — maintenance windows, active exclusions, upgrade notifications and security bulletins, surge settings, version skew, and the **PodDisruptionBudgets** that block drains, read from Cloud Asset Inventory; **GKE Observability** — system and control-plane metrics, Managed Prometheus, NodeLocal DNSCache; GKE Node Hardening gains integrity monitoring, intra-node visibility, routes-based and alpha clusters. No new role, no new API. |
 | **v18.3** | Network edge & reachability | *Shipped.* **Hybrid Connectivity** (tunnels down, HA VPN on one interface, Classic VPN, Interconnect without a redundant attachment, one BGP peer for two links), **Load Balancer Edge** (HTTP-only, weak TLS, no Cloud Armor, logging off), **DNS Posture** (DNSSEC, RSASHA1, Cloud DNS logging), **VPC Flow Logs**, **VPC Peering & Cloud NAT** (inactive peerings, MTU mismatch, NAT logging and port allocation); Open Firewall Rules reads firewall policies; VPC Configuration flags legacy networks. No new role, no new API. |
-| **v18.4** | Data governance | Public BigQuery datasets and tables, BigQuery time travel and expiration defaults, Cloud SQL flag packs, AlloyDB exposure and backups, KMS rotation and IAM, API keys. |
+| **v18.4** | Data governance | *Shipped.* **BigQuery Governance** (public datasets and tables, the time-travel window), **Cloud SQL Flags** (the CIS flag pack of each engine, unset flags read as their defaults, the patch line keeping the flags already set), **AlloyDB Posture** (backups, zonal primaries, public IP, TLS, log flags), **KMS Keys** (90-day rotation of symmetric keys, public rings and keys, separation of duties), **API Keys** (application and API restrictions, age). No new role, no new API. |
 | **v18.5** | VM hardening & identities | Default service accounts and scopes on VMs, OS Login, project-wide SSH keys, serial ports, Shielded VM, public images, non-organization members, administrative and unused service accounts. |
 | **v18.6** | Forecasts, budgets and spend | *Un-held 2026-11-07 (the number taken when the data path was found ready).* A **spend briefing** from the organization's **billing export to BigQuery** (`BILLING_EXPORT=<project>.<dataset>`, a dataset-level read, no billing-account IAM; *Informational — not configured* when unset): spend by project and service, month-to-date against last month, a trend forecast, week-over-week anomaly flags, and the Scorecard's Efficiency line grounded in real spend; **commitment coverage** from the export's credits (committed-use credits against eligible spend); the **spend-based commitment recommendations** from the Recommender export (`RECOMMENDATIONS_EXPORT`) once that export is shown to carry billing-account rows. Budget coverage (Budgets API: billing-account IAM) and Capacity Planner forecasts (an organization-level role) stay out, possible later as optional capabilities behind an operator grant `tools/deploy.sh` never performs. |
 | **v19** | Footprint and detection | A **Platform Footprint** page (what runs where: services, regions, versions); the detective half of the SSRF chain over Cloud Logging — **GKE control-plane activity** (exec, webhooks, RBAC and DaemonSet changes by service accounts or external IPs), **service-account activity signals**; a **Support cases** briefing (its own API and role, its own decision); the deprecations recommender, once confirmed to exist. |

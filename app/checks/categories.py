@@ -81,6 +81,9 @@ CATEGORY_MAP = {
     # v18.3: the network edge.
     "Hybrid Connectivity": "Reliability & Resilience", "VPC Peering & Cloud NAT": "Reliability & Resilience",
     "Load Balancer Edge": "Security & Identity", "DNS Posture": "Security & Identity", "VPC Flow Logs": "Operational Excellence & Observability",
+    # v18.4: data governance.
+    "BigQuery Governance": "Security & Identity", "Cloud SQL Flags": "Security & Identity", "KMS Keys": "Security & Identity", "API Keys": "Security & Identity",
+    "AlloyDB Posture": "Reliability & Resilience",
     "Service Account Impersonation": "Security & Identity", "VPC Service Controls Coverage": "Security & Identity",
 
     # B2: error results. These names are only written when a check fails; the
