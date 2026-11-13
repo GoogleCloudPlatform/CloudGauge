@@ -24,6 +24,8 @@ COPY app ./app
 COPY cloudgauge.py .
 # The policy table of the Organization Policies check ships with the release (v18.1).
 COPY assets/gcp_best_practices.csv ./assets/gcp_best_practices.csv
+# The Cloud Armor ruleset generations of the Cloud Armor Policy Content check ship with the release (v18.6).
+COPY assets/cloud_armor_rulesets.json ./assets/cloud_armor_rulesets.json
 
 # Step 6: Run as an unprivileged user. It needs a home directory: gunicorn's
 # control server keeps its socket under $HOME.

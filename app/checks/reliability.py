@@ -124,7 +124,7 @@ VERSIONING_CHECK = "Cloud Storage Versioning"
 LOG_SINK_ASSET = "logging.googleapis.com/LogSink"
 SOFT_DELETE_MIN_SECONDS = 7 * 24 * 3600
 VERSIONING_ALL_CLEAR = ("Every log-sink destination bucket has versioning, and every other bucket is protected by versioning, "
-                        "soft delete, a lifecycle rule or a retention policy.")
+                        "soft delete, a lifecycle rule or a retention policy (zonal buckets, which support none of these, are not judged).")
 
 
 def sink_destination_buckets(assets):
@@ -165,6 +165,8 @@ def versioning_row(project_id, bucket, sink_buckets):
         return {"Project": project_id, "Bucket": name, "Protection": "versioning off on a log-sink destination bucket",
                 "Fix": f"gcloud storage buckets update gs://{name} --versioning", "_status": "Action Required"}
     if (soft_delete or 0) >= SOFT_DELETE_MIN_SECONDS or lifecycle or retention:
+        return None
+    if str(getattr(bucket, "location_type", "") or "").lower() == "zone":  # v18.6: a zonal (Rapid Storage) bucket supports none of the four — nothing to fix
         return None
     return {"Project": project_id, "Bucket": name, "Protection": "none: versioning off, soft delete off, no lifecycle rule, no retention policy",
             "Fix": f"gcloud storage buckets update gs://{name} --versioning --soft-delete-duration=7d", "_status": "Investigation Recommended"}

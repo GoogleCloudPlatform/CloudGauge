@@ -124,7 +124,9 @@ RESHAPED_CHECKS = {
     "GKE Hygiene": ("18.1", RULE_CHANGED),  # v18: recommendations attributed to their cluster; v18.1: auto-repair rows
     "Unattended Projects": ("18", ROWS_CHANGED),  # the project ID instead of its number
     # v18.1 (what is loose): the rules that now ask for the right thing.
-    "Cloud Storage Versioning": ("18.1", RULE_CHANGED),  # sink/retention buckets Action Required; soft delete and lifecycle protect the rest
+    "Cloud Storage Versioning": ("18.6", RULE_CHANGED),  # v18.6: zonal buckets out (v18.1: sink/retention buckets Action Required; soft delete and lifecycle protect the rest)
+    # v18.6 (refinements from the google/skills mining): the time-travel row graded by the storage billing model; a Note column on the flag rows.
+    "BigQuery Governance": ("18.6", RULE_CHANGED), "Cloud SQL Flags": ("18.6", ROWS_CHANGED),
     "VPC Configuration": ("18.3", RULE_CHANGED),  # v18.3: legacy networks (v18.1: proxy-only subnets, the default network folded)
     "Organization Log Sink": ("18.1", RULE_CHANGED),  # the built-in sinks no longer count; qualification per sink
     "Essential Contacts": ("18.1", RULE_CHANGED),  # invalid contacts out; every scope

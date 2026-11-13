@@ -24,8 +24,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.checks import (capacity, categories, cost, data_governance, gke_operations, gke_security, identity_hygiene, network, network_edge, registry, reliability,
-                        runner, security, vm_hardening)
+from app.checks import (capacity, categories, cost, data_governance, edge_security, gke_operations, gke_security, identity_hygiene, network, network_edge, registry,
+                        reliability, runner, security, serverless, vm_hardening)
 from app.checks.categories import CATEGORY_MAP, categorize_findings
 
 CHECKS_DIR = pathlib.Path(categories.__file__).parent
@@ -40,6 +40,8 @@ DYNAMIC_NAMES = {
     ('data_governance.py', 'check'): data_governance.DATA_GOVERNANCE_CHECKS,  # v18.4: five checks, one writer
     ('vm_hardening.py', 'check'): vm_hardening.VM_CHECKS,  # v18.5: the Error rows of the two records
     ('identity_hygiene.py', 'check'): identity_hygiene.IDENTITY_CHECKS,  # v18.5: the Error rows of the two records
+    ('serverless.py', 'check'): serverless.SERVERLESS_CHECKS,  # v18.6: the Error rows of the two records
+    ('edge_security.py', 'check'): edge_security.EDGE_SECURITY_CHECKS,  # v18.6: the Error rows of the two records
     ('network.py', 'check_name'): network.NETWORK_INSIGHT_TYPES,
     ('reliability.py', 'check'): reliability.RESILIENCE_CHECKS,  # v15.6: a verdict or an Error per name
     ('security.py', 'check_name'): security.REVALIDATED_CHECKS,  # v18: the revalidated legacy checks share one writer

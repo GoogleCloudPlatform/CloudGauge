@@ -32,6 +32,7 @@ cloudbuild.yaml
 LICENSE
 assets/*
 !assets/gcp_best_practices.csv
+!assets/cloud_armor_rulesets.json
 terraform/
 
 # Editors, OS, local configuration

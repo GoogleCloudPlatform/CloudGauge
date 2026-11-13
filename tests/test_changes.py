@@ -238,7 +238,10 @@ def test_rows_are_not_comparable_with_a_previous_scan_by_an_older_release(previo
     assert {name: line for name, line in RESHAPED_CHECKS.items() if line[0] not in ('18', '18.1')} == {
         RESHAPED: ('16.1', RULE_CHANGED), 'Cloud SQL High Availability': ('17.3', ROWS_CHANGED), 'MIG Resilience (Zonal)': ('17.3', ROWS_CHANGED),
         'GKE Node Hardening': ('18.2', RULE_CHANGED),  # v18.2: four more hardening rows (tests/test_gke_operations.py)
-        'Open Firewall Rules': ('18.3', RULE_CHANGED), 'VPC Configuration': ('18.3', RULE_CHANGED)}  # v18.3: firewall policies; legacy networks
+        'Open Firewall Rules': ('18.3', RULE_CHANGED), 'VPC Configuration': ('18.3', RULE_CHANGED),  # v18.3: firewall policies; legacy networks
+        # v18.6 (refinements from the google/skills mining): zonal buckets out of Cloud Storage Versioning; the time-travel row graded by the
+        # storage billing model; a Note column on the Cloud SQL Flags rows (tests/test_data_governance.py, tests/test_loose_rules.py)
+        'Cloud Storage Versioning': ('18.6', RULE_CHANGED), 'BigQuery Governance': ('18.6', RULE_CHANGED), 'Cloud SQL Flags': ('18.6', ROWS_CHANGED)}
     # v18: the legacy checks revalidated (tests/test_revalidated_checks.py pins the list); v18.1: the loose rules (tests/test_loose_rules.py);
     # against any earlier scan their rows are not compared.
     assert {line for name, line in RESHAPED_CHECKS.items() if line[0] == '18'} == {('18', RULE_CHANGED), ('18', ROWS_CHANGED)}

@@ -149,10 +149,16 @@ def test_sql_flag_rows_skip_replicas_and_keep_the_flags_already_set_in_the_fix()
         ('aura-db', 'log_statement', 'none (default)', 'ddl or stricter', IR), ('aura-db', 'cloudsql.enable_pgaudit', 'off (default)', 'on', IR),
         ('orders-db', 'skip_show_database', 'off (default)', 'on', IR), ('erp-db', 'user options', '123', 'not set', IR)]
     assert rows[0] == {'Project': PROJECT, 'Instance': 'aura-db', 'Engine': 'POSTGRES_15', 'Flag': 'log_connections', 'Current': 'off (default)', 'Expected': 'on',
-                       'Issue': 'CIS 6.2.1: log_connections is off (default), expected on.',
+                       'Issue': 'CIS 6.2.1: log_connections is off (default), expected on.', 'Note': '',
                        'Fix': f'gcloud sql instances patch aura-db --project={PROJECT} --database-flags=log_connections=on  # patch replaces the whole list: the flags already set are included',
                        '_status': IR}
     assert rows[2]['Fix'].split('--database-flags=')[1].split('  #')[0] == 'log_statement=ddl'  # the first word of "ddl or stricter"
+    # v18.6: the three flags where Workload Manager's rule points the other way say so and keep CIS.
+    contested = dg.sql_flag_rows(dg.by_kind([sql_instance('pg-db', 'POSTGRES_15', {'log_min_duration_statement': '250'}),
+                                             sql_instance('ms-db', 'SQLSERVER_2019_STANDARD', {'user connections': '100'})])['instances'])
+    notes = {(r['Instance'], r['Flag']): r['Note'] for r in contested}
+    assert notes[('pg-db', 'log_min_duration_statement')].startswith('CIS wants it off') and notes[('ms-db', 'user connections')].startswith('CIS wants 0')
+    assert notes[('ms-db', '3625')].startswith('CIS wants the trace flag on') and notes[('pg-db', 'log_connections')] == ''
     assert rows[4]['Fix'].split('--database-flags=')[1].split('  #')[0] == 'local_infile=off,max_connections=500,skip_show_database=on'  # patch replaces the list
     assert rows[5]['Fix'].split('--database-flags=')[1].split('  #')[0] == 'remote access=off,3625=on'  # "user options" is removed, not set to ""
     assert all(set(r) == set(rows[0]) for r in rows)
@@ -176,7 +182,13 @@ def test_bigquery_rows_public_access_from_the_acl_and_the_policy_search_and_the_
         ('dataset scratch', 'Time travel shortened.', IR), ('dataset open_data', 'Dataset open to the public.', AR),
         ('dataset exports', 'Dataset open to the public.', AR), ('dataset exports', 'Time travel shortened.', IR),
         ('dataset legacy', 'Dataset open to the public.', AR), ('table legacy.events', 'Table open to the public.', AR)]
-    assert rows[0]['Detail'].startswith('48 hours instead of 168') and rows[0]['Fix'] == f'bq update --max_time_travel_hours=168 {PROJECT}:scratch'
+    assert rows[0]['Detail'].startswith('48 hours instead of 168 — under logical storage billing this saves nothing') and rows[0]['Fix'] == f'bq update --max_time_travel_hours=168 {PROJECT}:scratch'
+    # v18.6: under physical storage billing the shorter window is a deliberate trade-off — Informational, and the Detail says what it trades.
+    physical = dataset('archive', 48)
+    physical.resource.data['storageBillingModel'] = 'PHYSICAL'
+    graded = dg.bigquery_rows(dg.by_kind([physical, dataset('scratch', 48)]), {})
+    assert [(r['Resource'], r['_status']) for r in graded] == [('dataset archive', 'Informational'), ('dataset scratch', IR)]
+    assert graded[0]['Detail'].startswith('48 hours instead of 168 — a deliberate trade-off under physical storage billing')
     assert rows[1]['Detail'] == 'allAuthenticatedUsers as READER: anyone on the internet (or any Google account) reads it.'
     assert 'remove the allAuthenticatedUsers entry from access' in rows[1]['Fix']
     assert rows[4]['Fix'] == f'bq remove-iam-policy-binding --member=allUsers --role=roles/bigquery.dataViewer {PROJECT}:legacy'
@@ -365,4 +377,6 @@ def test_a_failed_policy_search_leaves_the_rule_under_projects_not_checked_and_t
 
 def test_the_five_names_enter_the_changes_card_as_new_checks():
     assert dg.DATA_GOVERNANCE_CHECKS == ('BigQuery Governance', 'Cloud SQL Flags', 'AlloyDB Posture', 'KMS Keys', 'API Keys')
-    assert not any(name in RESHAPED_CHECKS for name in dg.DATA_GOVERNANCE_CHECKS)  # new checks: "new check" by the existing rule
+    # v18.4 shipped them as new checks; v18.6 refined two of them (the time-travel grading, the flag rows' Note column) and says so.
+    assert {name: RESHAPED_CHECKS.get(name) for name in dg.DATA_GOVERNANCE_CHECKS} == {
+        'BigQuery Governance': ('18.6', 'rule changed'), 'Cloud SQL Flags': ('18.6', 'rows changed'), 'AlloyDB Posture': None, 'KMS Keys': None, 'API Keys': None}

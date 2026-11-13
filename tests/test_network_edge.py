@@ -395,6 +395,38 @@ def test_list_assets_reads_the_search_index_first_and_the_listing_for_the_rest()
     assert [a.name.split('/')[-1] for a in edge.list_assets(Assets([zone()]), 'organizations/1', ['dns.googleapis.com/ManagedZone'])] == ['aura-public-zone']
 
 
+def test_search_assets_drops_a_type_the_index_does_not_search_and_the_listing_dedupes_it():
+    """v18.6: ``compute.googleapis.com/RegionBackendService`` is not a searchable type — the index files regional backend services under
+    ``BackendService`` — and its presence made the whole search fail (every edge type fell back to the stale listing since v18.5). The type
+    is dropped and the search retried; the listing serves it, and what it repeats is dropped by name."""
+    regional = f'//compute.googleapis.com/projects/p/regions/asia-south1/backendServices/jsl-test'
+    fresh = indexed(regional, 'compute.googleapis.com/BackendService', {'name': 'jsl-test', 'loadBalancingScheme': 'EXTERNAL', 'backends': [{'group': 'g'}]})
+
+    class Picky:
+        def __init__(self):
+            self.searches, self.listings = [], []
+
+        def search_all_resources(self, request):
+            self.searches.append(list(request['asset_types']))
+            if 'compute.googleapis.com/RegionBackendService' in request['asset_types']:
+                raise RuntimeError('400 No supported asset type matches: compute.googleapis.com/RegionBackendService. See https://cloud.google.com/asset-inventory/docs/supported-asset-types')
+            return iter([fresh])
+
+        def list_assets(self, request):
+            self.listings.append(list(request['asset_types']))
+            return [SimpleNamespace(name=regional, resource=SimpleNamespace(data={'name': 'jsl-test', 'loadBalancingScheme': 'EXTERNAL', 'backends': []}))]  # the stale copy
+    client = Picky()
+    types = ['compute.googleapis.com/BackendService', 'compute.googleapis.com/RegionBackendService']
+    found = edge.list_assets(client, 'organizations/1', types)
+    assert client.searches == [types, ['compute.googleapis.com/BackendService']] and client.listings == [['compute.googleapis.com/RegionBackendService']]
+    assert [a.name for a in found] == [regional] and found[0].resource.data['backends'] == [{'group': 'g'}]  # once, the index's fresh copy
+    # Any other search failure still falls back to the listing for everything; a lone unsupported type is raised, not retried forever.
+    class Broken(Picky):
+        def search_all_resources(self, request):
+            raise RuntimeError('400 No supported asset type matches: compute.googleapis.com/RegionBackendService')
+    assert [a.name for a in edge.list_assets(Broken(), 'organizations/1', ['compute.googleapis.com/RegionBackendService'])] == [regional]
+
+
 # --- the security extensions -------------------------------------------------------------------------------------------
 
 def test_firewall_policy_rules_are_judged_like_vpc_rules():

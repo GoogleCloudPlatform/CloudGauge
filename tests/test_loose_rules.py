@@ -68,6 +68,10 @@ def test_versioning_rows_follow_the_protection_ladder():
     # A retention policy protects the objects itself — and excludes versioning (the two cannot be enabled together), so it is never asked for.
     assert row('p', bucket('held', soft_delete=0, retention=86400 * 365), sinks) is None
     assert row('p', SimpleNamespace(name='bare'), sinks)['_status'] == IR  # a client that reports nothing: nothing protects it
+    # v18.6: a zonal (Rapid Storage) bucket supports none of the four protections — nothing to fix, no row; a sink bucket there still is one.
+    zonal = bucket('rapid', soft_delete=0)
+    zonal.location_type = 'zone'
+    assert row('p', zonal, sinks) is None and row('p', SimpleNamespace(name='audit-logs', location_type='zone'), sinks)['_status'] == AR
 
 
 def test_sink_destination_buckets_from_the_asset_listing():
@@ -401,9 +405,10 @@ def test_an_overrides_file_that_cannot_be_read_or_parsed_is_the_checks_error_not
 # --- The release's rule changes -----------------------------------------------------------------------------------
 
 def test_every_loose_rule_draws_its_line_at_v18_1():
-    for name in ['Cloud Storage Versioning', 'Organization Log Sink', 'Essential Contacts', 'Quota Utilization (>80%)', 'GKE Hygiene',
+    for name in ['Organization Log Sink', 'Essential Contacts', 'Quota Utilization (>80%)', 'GKE Hygiene',
                  *(name for name in cost.COST_RECOMMENDERS if name != 'MIG Rightsizing')]:
         assert RESHAPED_CHECKS[name] == ('18.1', RULE_CHANGED), name
     assert RESHAPED_CHECKS['VPC Configuration'] == ('18.3', RULE_CHANGED)  # redrawn again in v18.3 (legacy networks)
+    assert RESHAPED_CHECKS['Cloud Storage Versioning'] == ('18.6', RULE_CHANGED)  # redrawn again in v18.6 (zonal buckets out)
     for name in ('Data Access Audit Logs', 'MIG Rightsizing'):
         assert name not in RESHAPED_CHECKS, name  # a new check is "new check" on the Changes card by the existing rule

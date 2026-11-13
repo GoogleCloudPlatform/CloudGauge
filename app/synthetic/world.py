@@ -283,6 +283,19 @@ class Posture:
 
 
 @dataclass(frozen=True)
+class Serverless:
+    """v18.6: what the serverless and edge rules read (``provider._serverless_assets``, the Cloud Run, Functions and Compute handlers, the
+    public-principal IAM search, the repository and service searches)."""
+    services: tuple  # (name, exposure, account): exposure "iam" | "public-binding" | "public-setting" | "iap" | "internal" | "behind-lb" | "behind-lb-locked"; account "dedicated" | "default"
+    job_account: str  # "" (no job) | "dedicated" | "default"
+    function: str  # "none" | "gen1-public" | "gen1-internal" | "gen2"
+    armor: str  # the content of the edge load balancer's Cloud Armor policy (when it has one): "legacy" | "empty" | "preview" | "modern"
+    certificate: str  # the edge HTTPS proxy's certificate: "none" | "fine" | "expiring" | "expired" | "managed-failed"
+    repositories: int  # Docker repositories in Artifact Registry
+    scanning: bool  # Artifact Analysis (container scanning) enabled in the project
+
+
+@dataclass(frozen=True)
 class ProjectProfile:
     index: int
     project_id: str
@@ -349,6 +362,7 @@ class ProjectProfile:
     network_edge: NetworkEdge = None  # v18.3
     data_governance: DataGovernance = None  # v18.4
     posture: Posture = None  # v18.5
+    serverless: Serverless = None  # v18.6
 
     @property
     def project_number(self):
@@ -710,6 +724,14 @@ class SyntheticOrg:
             separation_member="user:platform@example.com" if _chance(rng, 0.15) else "", external_members=tuple(external_members),
             unused_accounts=tuple((sa.email, rng.choice([None, 120, 200])) for sa in service_accounts if _chance(rng, 0.3)))
 
+        # v18.6 (drawn last again): serverless and edge exposure.
+        exposures = ["iam", "iam", "public-binding", "public-setting", "iap", "internal", "behind-lb", "behind-lb-locked"]
+        serverless = Serverless(
+            services=tuple((name, rng.choice(exposures), rng.choice(["dedicated", "dedicated", "default"])) for name in ("web", "api", "worker", "admin")[:rng.choice([0, 1, 2, 3])]),
+            job_account=rng.choice(["", "", "dedicated", "default"]), function=rng.choice(["none", "none", "gen1-public", "gen1-internal", "gen2"]),
+            armor=rng.choice(["legacy", "empty", "preview", "modern", "modern"]), certificate=rng.choice(["none", "fine", "fine", "expiring", "expired", "managed-failed"]),
+            repositories=rng.choice([0, 0, 1, 2]), scanning=_chance(rng, 0.3))
+
         return ProjectProfile(
             index=index, project_id=project_id, display_name=f"Synthetic Project {index}",
             folder_id=self.folder_of(index), denied=denied, osconfig_disabled=osconfig_disabled,
@@ -732,7 +754,7 @@ class SyntheticOrg:
             pap_enforced_buckets=pap_enforced_buckets,
             unprotected_buckets=unprotected_buckets, sink_buckets=sink_buckets, retention_buckets=retention_buckets, proxy_subnet=proxy_subnet,
             gke_auto_repair=gke_auto_repair, project_audit_configs=project_audit_configs, project_contact=project_contact,
-            gke_operations=gke_operations, network_edge=network_edge, data_governance=data_governance, posture=posture,
+            gke_operations=gke_operations, network_edge=network_edge, data_governance=data_governance, posture=posture, serverless=serverless,
         )
 
     # --- organization-level data ---

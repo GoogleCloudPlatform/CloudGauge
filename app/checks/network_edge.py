@@ -15,7 +15,8 @@ the Compute API per project that has tunnels (the v18.2 lesson):
   domain or not active, Cloud Routers with one BGP peer for two links.
 - **Load Balancer Edge** (Security): HTTP-only external load balancers, HTTPS
   and SSL proxies without a modern SSL policy, external backend services
-  without Cloud Armor or without logging.
+  without Cloud Armor or without logging; v18.6: IAP on a backend service an
+  HTTP-only load balancer serves.
 - **DNS Posture** (Security): public zones without DNSSEC, zones signing with
   RSASHA1, networks without a Cloud DNS logging policy.
 - **VPC Flow Logs** (Operations): VM subnets without flow logs.
@@ -28,6 +29,7 @@ services access peerings — are not judged. Every check reaches a verdict or an
 all-clear row; a listing that fails is the check's Error.
 """
 import logging
+import re
 from types import SimpleNamespace
 
 from google.cloud import asset_v1
@@ -50,7 +52,7 @@ HYBRID_TYPES = [COMPUTE + t for t in ("VpnGateway", "VpnTunnel", "TargetVpnGatew
 # Regional target proxies and URL maps are indexed under the plain types (their names carry /regions/); the first canary's listing was
 # refused for naming RegionTargetHttpProxy, which is no asset type.
 EDGE_TYPES = [COMPUTE + t for t in ("ForwardingRule", "GlobalForwardingRule", "TargetHttpProxy", "TargetHttpsProxy", "TargetSslProxy", "SslPolicy",
-                                    "BackendService", "RegionBackendService")]
+                                    "BackendService", "RegionBackendService", "UrlMap")]  # v18.6: URL maps, to tell which backend services an HTTP-only map serves
 DNS_TYPES = ["dns.googleapis.com/ManagedZone", "dns.googleapis.com/Policy", COMPUTE + "Network"]
 FLOW_LOG_TYPES = [COMPUTE + "Subnetwork"]
 PEERING_NAT_TYPES = [COMPUTE + "Network", COMPUTE + "Router"]
@@ -72,6 +74,9 @@ PEERING_NAT_ALL_CLEAR = "Every peering is active with matching MTUs, and every C
 
 # --- assets ----------------------------------------------------------------------------------------------------------
 
+UNSUPPORTED_SEARCH_TYPE = re.compile(r"No supported asset type matches: ([\w.]+/\w+)")
+
+
 def search_assets(asset_client, parent, asset_types):
     """The resources of ``asset_types`` under ``parent`` from the **search index**, per type: ``{asset_type: [record]}``, each record
     shaped like a listed asset (``name``, ``asset_type``, ``resource.data``, ``update_time``) from its versioned resource. A type the
@@ -79,10 +84,28 @@ def search_assets(asset_client, parent, asset_types):
 
     v18.5: the index reflects a change within minutes (its ``createTime`` is the real one); ``listAssets`` is refreshed by periodic
     snapshots and was observed hours behind (a new VM after 95 minutes, a project's metadata the next morning).
+
+    v18.6: a type the index does not search (``compute.googleapis.com/RegionBackendService`` — the index files regional backend
+    services under ``BackendService``, as it does regional proxies) made the whole search fail, and every type fell back to the
+    listing; such a type is dropped and the search retried, the listing serving it alone (:func:`list_assets` drops the duplicates).
     """
+    asset_types = list(asset_types)
     found = {asset_type: [] for asset_type in asset_types}
-    request = {"scope": parent, "asset_types": list(asset_types), "read_mask": "*", "page_size": 500}
-    for result in asset_client.search_all_resources(request=request):
+    searched = list(asset_types)
+    for _ in range(len(asset_types)):
+        try:
+            results = list(asset_client.search_all_resources(request={"scope": parent, "asset_types": searched, "read_mask": "*", "page_size": 500}))
+            break
+        except Exception as e:
+            match = UNSUPPORTED_SEARCH_TYPE.search(str(e))
+            if not match or match.group(1) not in searched or len(searched) < 2:
+                raise
+            logging.info(f"The asset search does not support {match.group(1)}; searching the other types, the listing serves it")
+            searched.remove(match.group(1))
+            found[match.group(1)] = None
+    else:
+        raise RuntimeError("no searchable asset type left")
+    for result in results:
         asset_type = str(getattr(result, "asset_type", "") or "")
         versions = list(getattr(result, "versioned_resources", None) or [])
         if not versions or found.get(asset_type) is None:
@@ -116,7 +139,14 @@ def list_assets(asset_client, parent, asset_types):
             listed_types.append(asset_type)
     if listed_types:
         found += _list_assets(asset_client, parent, listed_types)
-    return found
+    seen, unique = set(), []  # v18.6: the listing of a type the search does not know can repeat what the search returned under another type
+    for asset in found:
+        name = str(getattr(asset, "name", "") or "")
+        if name and name in seen:
+            continue
+        seen.add(name)
+        unique.append(asset)
+    return unique
 
 
 def _list_assets(asset_client, parent, asset_types):
@@ -283,8 +313,21 @@ def ssl_policy_issue(policy):
     return ", ".join(reasons) if reasons else None
 
 
+def url_map_services(data):
+    """Every backend service a URL map can route to: its default, each path matcher's default, path rules and route rules."""
+    found = [data.get("defaultService")]
+    for matcher in data.get("pathMatchers") or []:
+        found.append(matcher.get("defaultService"))
+        found += [rule.get("service") for rule in matcher.get("pathRules") or []]
+        for rule in matcher.get("routeRules") or []:
+            found.append(rule.get("service"))
+            found += [w.get("backendService") for w in (rule.get("routeAction") or {}).get("weightedBackendServices") or []]
+    return [key(link) for link in found if link]
+
+
 def edge_rows(grouped):
-    """The *Load Balancer Edge* rows: HTTP-only, weak TLS, no Cloud Armor, logging off — external load balancers only."""
+    """The *Load Balancer Edge* rows: HTTP-only, weak TLS, no Cloud Armor, logging off — external load balancers only; v18.6: IAP on a
+    backend service that an HTTP-only load balancer serves (its session cookie and identity headers travel in clear)."""
     rows = []
     proxies = {}
     for kind, proxy_kind in (("targetHttpProxies", "http"), ("targetHttpsProxies", "https"), ("targetSslProxies", "ssl")):
@@ -292,11 +335,17 @@ def edge_rows(grouped):
             proxies[key(proxy["link"])] = (proxy_kind, proxy)
     policies = {key(p["link"]): p["data"] for p in grouped.get("sslPolicies", [])}
     external_rules = [r for r in grouped.get("forwardingRules", []) if is_external(r["data"])]
-    https_maps = set()
+    https_maps, http_maps = set(), set()
     for rule in external_rules:
         kind, proxy = proxies.get(key(rule["data"].get("target")), (None, None))
         if kind == "https":
             https_maps.add(key(proxy["data"].get("urlMap")))
+        elif kind == "http":
+            http_maps.add(key(proxy["data"].get("urlMap")))
+    http_only_services = set()
+    for url_map in grouped.get("urlMaps", []):
+        if key(url_map["link"]) in http_maps - https_maps:
+            http_only_services.update(url_map_services(url_map["data"]))
 
     def row(fact, lb, issue, detail, fix, status):
         rows.append({"Project": fact["project_id"], "Load Balancer": lb, "Scheme": str(fact["data"].get("loadBalancingScheme") or "EXTERNAL"),
@@ -328,6 +377,10 @@ def edge_rows(grouped):
         if not (data.get("logConfig") or {}).get("enable", False):
             row(service, service["name"], "Load balancer logging off.", f"backend service {service['name']}: requests and 5xx answers leave no trace.",
                 f"gcloud compute backend-services update {service['name']} --enable-logging --logging-sample-rate=1 {scope_flag} --project={service['project_id']}", INVESTIGATION)
+        if (data.get("iap") or {}).get("enabled") and key(service["link"]) in http_only_services:
+            row(service, service["name"], "IAP over HTTP.", f"backend service {service['name']} has Identity-Aware Proxy on, behind an HTTP-only load balancer: the IAP session cookie "
+                "and identity headers cross the internet in clear.",
+                "add an HTTPS forwarding rule on the URL map (the HTTP-only row's Fix) and redirect 80 → 443", INVESTIGATION)
     return rows
 
 

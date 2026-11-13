@@ -87,6 +87,9 @@ CATEGORY_MAP = {
     # v18.5: VM hardening & identities.
     "VM Service Accounts": "Security & Identity", "VM Hardening": "Security & Identity", "Service Account Privileges": "Security & Identity",
     "External Principals": "Security & Identity", "Unused Service Accounts": "Security & Identity",
+    # v18.6: serverless and edge exposure
+    "Serverless Exposure": "Security & Identity", "Serverless Service Accounts": "Security & Identity", "Cloud Armor Policy Content": "Security & Identity",
+    "SSL Certificate Health": "Reliability & Resilience", "Container Scanning Enabled": "Security & Identity",
     "Service Account Impersonation": "Security & Identity", "VPC Service Controls Coverage": "Security & Identity",
 
     # B2: error results. These names are only written when a check fails; the

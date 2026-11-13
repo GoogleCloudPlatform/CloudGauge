@@ -30,7 +30,7 @@ import logging
 from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone
 
-from app.checks.gke_operations import ACTION_REQUIRED, INVESTIGATION, write_rows
+from app.checks.gke_operations import ACTION_REQUIRED, INFORMATIONAL, INVESTIGATION, write_rows
 from app.checks.network_edge import by_kind, list_assets, tail
 from app.checks.not_checked import NotChecked
 from app.config import SCOPES
@@ -108,6 +108,12 @@ SQL_FLAG_PACKS = {
     ],
 }
 ALLOYDB_LOG_FLAGS = ("log_connections", "log_disconnections", "log_error_verbosity", "log_min_messages", "log_min_error_statement")
+# v18.6: the pack entries where Google's Workload Manager best-practice rule points the other way; the row says so and keeps CIS.
+CONTESTED_FLAGS = {
+    "log_min_duration_statement": "CIS wants it off (statement text carries data); Workload Manager's rule wants slow-query logging on — this row follows CIS.",
+    "3625": "CIS wants the trace flag on (error details masked for non-admins); Workload Manager's rule flags it on — this row follows CIS.",
+    "user connections": "CIS wants 0 (no artificial cap); Workload Manager's rule flags 0 as unlimited — this row follows CIS.",
+}
 
 
 def engine_of(database_version):
@@ -153,6 +159,7 @@ def sql_flag_rows(facts):
             flag_list = ",".join(f"{k}={v}" for k, v in wanted.items() if v != "") or "<none>"
             rows.append({"Project": fact["project_id"], "Instance": fact["name"], "Engine": str(data.get("databaseVersion") or engine), "Flag": flag,
                          "Current": current, "Expected": expected, "Issue": f"CIS {cis}: {flag} is {current}, expected {expected}.",
+                         "Note": CONTESTED_FLAGS.get(flag, ""),
                          "Fix": f"gcloud sql instances patch {fact['name']} --project={fact['project_id']} --database-flags={flag_list}  "
                                 "# patch replaces the whole list: the flags already set are included",
                          "_status": verdict})
@@ -210,8 +217,13 @@ def bigquery_rows(grouped, public_policies):
                 ACTION_REQUIRED)
         hours = int(float(data.get("maxTimeTravelHours") or DEFAULT_TIME_TRAVEL_HOURS))
         if hours < DEFAULT_TIME_TRAVEL_HOURS:
-            row(dataset["project_id"], f"dataset {dataset_id}", "Time travel shortened.", f"{hours} hours instead of {DEFAULT_TIME_TRAVEL_HOURS}: a dropped table or a bad DELETE is recoverable for that long only.",
-                f"bq update --max_time_travel_hours={DEFAULT_TIME_TRAVEL_HOURS} {dataset['project_id']}:{dataset_id}", INVESTIGATION)
+            # v18.6: graded by the storage billing model — time-travel bytes are billed under physical billing only, so under logical billing
+            # a shorter window saves nothing and the dataset merely lost recoverability.
+            physical = str(data.get("storageBillingModel") or "LOGICAL").upper() == "PHYSICAL"
+            why = ("a deliberate trade-off under physical storage billing (time-travel bytes are billed): a dropped table or a bad DELETE is recoverable for that long only"
+                   if physical else "under logical storage billing this saves nothing (time-travel bytes are not billed): a dropped table or a bad DELETE is recoverable for that long only")
+            row(dataset["project_id"], f"dataset {dataset_id}", "Time travel shortened.", f"{hours} hours instead of {DEFAULT_TIME_TRAVEL_HOURS} — {why}.",
+                f"bq update --max_time_travel_hours={DEFAULT_TIME_TRAVEL_HOURS} {dataset['project_id']}:{dataset_id}", INFORMATIONAL if physical else INVESTIGATION)
     for resource, grants in sorted(public_policies.items()):
         project_id, label, dataset_id, is_table = bigquery_resource(resource)
         if not is_table and f"{project_id}/{dataset_id}" in seen:

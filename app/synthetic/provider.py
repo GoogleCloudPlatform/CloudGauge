@@ -66,7 +66,7 @@ API_LATENCY_SCALE = {
     "accesscontextmanager": 1.0,
 }
 LATENCY_SIGMA = 0.45  # log-normal spread: p95 is about 2x the median
-PASSTHROUGH_SERVICES = ("run",)  # infrastructure APIs the synthetic provider never fakes
+PASSTHROUGH_SERVICES = (("run", "v1"),)  # infrastructure APIs the synthetic provider never fakes (v18.6: Cloud Run v2 is faked for the serverless checks)
 PAGE_SIZE = 100
 COST_RECOMMENDER_IDS = {rec_id: check for check, (rec_id, _) in COST_RECOMMENDERS.items()}
 NETWORK_INSIGHT_IDS = {insight_id: check for check, insight_id in NETWORK_INSIGHT_TYPES.items()}
@@ -234,7 +234,7 @@ class SyntheticGcp:
         return self._credentials, HOST_PROJECT
 
     def api_build(self, serviceName, version, **kwargs):
-        if serviceName in PASSTHROUGH_SERVICES:
+        if (serviceName, version) in PASSTHROUGH_SERVICES:
             return discovery.build(serviceName, version, **kwargs)
         return _DiscoveryStub(self, serviceName, version)
 
@@ -795,6 +795,13 @@ class SyntheticGcp:
                                             asset_type="iam.googleapis.com/ServiceAccount", project=f"projects/{p.project_number}",
                                             folders=[f"folders/{p.folder_id}"], organization=f"organizations/{self.world.org_id}",
                                             parent_full_resource_name=f"//cloudresourcemanager.googleapis.com/projects/{p.project_id}") for e in emails]
+        if "artifactregistry.googleapis.com/Repository" in asset_types or "serviceusage.googleapis.com/Service" in asset_types:  # v18.6
+            project_id = scope.split("/", 1)[1] if scope.startswith("projects/") else None
+            profiles = [self.world.project(project_id)] if project_id else self.world.projects(folder_id)
+            if "artifactregistry.googleapis.com/Repository" in asset_types:
+                results += self._repository_results(profiles)
+            if "serviceusage.googleapis.com/Service" in asset_types:
+                results += self._enabled_service_results(profiles, str(request.get("query") or ""))
         self.call("asset", "searchAllResources", pages=max(1, math.ceil(len(results) / PAGE_SIZE)))
         return results
 
@@ -815,6 +822,7 @@ class SyntheticGcp:
             found += self._edge_assets(profile, asset_types)
             found += self._governance_assets(profile, asset_types)
             found += self._posture_assets(profile, asset_types)
+            found += self._serverless_assets(profile, asset_types)
             return found
         # Folder- or organization-wide listing: one pass over the projects in scope.
         folder_id = parent.split("/", 1)[1] if parent.startswith("folders/") else None
@@ -830,6 +838,7 @@ class SyntheticGcp:
             found += self._edge_assets(profile, asset_types)
             found += self._governance_assets(profile, asset_types)
             found += self._posture_assets(profile, asset_types)
+            found += self._serverless_assets(profile, asset_types)
         self.call("asset", "listAssets(folder)" if folder_id else "listAssets(org)", pages=max(1, math.ceil(len(found) / PAGE_SIZE)))
         return found
 
@@ -896,6 +905,171 @@ class SyntheticGcp:
             found.append(SimpleNamespace(name=f"//compute.googleapis.com/projects/{project_id}", resource=SimpleNamespace(data={
                 "name": project_id, "defaultServiceAccount": f"{number}-compute@developer.gserviceaccount.com", "commonInstanceMetadata": {"items": items}})))
         return found
+
+    # --- v18.6: serverless and edge exposure ---
+
+    @staticmethod
+    def _serverless_region(profile):
+        return profile.subnets[0][1] if profile.subnets else "us-central1"
+
+    def _service_record(self, profile, name, exposure, account, v2=False):
+        """A Cloud Run service as the inventory (Knative v1) or the v2 API shows it."""
+        project_id, number, region = profile.project_id, profile.project_number, self._serverless_region(profile)
+        email = f"{number}-compute@developer.gserviceaccount.com" if account == "default" else f"{name}@{project_id}.iam.gserviceaccount.com"
+        ingress = "internal" if exposure == "internal" else "internal-and-cloud-load-balancing" if exposure == "behind-lb-locked" else "all"
+        if v2:
+            data = {"name": f"projects/{project_id}/locations/{region}/services/{name}", "uri": f"https://{name}-{number}.{region}.run.app",
+                    "ingress": {"all": "INGRESS_TRAFFIC_ALL", "internal": "INGRESS_TRAFFIC_INTERNAL_ONLY", "internal-and-cloud-load-balancing": "INGRESS_TRAFFIC_INTERNAL_LOAD_BALANCER"}[ingress],
+                    "template": {"serviceAccount": email}, "labels": {}}
+            if exposure == "iap":
+                data["iapEnabled"] = True
+            if exposure == "public-setting":
+                data["invokerIamDisabled"] = True
+            return data
+        annotations = {"run.googleapis.com/ingress": ingress, "run.googleapis.com/ingress-status": ingress}
+        if exposure == "iap":
+            annotations["run.googleapis.com/iap-enabled"] = "true"
+        if exposure == "public-setting":
+            annotations["run.googleapis.com/invoker-iam-disabled"] = "true"
+        return {"apiVersion": "serving.knative.dev/v1", "kind": "Service", "metadata": {"name": name, "namespace": number, "annotations": annotations, "labels": {"cloud.googleapis.com/location": region}},
+                "spec": {"template": {"spec": {"serviceAccountName": email, "containers": [{"image": f"gcr.io/{project_id}/{name}"}]}}}, "status": {"url": f"https://{name}-{number}.{region}.run.app"}}
+
+    def _function_record(self, profile, v2=False):
+        """The project's Cloud Function (gen 1: a flat ``CloudFunction``; gen 2: ``serviceConfig`` naming its Cloud Run service) or ``None``."""
+        s, project_id, region = profile.serverless, profile.project_id, self._serverless_region(profile)
+        if s is None or s.function == "none":
+            return None
+        name = f"projects/{project_id}/locations/{region}/functions/fn-main"
+        if s.function == "gen2":
+            return {"name": name, "environment": "GEN_2", "state": "ACTIVE", "serviceConfig": {"service": f"projects/{project_id}/locations/{region}/services/fn-main",
+                                                                                               "serviceAccountEmail": f"{profile.project_number}-compute@developer.gserviceaccount.com", "ingressSettings": "ALLOW_ALL"}}
+        ingress = "ALLOW_ALL" if s.function == "gen1-public" else "ALLOW_INTERNAL_ONLY"
+        email = f"{project_id}@appspot.gserviceaccount.com"
+        if v2:
+            return {"name": name, "environment": "GEN_1", "state": "ACTIVE", "serviceConfig": {"ingressSettings": ingress, "serviceAccountEmail": email, "uri": f"https://{region}-{project_id}.cloudfunctions.net/fn-main"}}
+        return {"name": name, "status": "ACTIVE", "ingressSettings": ingress, "serviceAccountEmail": email, "httpsTrigger": {"url": f"https://{region}-{project_id}.cloudfunctions.net/fn-main"}, "runtime": "python312"}
+
+    @staticmethod
+    def _armor_rules(armor):
+        default = {"priority": 2147483647, "action": "allow", "preview": False, "match": {"versionedExpr": "SRC_IPS_V1", "config": {"srcIpRanges": ["*"]}}}
+        waf = {"legacy": [{"priority": 1000, "action": "deny-403", "preview": False, "match": {"expr": {"expression": "evaluatePreconfiguredExpr('sqli-stable', ['owasp-crs-v030001-id942110-sqli'])"}}}],
+               "empty": [], "preview": [{"priority": 1000, "action": "deny-403", "preview": True, "match": {"expr": {"expression": "evaluatePreconfiguredWaf('sqli-v422-stable')"}}}],
+               "modern": [{"priority": 1000, "action": "deny-403", "preview": False, "match": {"expr": {"expression": "evaluatePreconfiguredWaf('sqli-v422-stable') || evaluatePreconfiguredWaf('xss-v422-stable')"}}}]}
+        return waf[armor] + [default]
+
+    def _certificate_record(self, profile):
+        s, project_id = profile.serverless, profile.project_id
+        if s is None or s.certificate == "none":
+            return None
+        data = {"name": "edge-cert", "selfLink": f"https://www.googleapis.com/compute/v1/projects/{project_id}/global/sslCertificates/edge-cert", "creationTimestamp": _iso(40)}
+        if s.certificate == "managed-failed":
+            return {**data, "type": "MANAGED", "managed": {"domains": [f"www.{project_id}.example"], "status": "PROVISIONING_FAILED", "domainStatus": {f"www.{project_id}.example": "FAILED_NOT_VISIBLE"}}}
+        days = {"fine": -300, "expiring": -12, "expired": 4}[s.certificate]  # _iso counts days ago: negative = in the future
+        return {**data, "type": "SELF_MANAGED", "subjectAlternativeNames": [f"www.{project_id}.example"], "expireTime": _iso(days)}
+
+    def _serverless_assets(self, profile, asset_types):
+        """The project's serverless and edge-security assets (v18.6): Cloud Run services and a job, a function, the serverless NEG and the
+        external backend service of the services behind a load balancer, the edge policy's content, the edge certificate."""
+        s, project_id, number, region = profile.serverless, profile.project_id, profile.project_number, self._serverless_region(profile)
+        if s is None:
+            return []
+        compute = f"https://www.googleapis.com/compute/v1/projects/{project_id}"
+        found = []
+
+        def asset(service, path, data):
+            found.append(SimpleNamespace(name=f"//{service}.googleapis.com/projects/{project_id}/{path}",
+                                         resource=SimpleNamespace(data=data, parent=f"//cloudresourcemanager.googleapis.com/projects/{number}")))
+
+        if "run.googleapis.com/Service" in asset_types:
+            for name, exposure, account in s.services:
+                asset("run", f"locations/{region}/services/{name}", self._service_record(profile, name, exposure, account))
+            if s.function == "gen2":
+                record = self._service_record(profile, "fn-main", "public-binding", "default")
+                record["metadata"]["labels"]["goog-managed-by"] = "cloudfunctions"
+                asset("run", f"locations/{region}/services/fn-main", record)
+        if "run.googleapis.com/Job" in asset_types and s.job_account:
+            email = f"{number}-compute@developer.gserviceaccount.com" if s.job_account == "default" else f"nightly@{project_id}.iam.gserviceaccount.com"
+            asset("run", f"locations/{region}/jobs/nightly", {"apiVersion": "run.googleapis.com/v1", "kind": "Job", "metadata": {"name": "nightly", "namespace": number},
+                                                             "spec": {"template": {"spec": {"template": {"spec": {"serviceAccountName": email, "containers": [{"image": "gcr.io/x/nightly"}]}}}}}})
+        function = self._function_record(profile)
+        if function and (("cloudfunctions.googleapis.com/Function" in asset_types) if s.function == "gen2" else ("cloudfunctions.googleapis.com/CloudFunction" in asset_types)):
+            asset("cloudfunctions", f"locations/{region}/functions/fn-main", function)
+        fronted = [name for name, exposure, _ in s.services if exposure.startswith("behind-lb")]
+        if fronted and "compute.googleapis.com/NetworkEndpointGroup" in asset_types:
+            for name in fronted:
+                asset("compute", f"regions/{region}/networkEndpointGroups/neg-{name}", {"name": f"neg-{name}", "networkEndpointType": "SERVERLESS", "region": f"{compute}/regions/{region}",
+                                                                                       "selfLink": f"{compute}/regions/{region}/networkEndpointGroups/neg-{name}", "cloudRun": {"service": name}})
+        if fronted and "compute.googleapis.com/BackendService" in asset_types:
+            asset("compute", "global/backendServices/run-bes", {"name": "run-bes", "loadBalancingScheme": "EXTERNAL_MANAGED", "protocol": "HTTPS", "logConfig": {"enable": True},
+                                                                "selfLink": f"{compute}/global/backendServices/run-bes", "securityPolicy": f"{compute}/global/securityPolicies/edge",
+                                                                "backends": [{"group": f"{compute}/regions/{region}/networkEndpointGroups/neg-{name}"} for name in fronted]})
+        edge = profile.network_edge
+        armored = fronted or (edge is not None and edge.lb == "https-modern")  # the policy is attached: by run-bes or by the armored edge-bes
+        if armored and "compute.googleapis.com/SecurityPolicy" in asset_types:
+            asset("compute", "global/securityPolicies/edge", {"name": "edge", "type": "CLOUD_ARMOR", "selfLink": f"{compute}/global/securityPolicies/edge", "rules": self._armor_rules(s.armor)})
+        certificate = self._certificate_record(profile)
+        if certificate and edge is not None and edge.lb.startswith("https") and "compute.googleapis.com/SslCertificate" in asset_types:
+            asset("compute", "global/sslCertificates/edge-cert", certificate)
+        return found
+
+    def _h_run_projects_locations_services_list(self, kw, project_id):
+        self.call("run", "services.list", project_id=project_id, style="http")
+        profile, s = self.world.project(project_id), self.world.project(project_id).serverless
+        services = [self._service_record(profile, name, exposure, account, v2=True) for name, exposure, account in (s.services if s else ())]
+        if s and s.function == "gen2":
+            record = self._service_record(profile, "fn-main", "public-binding", "default", v2=True)
+            record["labels"]["goog-managed-by"] = "cloudfunctions"
+            services.append(record)
+        return {"services": services}
+
+    def _h_run_projects_locations_services_getIamPolicy(self, kw, project_id):
+        resource = str(kw.get("resource", ""))
+        project_id = _project_of(resource)
+        self.call("run", "services.getIamPolicy", project_id=project_id, style="http")
+        s, name = self.world.project(project_id).serverless, resource.rsplit("/", 1)[-1]
+        public = name == "fn-main" or any(n == name and exposure in ("public-binding", "behind-lb-locked") for n, exposure, _ in (s.services if s else ()))
+        return {"bindings": [{"role": "roles/run.invoker", "members": ["allUsers"]}], "etag": "synthetic"} if public else {"etag": "synthetic"}
+
+    def _h_run_projects_locations_jobs_list(self, kw, project_id):
+        self.call("run", "jobs.list", project_id=project_id, style="http")
+        profile, s = self.world.project(project_id), self.world.project(project_id).serverless
+        if not (s and s.job_account):
+            return {}
+        email = f"{profile.project_number}-compute@developer.gserviceaccount.com" if s.job_account == "default" else f"nightly@{project_id}.iam.gserviceaccount.com"
+        return {"jobs": [{"name": f"projects/{project_id}/locations/{self._serverless_region(profile)}/jobs/nightly", "template": {"template": {"serviceAccount": email}}}]}
+
+    def _h_cloudfunctions_projects_locations_functions_list(self, kw, project_id):
+        self.call("cloudfunctions", "functions.list", project_id=project_id, style="http")
+        function = self._function_record(self.world.project(project_id), v2=True)
+        return {"functions": [function]} if function else {}
+
+    def _h_compute_securityPolicies_aggregatedList(self, kw, project_id):
+        self.call("compute", "securityPolicies.aggregatedList", project_id=project_id, style="http")
+        policies = [a.resource.data for a in self._serverless_assets(self.world.project(project_id), {"compute.googleapis.com/SecurityPolicy"})]
+        return {"items": {"global": {"securityPolicies": policies}}} if policies else {"items": {}}
+
+    def _h_compute_sslCertificates_aggregatedList(self, kw, project_id):
+        self.call("compute", "sslCertificates.aggregatedList", project_id=project_id, style="http")
+        certificates = [a.resource.data for a in self._serverless_assets(self.world.project(project_id), {"compute.googleapis.com/SslCertificate"})]
+        return {"items": {"global": {"sslCertificates": certificates}}} if certificates else {"items": {}}
+
+    def _repository_results(self, profiles):
+        """``artifactregistry.googleapis.com/Repository`` search results: Docker repositories, named by project ID, with the project number."""
+        results = []
+        for p in profiles:
+            s = p.serverless
+            for i in range(s.repositories if s else 0):
+                name = f"//artifactregistry.googleapis.com/projects/{p.project_id}/locations/us/repositories/images-{i}"
+                results.append(SimpleNamespace(name=name, asset_type="artifactregistry.googleapis.com/Repository", project=f"projects/{p.project_number}",
+                                               versioned_resources=[{"version": "v1", "resource": {"name": name.split("//artifactregistry.googleapis.com/")[1], "format": "DOCKER", "mode": "STANDARD_REPOSITORY"}}]))
+        return results
+
+    def _enabled_service_results(self, profiles, query):
+        """``serviceusage.googleapis.com/Service`` search results for ``name:<service>``: one per project where the world has the service on."""
+        service = query.split("name:", 1)[-1].strip()
+        return [SimpleNamespace(name=f"//serviceusage.googleapis.com/projects/{p.project_number}/services/{service}", asset_type="serviceusage.googleapis.com/Service",
+                                project=f"projects/{p.project_number}", state="ENABLED")
+                for p in profiles if service == "containerscanning.googleapis.com" and p.serverless and p.serverless.scanning]
 
     @staticmethod
     def _sink_assets(profile):
@@ -971,8 +1145,10 @@ class SyntheticGcp:
         if edge.lb == "http" and "compute.googleapis.com/TargetHttpProxy" in asset_types:
             asset("compute", "global/targetHttpProxies/edge-proxy", {"name": "edge-proxy", "selfLink": f"{compute}/global/targetHttpProxies/edge-proxy", "urlMap": f"{compute}/global/urlMaps/edge-map"})
         if edge.lb.startswith("https") and "compute.googleapis.com/TargetHttpsProxy" in asset_types:
+            certificate = profile.serverless.certificate if profile.serverless else "none"  # v18.6
             asset("compute", "global/targetHttpsProxies/edge-proxy", {"name": "edge-proxy", "selfLink": f"{compute}/global/targetHttpsProxies/edge-proxy", "urlMap": f"{compute}/global/urlMaps/edge-map",
-                                                                     **({"sslPolicy": f"{compute}/global/sslPolicies/modern-tls"} if edge.lb == "https-modern" else {})})
+                                                                     **({"sslPolicy": f"{compute}/global/sslPolicies/modern-tls"} if edge.lb == "https-modern" else {}),
+                                                                     **({"sslCertificates": [f"{compute}/global/sslCertificates/edge-cert"]} if certificate != "none" else {})})
         if edge.lb == "https-modern" and "compute.googleapis.com/SslPolicy" in asset_types:
             asset("compute", "global/sslPolicies/modern-tls", {"name": "modern-tls", "selfLink": f"{compute}/global/sslPolicies/modern-tls", "profile": "MODERN", "minTlsVersion": "TLS_1_2"})
         if edge.lb != "none" and "compute.googleapis.com/BackendService" in asset_types:
@@ -1159,6 +1335,13 @@ class SyntheticGcp:
                 if g is None:
                     continue
                 common = {"project": f"projects/{profile.project_number}", "organization": f"organizations/{self.world.org_id}", "folders": [f"folders/{profile.folder_id}"]}
+                if query.startswith("memberTypes:") and "run.googleapis.com/Service" in (request.get("asset_types") or []):  # v18.6: public invokers
+                    s, region = profile.serverless, self._serverless_region(profile)
+                    public_services = [n for n, exposure, _ in (s.services if s else ()) if exposure in ("public-binding", "behind-lb-locked")] + (["fn-main"] if s and s.function == "gen2" else [])
+                    for name in public_services:
+                        results.append(SimpleNamespace(asset_type="run.googleapis.com/Service", resource=f"//run.googleapis.com/projects/{profile.project_id}/locations/{region}/services/{name}",
+                                                       policy=SimpleNamespace(bindings=[SimpleNamespace(role="roles/run.invoker", members=["allUsers"])]), **common))
+                    continue
                 if query.startswith("memberTypes:"):
                     for dataset_id, hours, public in g.datasets:
                         if public and "bigquery.googleapis.com/Dataset" in (request.get("asset_types") or ["bigquery.googleapis.com/Dataset"]):

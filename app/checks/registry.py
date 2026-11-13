@@ -36,6 +36,8 @@ from app.checks.cost import (
     run_cost_recommendations,
 )
 from app.checks.vm_hardening import VM_SA_CHECK, check_vm_posture
+from app.checks.serverless import EXPOSURE_CHECK, SCANNING_CHECK, check_container_scanning, check_serverless_posture
+from app.checks.edge_security import ARMOR_CHECK, check_edge_security
 from app.checks.data_governance import (
     ALLOYDB_CHECK,
     API_KEYS_CHECK,
@@ -214,6 +216,13 @@ def build_check_plan(scope, scope_id, job_id, all_projects, active_zones, active
         CheckSpec("Security & Identity", VM_SA_CHECK, check_vm_posture, (scope, scope_id, job_id)),
         CheckSpec("Security & Identity", SA_PRIVILEGES_CHECK, check_identity_hygiene, (scope, scope_id, job_id)),
         CheckSpec("Security & Identity", UNUSED_SA_CHECK, check_unused_service_accounts, (scope_id, all_projects, job_id)),
+        # v18.6: serverless and edge exposure — Serverless Exposure + Serverless Service Accounts from one listing of the scope's services, jobs,
+        # functions, serverless NEGs and backend services (+ one IAM search, + the Cloud Run and Functions APIs per project), Cloud Armor Policy
+        # Content + SSL Certificate Health from one listing of policies, certificates, backend services and proxies (+ the Compute API per project),
+        # Container Scanning Enabled from two searches (repositories; the Artifact Analysis service)
+        CheckSpec("Security & Identity", EXPOSURE_CHECK, check_serverless_posture, (scope, scope_id, job_id)),
+        CheckSpec("Security & Identity", ARMOR_CHECK, check_edge_security, (scope, scope_id, job_id)),
+        CheckSpec("Security & Identity", SCANNING_CHECK, check_container_scanning, (scope, scope_id, job_id)),
     ]
 
     if scope == 'organization':
@@ -246,6 +255,7 @@ SCOPE_LEVEL_CHECKS = frozenset({
     HYBRID_CHECK, EDGE_CHECK, DNS_CHECK, FLOW_LOGS_CHECK, PEERING_NAT_CHECK,  # v18.3: one listing each
     BIGQUERY_CHECK, SQL_FLAGS_CHECK, ALLOYDB_CHECK, KMS_CHECK, API_KEYS_CHECK,  # v18.4: one listing each
     VM_SA_CHECK, SA_PRIVILEGES_CHECK,  # v18.5: one listing each (two records each: VM Hardening, External Principals)
+    EXPOSURE_CHECK, ARMOR_CHECK, SCANNING_CHECK,  # v18.6: one listing each (two records each for the first two: Serverless Service Accounts, SSL Certificate Health)
 })
 # The checks that do both: scope-wide work plus per-project work. Shards split them
 # with keyword flags: the scope shard runs the first set, the project shards the second

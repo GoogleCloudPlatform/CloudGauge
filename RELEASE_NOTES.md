@@ -8,7 +8,192 @@ the test suite running inside the image, a zero-traffic canary revision scanned
 against a real organization, promotion, and a production scan compared fact for
 fact with the previous version's report.
 
-Versions are the image tags (`v5` … `v18.5`); the commit is the one that shipped.
+Versions are the image tags (`v5` … `v18.6`); the commit is the one that shipped.
+
+---
+
+## v18.6 — Serverless and edge exposure
+
+The sixth themed release, and the first deduced from the google/skills
+mining (61 Google Cloud skills read against the check code; Google's Workload
+Manager best-practice catalogue of 486 rules diffed against v18.5): the one
+compute family the tool had never judged for exposure or identity — Cloud Run
+and Cloud Functions — and the first look *inside* the edge it already listed:
+Cloud Armor policy content, certificates, and whether the images serverless
+runs are ever scanned. Two Cloud Asset Inventory listings under the scope
+(serverless workloads with their load balancers; edge policies and
+certificates), two searches (repositories; the Artifact Analysis service),
+the public-principal IAM search the data checks already run, and **fresh
+reads** from the Cloud Run v2, Cloud Functions v2 and Compute APIs per project
+that has the resources, so a fix shows on the next scan. No new API, no new
+role; three refinements to existing rules ride along.
+
+### Added
+
+- **Serverless Exposure** (Security & Identity, every scope): a Cloud Run
+  service or Cloud Function **behind an external load balancer** (a serverless
+  NEG in an external backend service) whose ingress is still `all` — callers
+  reach the `run.app` URL and bypass the load balancer and whatever Cloud Armor
+  policy it carries — **Action Required** (*Investigation* when IAP on the
+  service still authenticates them: the WAF is what is skipped); a **public**
+  one — `allUsers` / `allAuthenticatedUsers` on the invoker role **or the
+  invoker IAM check disabled**, the newer setting no IAM search sees (in the
+  organization this shipped from, all four public services used it) — with
+  ingress `all` and no IAP, *Investigation*, the row naming what makes it public
+  and IAP or an authenticated caller as the alternatives. IAP-fronted and
+  internal services are never rows; second-generation functions are judged
+  through their Cloud Run service; event-triggered gen-1 functions have no
+  endpoint and no row. Rows `Project, Workload, Location, Kind, Ingress,
+  Invoker, Issue, Detail, Fix` (`--ingress=internal-and-cloud-load-balancing`,
+  `--invoker-iam-check`, `remove-iam-policy-binding`, `--iap`).
+- **Serverless Service Accounts** (Security & Identity, every scope): a Cloud
+  Run service or job, or a function, running as the Compute Engine or App
+  Engine **default service account** (or none, which is the Compute default) —
+  **Action Required** when the account holds a privileged role (the v17.1
+  list, read with the IAM search VM Service Accounts runs), *Investigation*
+  otherwise: a Cloud Run token has no scope limit, every role of the account is
+  reachable from the container. The Fix creates a dedicated account and points
+  the workload at it. Rows `Project, Workload, Location, Kind, Service
+  Account, Issue, Detail, Fix`.
+- **Cloud Armor Policy Content** (Security & Identity, every scope): inside
+  the **attached L7 policies** (`type` `CLOUD_ARMOR`; network and edge
+  policies carry no WAF rules by design, Google's advanced-DDoS policies are
+  its own) — a rule on an **older ruleset generation** (`sqli-stable`,
+  `xss-v33-stable`, `nodejs-v33-*`, …) or on the legacy
+  `evaluatePreconfiguredExpr` syntax, *Investigation*, the Detail naming the
+  current ruleset, the signature gap (RCE 15 → 44, SQLi 49 → 60), the retired
+  signature IDs to drop from the opt-out list and the method-enforcement
+  caveat (PUT/PATCH/DELETE), the Fix the current rule in preview beside the old
+  one; a policy that **protects nothing** (only the default rule, or allow
+  rules over a default allow: no WAF rule, no deny or throttle, Layer-7 DDoS
+  defense off — an allowlist over a default deny is protective and passes); a
+  policy whose deny and throttle rules are **all in preview** ("WAF not
+  enforcing"); *Informational*: preview rules left behind, 180 of the 200-rule
+  quota. The ruleset generations, retired IDs and signature counts ship in
+  `assets/cloud_armor_rulesets.json` (from the google/skills Cloud Armor upgrade
+  reference; a newer generation is one table change). Unattached policies get
+  no row. Rows `Project, Policy, Attached to, Rule, Issue, Detail, Fix`.
+- **SSL Certificate Health** (Reliability & Resilience, every scope): the
+  certificates the target HTTPS and SSL proxies serve — a **self-managed**
+  certificate expiring within 30 days (*Investigation*; **Action Required**
+  within 7 days or expired; the Fix a replacement certificate on the proxy,
+  Google-managed renews itself), a **Google-managed** certificate in
+  `PROVISIONING_FAILED`, `PROVISIONING_FAILED_PERMANENTLY` or `RENEWAL_FAILED`
+  or with a `FAILED_*` domain (**Action Required**: it will not issue until
+  the domain's records point at the load balancer; the old certificate serves
+  until it expires, then nothing) or `PROVISIONING` for more than a day
+  (*Investigation*), an unattached expired certificate (*Informational*,
+  housekeeping). Regional certificates and proxies carry `--region`. Rows
+  `Project, Certificate, Type, Attached to, Expires / Status, Issue, Detail,
+  Fix`.
+- **Container Scanning Enabled** (Security & Identity, every scope),
+  *Investigation Recommended*: a project with standard **Docker repositories**
+  in Artifact Registry (gcr.io redirect repositories included; remote and
+  virtual repositories not counted) and Artifact Analysis
+  (`containerscanning.googleapis.com`) not enabled — no image pushed to it has
+  ever been scanned for known CVEs. One row per project with the repository
+  count and names; `gcloud services enable` as the Fix (billed per image
+  scanned). Two searches of the index — the repositories, and the projects
+  where the service is enabled (an enabled service is an asset, a disabled one
+  is absent) — then the service's state from the Service Usage API per project
+  with such repositories. Rows `Project, Repositories, Issue, Detail, Fix`.
+- **Load Balancer Edge** gains **IAP over HTTP**: a backend service with
+  Identity-Aware Proxy on that an HTTP-only load balancer serves (its session
+  cookie and identity headers cross the internet in clear), *Investigation*;
+  the listing adds `compute.googleapis.com/UrlMap` to tell which backend
+  services an HTTP-only map routes to.
+
+### Changed
+
+- **BigQuery Governance** — the time-travel row is graded by the dataset's
+  **storage billing model**: *Investigation* under logical billing (time-travel
+  bytes are not billed there, so a shorter window saves nothing — the dataset
+  merely lost recoverability), *Informational* under physical billing (a
+  deliberate trade-off; the Detail says what it trades). *Rule changed* on the
+  Changes card of the first scan after the upgrade.
+- **Cloud SQL Flags** — a `Note` column on every row; it says where Google's
+  Workload Manager best-practice rule points the other way
+  (`log_min_duration_statement`, trace flag `3625`, `user connections`) and
+  that the row follows CIS. *Rows changed* on the Changes card.
+- **Cloud Storage Versioning** — zonal (Rapid Storage) buckets, which support
+  none of versioning, soft delete, lifecycle rules or retention, are no longer
+  the "nothing protects the objects" row (its Fix was impossible there); a
+  log-sink destination among them still is. *Rule changed*.
+- **Fresh reads**: Cloud Run services, jobs and their invoker policies (v2
+  API), Cloud Functions (v2 API), the backend services in front of them,
+  Cloud Armor policies and certificates (Compute API), and Artifact
+  Analysis's state (Service Usage API) are re-read per project that has the
+  resources; the inventory says which projects those
+  are and stands in when a read is refused (a line under *Projects not
+  checked* says so, as for the v18.5 VM reads). The first canary showed why
+  the load balancers need it: the index kept a backend service's creation
+  snapshot — an empty backend list — minutes after its NEG was added. The Cloud
+  Functions and API Gateway APIs are read only where the inventory shows the
+  resources — a project without the API has none.
+- **The search-first inventory read, repaired**: two of the edge types —
+  `compute.googleapis.com/RegionBackendService` and `GlobalForwardingRule` —
+  are not searchable (the index files regional backend services and global
+  forwarding rules under the plain types), and naming them made the whole
+  search fail, so every type of *Load Balancer Edge* had been falling back to
+  the hours-stale listing since v18.5 without a sign. `search_assets` now drops
+  a type the index refuses and retries; the listing serves that type alone,
+  and what it repeats is dropped by name. Found by the v18.6 canary, whose
+  bypass row needed the fresh backend services.
+- The synthetic organization draws serverless workloads in every exposure
+  shape, a job and a function, Cloud Armor policy content, certificates and
+  repositories (drawn last, so earlier releases' worlds are unchanged); the
+  synthetic provider fakes Cloud Run **v2** (v1 stays passed through for the
+  worker-URL lookup), Cloud Functions v2, the Compute policy and certificate
+  listings, the repository and service searches, and the public invokers in
+  the IAM-policy search.
+- README: the five catalogue entries and the Load Balancer Edge line, the
+  scope-shard list, the scope note, the data-freshness paragraph, the project
+  structure, the roadmap table re-cut as decided (below). `VERSION = "18.6"`.
+
+### Tests
+
+- `tests/test_serverless.py`: service, job and function facts from the
+  inventory's and the v2 API's shapes (the three ingress spellings, the two
+  public settings, IAP, gen-2 labelling, an unset account); the NEG → backend
+  service → workload join (URL-mask NEGs and internal backend services
+  excluded); exposure rows by binding, setting, IAP, ingress and load balancer,
+  for services and gen-1 functions; service-account rows by account, roles and
+  kind, including unreadable roles and an unknown project number; the checks
+  end to end — the inventory's copy against the API's, each failure path
+  (services, functions, one invoker policy, the public search, the roles
+  search) with its *Projects not checked* line, nothing in scope, a listing
+  that fails; repository facts from search results and listed assets, scanning
+  rows per project, the scanning check end to end; the catalogue, categories
+  and scope-shard lists.
+- `tests/test_edge_security.py`: the bundled ruleset table's consistency;
+  legacy rulesets in expressions and exclusions, standalone rulesets, the
+  legacy syntax on a current name, retired IDs, the signature notes; Armor rows
+  for legacy, empty, allowlist, blocklist, preview-only, modern, oversized,
+  unattached, network and DDoS policies, regional policies, adaptive
+  protection alone; certificate rows by type, expiry, managed status,
+  attachment and region, the Compute timestamp with an offset; the check end
+  to end with the inventory's copy against the API's and the failure paths;
+  the IAP-over-HTTP row of Load Balancer Edge and `url_map_services`.
+- `tests/test_data_governance.py`, `tests/test_loose_rules.py`,
+  `tests/test_changes.py`: the three refinements and their `RESHAPED_CHECKS`
+  lines; `tests/test_worker.py`, `tests/test_synthetic.py`,
+  `tests/test_category_consistency.py`: the plan, the scope shard, the two
+  listings, the names.
+- 1,098 tests.
+
+### Upgrade notes
+
+- No new role and no new API: the Cloud Run, Cloud Functions and Compute
+  reads are under the roles the service account holds (`run.services.list`,
+  `run.services.getIamPolicy`, `cloudfunctions.functions.list`,
+  `compute.securityPolicies.list`, `compute.sslCertificates.list` are in
+  `roles/iam.securityReviewer`; the inventory and the searches under
+  `roles/cloudasset.viewer`), verified by impersonating the service account
+  before the release. Redeploy with `tools/deploy.sh` or `terraform apply`
+  as usual.
+- The first scan after the upgrade shows the five checks as *new check* on
+  the Changes card, and *rule changed* / *rows changed* for the three refined
+  checks.
 
 ---
 
@@ -2710,6 +2895,9 @@ performance; modernization; enablement; roadmap and roadblocks).
 | **v18.3** | Network edge & reachability | *Shipped.* **Hybrid Connectivity** (tunnels down, HA VPN on one interface, Classic VPN, Interconnect without a redundant attachment, one BGP peer for two links), **Load Balancer Edge** (HTTP-only, weak TLS, no Cloud Armor, logging off), **DNS Posture** (DNSSEC, RSASHA1, Cloud DNS logging), **VPC Flow Logs**, **VPC Peering & Cloud NAT** (inactive peerings, MTU mismatch, NAT logging and port allocation); Open Firewall Rules reads firewall policies; VPC Configuration flags legacy networks. No new role, no new API. |
 | **v18.4** | Data governance | *Shipped.* **BigQuery Governance** (public datasets and tables, the time-travel window), **Cloud SQL Flags** (the CIS flag pack of each engine, unset flags read as their defaults, the patch line keeping the flags already set), **AlloyDB Posture** (backups, zonal primaries, public IP, TLS, log flags), **KMS Keys** (90-day rotation of symmetric keys, public rings and keys, separation of duties), **API Keys** (application and API restrictions, age). No new role, no new API. |
 | **v18.5** | VM hardening & identities | *Shipped.* **VM Service Accounts** (the default account, by its roles and scopes), **VM Hardening** (OS Login and project-wide keys per project; serial console, IP forwarding, Shielded VM and Secure Boot per instance), **Service Account Privileges** (administrative roles on service accounts, separation of duties), **External Principals** (users, groups and domains outside the organization and `TRUSTED_DOMAINS`, consumer accounts, deleted principals, public folders and images), **Unused Service Accounts** (the IAM recommender's 90-day insights). No new role, no new API. |
-| **v18.6** | Forecasts, budgets and spend | *Un-held 2026-11-07 (the number taken when the data path was found ready).* A **spend briefing** from the organization's **billing export to BigQuery** (`BILLING_EXPORT=<project>.<dataset>`, a dataset-level read, no billing-account IAM; *Informational — not configured* when unset): spend by project and service, month-to-date against last month, a trend forecast, week-over-week anomaly flags, and the Scorecard's Efficiency line grounded in real spend; **commitment coverage** from the export's credits (committed-use credits against eligible spend); the **spend-based commitment recommendations** from the Recommender export (`RECOMMENDATIONS_EXPORT`) once that export is shown to carry billing-account rows. Budget coverage (Budgets API: billing-account IAM) and Capacity Planner forecasts (an organization-level role) stay out, possible later as optional capabilities behind an operator grant `tools/deploy.sh` never performs. |
-| **v19** | Footprint and detection | A **Platform Footprint** page (what runs where: services, regions, versions); the detective half of the SSRF chain over Cloud Logging — **GKE control-plane activity** (exec, webhooks, RBAC and DaemonSet changes by service accounts or external IPs), **service-account activity signals**; a **Support cases** briefing (its own API and role, its own decision); the deprecations recommender, once confirmed to exist. |
-| Later | | VM Manager vulnerability summary, Security Command Center findings summary, SLO coverage, PDF export. |
+| **v18.6** | Serverless and edge exposure | *Shipped.* **Serverless Exposure** (public Cloud Run services and functions — by binding or by the disabled invoker check — and services reachable around their load balancer), **Serverless Service Accounts** (the default account on Cloud Run and Cloud Functions, by its roles), **Cloud Armor Policy Content** (legacy rulesets, policies that protect nothing, preview-only WAFs, the rule quota), **SSL Certificate Health** (expiring self-managed and failed Google-managed certificates), **Container Scanning Enabled** (Artifact Analysis off beside Docker repositories); IAP over HTTP in Load Balancer Edge; the time-travel row graded by billing model, a Note on the contested Cloud SQL flags, zonal buckets out of Cloud Storage Versioning. The first release deduced from the google/skills mining and the Workload Manager catalogue diff. No new role, no new API. |
+| **v18.7** | Folders, keys and privileged grants | **Folder Primitive Roles** (Owner/Editor on folders — nothing reads them today), **Privileged Grant Inventory** (project creators and billing roles at the organization, `domain:` grants, fewer than two Organization Admins), **Secret Access Scope** (secret-accessor and admin roles granted resource-wide, with the secrets in reach; Secret Manager replication and rotation), **Service Account Key Lifecycle** (any active user-managed key, never-expiring keys, validity above 90 days), **Custom Roles With IAM Powers**, **Data Admin Role Sprawl**. No new role, no new API. |
+| **v18.8** | Forecasts, budgets and spend | A **spend briefing** from the organization's **billing export to BigQuery** (`BILLING_EXPORT=<project>.<dataset>`, a dataset-level read, no billing-account IAM; *Informational — not configured* when unset): spend by project and service, month-to-date against last month, a trend forecast, week-over-week anomaly flags, the Scorecard's Efficiency line grounded in real spend; **commitment coverage** from the export's credits; the spend-based commitment recommendations from the Recommender export once that export carries billing-account rows; plus the config-level cost rows the skills mining found — log retention, DEBUG volume and flow-log sampling, serverless VPC connectors, versioning without pruning, uncovered BigQuery baseline slots, staging datasets without expiry, non-production Cloud SQL HA, backend buckets without CDN, resource labels beyond projects, GKE cost allocation. Budget coverage (billing-account IAM) and Capacity Planner forecasts stay optional-later. |
+| **v18.9** | Logging pipeline and alerting hygiene | **Audit Log Pipeline** (sink filters missing audit log types, destination retention and lock, the writer's grant, export errors), **Duplicate Log Routing** (central sink plus untouched `_Default` sinks; free audit streams re-stored), **Project Log Routing** (`_Default` disabled, Data Access logs in the default view, Log Analytics), **Alert Notification Channels** (policies routed to nobody, unverified or disabled channels, undeliverable Pub/Sub channels), **Synthetic and SLO Coverage**. No new role, no new API. |
+| **v19** | Footprint and detection | A **Platform Footprint** page (what runs where: services, regions, versions); the detective half of the SSRF chain over Cloud Logging — **GKE control-plane activity** (exec, webhooks, RBAC and DaemonSet changes by service accounts or external IPs), **service-account activity signals**; **Findings and vulnerabilities** — Security Command Center active findings by category (the v2 API answers under the roles already held), detector services and modules off, findings export, VM Manager OS vulnerabilities with a fix available, exposed privileged VMs (the join of three existing checks); a **Support cases** briefing (its own API and role, its own decision); the deprecations recommender, once confirmed to exist. |
+| Later | | In this order: GKE health, backup and support (cluster conditions and CA expiry, Backup for GKE, end of support, workload disruption readiness); Compute reliability (disk backup coverage, VM availability policy, MIG and load-balancer resilience, reservations); managed databases and storage finished (Cloud SQL deletion protection, maintenance windows, password policy, CA expiry, IAM authentication; AlloyDB open networks; Public Access Prevention, versioning without cleanup; BigQuery unpartitioned tables); the data plane never read (Pub/Sub, Memorystore, Filestore, Spanner, Bigtable, Firestore, NetApp); org-policy depth and residency (exceptions below the root, domain-restriction values, location and service-usage drift); SLO coverage, PDF export. The Workload Manager results import does not ship (a new role, a per-project API, a dedupe layer). |
