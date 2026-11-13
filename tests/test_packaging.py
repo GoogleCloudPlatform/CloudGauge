@@ -43,8 +43,8 @@ from helpers import make_settings
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 TEMPLATES = ['_design.css', 'history.html', 'index.html', 'report/_macros.html', 'report/_scorecard.html', 'report/_script.js', 'report/_styles.css',
-             'report/report.html', 'status.html']
-WEB_MODULES = ['app.extensions', 'app.identity', 'app.routes', 'app.routes.api', 'app.routes.ui', 'app.routes.worker']
+             'report/report.html', 'scan_running.html', 'status.html']
+WEB_MODULES = ['app.extensions', 'app.identity', 'app.routes', 'app.routes.api', 'app.routes.guards', 'app.routes.ui', 'app.routes.worker']
 
 # Makes any network connection or GCP client creation raise.
 TRAPS = '''
@@ -181,7 +181,7 @@ def assert_serves_the_app(base):
     assert 'fetch(`/api/list-resources?scope=${selectedScope}`)' in body
     assert http('GET', f'{base}/api/list-resources') == (400, 'application/json', '{"error":"Scope parameter is required"}\n')
     assert http('POST', f'{base}/scan', b'scope=project&scope_id=', 'application/x-www-form-urlencoded') \
-        == (400, 'text/html; charset=utf-8', 'Scope and ID are required.')
+        == (400, 'text/html; charset=utf-8', 'scope_id is required.')
     assert http('POST', f'{base}/run-scan', b'{"scope": ', 'application/json')[0] == 400
     assert http('GET', f'{base}/api/get-summary')[0] == 405
     assert http('GET', f'{base}/no-such-page')[0] == 404

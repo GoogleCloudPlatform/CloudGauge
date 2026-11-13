@@ -37,10 +37,15 @@ with one listing and nothing is ever rewritten:
 
 - ``scopes/{scope}/{scope_id}/{generated_ts}_{job_id}.json``: the scan's summary
 
-Scheduled scans (v17, ``app.services.schedules``) note the last job each schedule started,
-and the history page (v17) lists a scope's summaries:
+Scheduled scans (v17, ``app.services.schedules``) note the last job each schedule started —
+since v18.6.1 ``POST /scan`` notes its jobs there too, so a scope scans once at a time whoever
+asks — and the history page (v17) lists a scope's summaries:
 
-- ``schedules/{scope}/{scope_id}.json``: the job the scope's schedule last started
+- ``schedules/{scope}/{scope_id}.json``: the job the scope last started
+
+Every ``{job_id}``, ``{scope_id}``, ``{scope}`` and ``{shard_id}`` above goes through
+``key_part`` (v18.6.1): one key segment of letters, digits, ``.``, ``_``, ``:`` and ``-``,
+never a slash or ``..``, so a value can never steer an object under another prefix.
 
 Checks receive a ``GcsResultsStore`` (or a ``ShardSink`` bound to a shard) as
 their keyword-only ``sink`` argument.
@@ -48,6 +53,7 @@ their keyword-only ``sink`` argument.
 import concurrent.futures
 import json
 import logging
+import re
 import uuid
 from datetime import datetime, timezone
 
@@ -63,6 +69,18 @@ SCHEDULES_DIR = "schedules"
 ORG_POLICY_FILES = ("best_practices.json", "current_policies.json")
 READ_WORKERS = 16  # parallel downloads when reading a job's findings back
 DELETE_WORKERS = 16  # parallel deletions when cleaning a job's intermediate files up
+# One segment of an object key (v18.6.1): letters, digits, ``.``, ``_``, ``:`` and ``-``, a letter or digit first, at
+# most 128 characters — so no slash and nothing a listing prefix could be steered with. The routes decide what an
+# identifier means (``app.validation``); this guard keeps a key inside its prefix whatever the caller passed.
+KEY_PART = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+
+
+def key_part(value, what):
+    """``value`` when it can be one segment of an object key; otherwise ``ValueError`` naming ``what`` it was."""
+    text = str(value) if isinstance(value, int) and not isinstance(value, bool) else value
+    if not isinstance(text, str) or not KEY_PART.match(text) or ".." in text:
+        raise ValueError(f"{what} {value!r} cannot be part of an object key.")
+    return text
 
 
 class GcsResultsStore:
@@ -89,9 +107,15 @@ class GcsResultsStore:
     @staticmethod
     def intermediate_prefix(job_id, shard_id=None):
         """Where a job's (or one shard's) intermediate files live."""
+        job_id = key_part(job_id, "job_id")
         if shard_id:
-            return f"intermediate/{job_id}/{SHARDS_DIR}/{shard_id}/"
+            return f"intermediate/{job_id}/{SHARDS_DIR}/{key_part(shard_id, 'shard_id')}/"
         return f"intermediate/{job_id}/"
+
+    @staticmethod
+    def job_object_name(job_id, scope_id, suffix):
+        """The key of a job's status file or report: ``{job_id}/{scope_id}_{suffix}`` (v18.6.1: guarded parts)."""
+        return f"{key_part(job_id, 'job_id')}/{key_part(scope_id, 'scope_id')}_{suffix}"
 
     @staticmethod
     def _is_finding(blob_name):
@@ -190,8 +214,7 @@ class GcsResultsStore:
         ``current_task`` and ``status``.
         """
         try:
-            bucket = self.bucket()
-            status_blob = bucket.blob(f"{job_id}/{scope_id}_status.json")
+            status_blob = self.bucket().blob(self.job_object_name(job_id, scope_id, "status.json"))
             status_data = {
                 "job_id": job_id,
                 "scope_id": scope_id,
@@ -213,7 +236,7 @@ class GcsResultsStore:
         ``/api/status`` route returned HTTP 500).
         """
         bucket = self.bucket()
-        status_blob = bucket.blob(f"{job_id}/{scope_id}_status.json")
+        status_blob = bucket.blob(self.job_object_name(job_id, scope_id, "status.json"))
 
         if status_blob.exists():
             # If the status file is there, return its content
@@ -223,17 +246,17 @@ class GcsResultsStore:
     def upload_reports(self, job_id, scope_id, html_report, csv_report):
         """Uploads the final HTML and CSV reports."""
         bucket = self.bucket()
-        bucket.blob(f"{job_id}/{scope_id}_report.html").upload_from_string(html_report, content_type='text/html')
-        bucket.blob(f"{job_id}/{scope_id}_report.csv").upload_from_string(csv_report, content_type='text/csv')
+        bucket.blob(self.job_object_name(job_id, scope_id, "report.html")).upload_from_string(html_report, content_type='text/html')
+        bucket.blob(self.job_object_name(job_id, scope_id, "report.csv")).upload_from_string(csv_report, content_type='text/csv')
 
     def report_exists(self, job_id, scope_id):
         """Whether the final HTML report has been uploaded (errors are raised)."""
-        return self.bucket().blob(f"{job_id}/{scope_id}_report.html").exists()
+        return self.bucket().blob(self.job_object_name(job_id, scope_id, "report.html")).exists()
 
     def read_report(self, job_id, scope_id, extension="html"):
         """Returns a report's text, or ``None`` if it doesn't exist (yet). Errors are raised."""
         bucket = self.bucket()
-        blob = bucket.blob(f"{job_id}/{scope_id}_report.{extension}")
+        blob = bucket.blob(self.job_object_name(job_id, scope_id, f"report.{extension}"))
         if not blob.exists():
             return None
         return blob.download_as_text()
@@ -248,7 +271,7 @@ class GcsResultsStore:
         Storage URL, good for an hour for whoever held it, which needed the service account to sign
         as itself (``roles/iam.serviceAccountTokenCreator`` on itself).
         """
-        blob = self.bucket().blob(f"{job_id}/{scope_id}_report.{extension}")
+        blob = self.bucket().blob(self.job_object_name(job_id, scope_id, f"report.{extension}"))
         if not blob.exists():
             return None
         blob.reload()
@@ -327,7 +350,7 @@ class GcsResultsStore:
     @staticmethod
     def summaries_prefix(scope, scope_id):
         """Where a scope's scan summaries live: ``scopes/organization/123/``."""
-        return f"{SCOPES_DIR}/{scope}/{scope_id}/"
+        return f"{SCOPES_DIR}/{key_part(scope, 'scope')}/{key_part(scope_id, 'scope_id')}/"
 
     def write_scan_summary(self, summary):
         """Files a finished scan's summary (``app.reporting.changes.summarize``) under its scope.
@@ -336,11 +359,12 @@ class GcsResultsStore:
         nothing is ever rewritten. Errors are logged, not raised: the reports are
         already uploaded, and a missing summary costs only the next comparison.
         """
-        name = f"{self.summaries_prefix(summary['scope'], summary['scope_id'])}{summary['generated_ts']}_{summary['job_id']}.json"
         try:
+            name = (f"{self.summaries_prefix(summary['scope'], summary['scope_id'])}"
+                    f"{key_part(summary['generated_ts'], 'generated_ts')}_{key_part(summary['job_id'], 'job_id')}.json")
             self.bucket().blob(name).upload_from_string(json.dumps(summary), content_type='application/json')
         except Exception as e:
-            logging.error(f"[{summary.get('job_id')}] Could not file the scan summary {name}: {e}")
+            logging.error(f"[{summary.get('job_id')}] Could not file the scan summary: {e}")
 
     def read_previous_summary(self, scope, scope_id, job_id):
         """The newest summary of the scope's earlier scans (never ``job_id``'s own), or ``None``.
@@ -387,20 +411,20 @@ class GcsResultsStore:
                 seen.setdefault((parts[1], parts[2]), None)
         return list(seen)
 
-    # --- Scheduled scans: the job a scope's schedule last started ---
+    # --- One scan per scope at a time: the job the scope last started (manual since v18.6.1, or scheduled) ---
     @staticmethod
     def schedule_lock_name(scope, scope_id):
-        return f"{SCHEDULES_DIR}/{scope}/{scope_id}.json"
+        return f"{SCHEDULES_DIR}/{key_part(scope, 'scope')}/{key_part(scope_id, 'scope_id')}.json"
 
     def read_schedule_lock(self, scope, scope_id):
-        """The note of the scope's last scheduled job (``app.services.schedules``), or ``None``. Errors are raised."""
+        """The note of the job the scope last started (``app.services.schedules``), or ``None``. Errors are raised."""
         blob = self.bucket().blob(self.schedule_lock_name(scope, scope_id))
         if not blob.exists():
             return None
         return json.loads(blob.download_as_text())
 
     def write_schedule_lock(self, scope, scope_id, lock):
-        """Notes the job a schedule just started for the scope. Errors are raised: the 409 rule depends on it."""
+        """Notes the job just started for the scope. Errors are raised: the 409 rule depends on it."""
         self.bucket().blob(self.schedule_lock_name(scope, scope_id)).upload_from_string(json.dumps(lock), content_type='application/json')
 
 

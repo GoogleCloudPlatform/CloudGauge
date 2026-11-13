@@ -164,28 +164,28 @@ def test_csv_download_route(testing_app, gcp):
     assert resolve(testing_app, 'GET', '/report/job-1/p1/csv') == {'endpoint': 'ui.download_report_csv', 'args': {'job_id': 'job-1', 'scope_id': 'p1'}}
     assert resolve(testing_app, 'POST', '/report/job-1/p1/csv') == {'error': 'MethodNotAllowed', 'allowed': ['GET', 'HEAD', 'OPTIONS']}
     client = testing_app.test_client()
-    missing = client.get('/report/job-1/p1/csv')
+    missing = client.get('/report/11111111-1111-4111-8111-111111111111/proj-one/csv')
     assert (missing.status_code, missing.get_data(as_text=True)) == (404, 'CSV report not found or is still generating.')
     assert gcp.bucket.opened == []
     body = 'Organization Policies\r\nCategory,Policy\r\nSécurité,—\r\n'  # non-ASCII: the size is in bytes, not characters
-    gcp.bucket.put('job-1/p1_report.csv', body, 'text/csv')
-    response = client.get('/report/job-1/p1/csv')
+    gcp.bucket.put('11111111-1111-4111-8111-111111111111/proj-one_report.csv', body, 'text/csv')
+    response = client.get('/report/11111111-1111-4111-8111-111111111111/proj-one/csv')
     assert response.status_code == 200
     assert response.headers['Content-Type'].startswith('text/csv')
-    assert response.headers['Content-Disposition'] == 'attachment; filename="cloudgauge_p1_job-1.csv"'
+    assert response.headers['Content-Disposition'] == 'attachment; filename="cloudgauge_proj-one_11111111-1111-4111-8111-111111111111.csv"'
     assert response.headers['Content-Length'] == str(len(body.encode()))
     assert response.get_data(as_text=True) == body
-    assert gcp.bucket.opened == [('job-1/p1_report.csv', ui.CSV_CHUNK_BYTES)]
-    # IDs that are not safe in a filename are sanitized (the lookup still uses them as given).
-    gcp.bucket.put('job 1/a b_report.csv', 'x', 'text/csv')
-    assert client.get('/report/job%201/a%20b/csv').headers['Content-Disposition'] == 'attachment; filename="cloudgauge_a_b_job_1.csv"'
+    assert gcp.bucket.opened == [('11111111-1111-4111-8111-111111111111/proj-one_report.csv', ui.CSV_CHUNK_BYTES)]
+    # v18.6.1: IDs that are not a job ID and a scope ID are refused before any lookup (before, they were only sanitized in the filename).
+    assert (client.get('/report/job%201/a%20b/csv').status_code, client.get('/report/11111111-1111-4111-8111-111111111111/a%20b/csv').status_code) == (400, 400)
+    assert gcp.bucket.opened == [('11111111-1111-4111-8111-111111111111/proj-one_report.csv', ui.CSV_CHUNK_BYTES)]
 
 
 def test_csv_download_streams_in_chunks(testing_app, gcp, monkeypatch):
     """A CSV larger than one chunk arrives whole, chunk by chunk, and the file is closed afterwards."""
     monkeypatch.setattr(ui, 'CSV_CHUNK_BYTES', 8)
     body = ''.join(f'row-{i:04d},value\r\n' for i in range(50))  # 800 bytes → 100 chunks of 8
-    gcp.bucket.put('job-1/p1_report.csv', body, 'text/csv')
+    gcp.bucket.put('11111111-1111-4111-8111-111111111111/proj-one_report.csv', body, 'text/csv')
     files = []
     original_open = fakes.FakeBlob.open
 
@@ -195,19 +195,19 @@ def test_csv_download_streams_in_chunks(testing_app, gcp, monkeypatch):
 
     monkeypatch.setattr(fakes.FakeBlob, 'open', recording_open)
     with testing_app.test_client() as client:
-        response = client.get('/report/job-1/p1/csv')
+        response = client.get('/report/11111111-1111-4111-8111-111111111111/proj-one/csv')
         chunks = list(response.response)
     assert len(chunks) == -(-len(body) // 8) == 100 and all(len(chunk) <= 8 for chunk in chunks)
     assert b''.join(chunks).decode() == body
     assert response.headers['Content-Length'] == str(len(body))
-    assert gcp.bucket.opened == [('job-1/p1_report.csv', 8)]
+    assert gcp.bucket.opened == [('11111111-1111-4111-8111-111111111111/proj-one_report.csv', 8)]
     assert [f.closed for f in files] == [True]
 
 
 def test_csv_download_reports_a_bucket_failure(testing_app, gcp):
-    gcp.bucket.put('job-1/p1_report.csv', 'x', 'text/csv')
+    gcp.bucket.put('11111111-1111-4111-8111-111111111111/proj-one_report.csv', 'x', 'text/csv')
     gcp.bucket.error = RuntimeError('bucket unavailable')
-    response = testing_app.test_client().get('/report/job-1/p1/csv')
+    response = testing_app.test_client().get('/report/11111111-1111-4111-8111-111111111111/proj-one/csv')
     assert (response.status_code, response.get_data(as_text=True)) == (500, 'Could not retrieve the CSV report.')
 
 

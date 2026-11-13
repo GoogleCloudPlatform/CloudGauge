@@ -46,9 +46,13 @@ APP_ENV_VARS = (*fakes.TEST_ENV, 'K_SERVICE', 'WORKER_URL', 'WORKER_AUDIENCE', '
                 # v17.3
                 'SERVICE_HEALTH_INCIDENTS',
                 # v18.5
-                'TRUSTED_DOMAINS')
-# What a deployed Cloud Run revision sees: the five required variables plus K_SERVICE.
-DEPLOYED_ENV = {**fakes.TEST_ENV, 'K_SERVICE': fakes.K_SERVICE}
+                'TRUSTED_DOMAINS',
+                # v18.6.1
+                'WORKER_TOKEN_CHECK')
+# What a deployed Cloud Run revision sees: the five required variables plus K_SERVICE — and, for the tests, the worker's
+# in-process token check off (v18.6.1): the production-profile apps the suites post task bodies to have no Cloud Tasks
+# behind them. tests/test_request_hardening.py turns the check on and verifies it with signed tokens.
+DEPLOYED_ENV = {**fakes.TEST_ENV, 'K_SERVICE': fakes.K_SERVICE, 'WORKER_TOKEN_CHECK': 'off'}
 
 
 def set_env(monkeypatch, values):

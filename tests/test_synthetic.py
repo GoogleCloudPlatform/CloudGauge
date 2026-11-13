@@ -386,13 +386,14 @@ def test_synthetic_app_lists_and_scans_the_generated_organization(synthetic_app,
     assert [f['id'] for f in client.get('/api/list-resources?scope=folder').get_json()] == FOLDER_IDS
     assert client.get('/api/list-resources?scope=organization').get_json() == [{'id': ORG_ID, 'name': f'Organization {ORG_ID}'}]
 
-    response = client.post('/run-scan', data=json.dumps({'scope': 'project', 'scope_id': 'syn-42-00001', 'job_id': 'job-1'}),
+    job_id = '11111111-1111-4111-8111-111111111111'  # v18.6.1: the routes take UUID job IDs
+    response = client.post('/run-scan', data=json.dumps({'scope': 'project', 'scope_id': 'syn-42-00001', 'job_id': job_id}),
                            content_type='application/json')
     assert response.status_code == 200
-    report = gcp.bucket.blob('job-1/syn-42-00001_report.html').download_as_text()  # the real results store, fake bucket
+    report = gcp.bucket.blob(f'{job_id}/syn-42-00001_report.html').download_as_text()  # the real results store, fake bucket
     assert BANNER_MARK in report and 'syn-42-00001' in report
-    assert json.loads(gcp.bucket.blob('job-1/syn-42-00001_status.json').download_as_text())['status'] == 'completed'
-    page = client.get('/status/job-1/project/syn-42-00001').get_data(as_text=True)
+    assert json.loads(gcp.bucket.blob(f'{job_id}/syn-42-00001_status.json').download_as_text())['status'] == 'completed'
+    page = client.get(f'/status/{job_id}/project/syn-42-00001').get_data(as_text=True)
     assert BANNER_MARK in page
 
 

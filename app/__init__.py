@@ -64,7 +64,7 @@ def create_app(settings=None, services=None):
     from flask import Flask
 
     from app import identity
-    from app.config import Settings
+    from app.config import MAX_REQUEST_BYTES, Settings
     from app.extensions import EXTENSION_KEY, build_services
     from app.routes import register_blueprints
     from app.services.tasks import ensure_queue_if_configured
@@ -78,6 +78,7 @@ def create_app(settings=None, services=None):
     app.config["TESTING"] = settings.is_testing
     app.config["CLOUDGAUGE_PROFILE"] = settings.profile
     app.config["CLOUDGAUGE_ROLE"] = settings.role
+    app.config["MAX_CONTENT_LENGTH"] = MAX_REQUEST_BYTES  # v18.6.1: no route takes a large body; larger ones are 413
 
     if settings.startup_checks_enabled:
         # Fail fast, before any GCP call, if the deployment is missing configuration.

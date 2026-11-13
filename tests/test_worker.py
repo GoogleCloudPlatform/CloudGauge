@@ -46,7 +46,8 @@ from app.synthetic.world import BEST_PRACTICES_CSV
 from app.utils import ThrottledProgressReporter
 from helpers import assert_same_csv_tables, assert_same_response, comparable, csv_sections, report_facts
 
-SCOPE, SCOPE_ID, JOB_ID = 'organization', '123456789', 'job-42'
+SCOPE, SCOPE_ID, JOB_ID = 'organization', '123456789', '42424242-4242-4242-8242-424242424242'
+JOB_1, JOB_2 = '11111111-1111-4111-8111-111111111111', '22222222-2222-4222-8222-222222222222'  # v18.6.1: a job ID is a UUID
 PAYLOAD = {'scope': SCOPE, 'scope_id': SCOPE_ID, 'job_id': JOB_ID}
 REPORT_HTML, REPORT_CSV, STATUS = (f'{JOB_ID}/{SCOPE_ID}_report.html', f'{JOB_ID}/{SCOPE_ID}_report.csv',
                                    f'{JOB_ID}/{SCOPE_ID}_status.json')
@@ -59,8 +60,9 @@ UUID_SUFFIX = re.compile(r'_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9
 
 
 def without_uuids(names):
-    """Object names with the random ``_<uuid4>.json`` suffix of finding files replaced."""
-    return [UUID_SUFFIX.sub('_<uuid>.json', name) for name in names]
+    """Object names with the random ``_<uuid4>.json`` suffix of finding files replaced (the scan summary ends in the
+    job's own UUID since v18.6.1 and keeps it)."""
+    return [UUID_SUFFIX.sub('_<uuid>.json', name) if name.startswith('intermediate/') else name for name in names]
 
 
 def stop_clocks(monkeypatch, legacy):
@@ -196,48 +198,64 @@ def test_a_second_scan_of_the_scope_compares_with_the_first(client, gcp, scripte
     def html_of(job_id):
         return gcp.bucket.objects[f'{job_id}/{SCOPE_ID}_report.html'][0]
 
-    assert client.post('/run-scan', json={**PAYLOAD, 'job_id': 'job-1'}).status_code == 200
-    assert 'none — first scan of this organization' in html_of('job-1')
+    assert client.post('/run-scan', json={**PAYLOAD, 'job_id': JOB_1}).status_code == 200
+    assert 'none — first scan of this organization' in html_of(JOB_1)
 
     # Between the scans: alice's owner role was removed and a CI account was granted editor.
     scripted_scan.findings = [f for f in samples.all_findings() if f['Check'] != 'Project IAM Hygiene'] + [
         {'Check': 'Project IAM Hygiene', 'Status': 'Action Required', 'Finding': [
             {'Project': 'data-lake', 'Member': 'allUsers', 'Role': 'roles/viewer'},
             {'Project': 'ml-dev', 'Member': 'serviceAccount:ci@ml-dev.iam.gserviceaccount.com', 'Role': 'roles/editor'}]}]
-    assert client.post('/run-scan', json={**PAYLOAD, 'job_id': 'job-2'}).status_code == 200
-    html = html_of('job-2')
-    assert f'<a href="/report/job-1/{SCOPE_ID}">view</a>' in html  # the header's Previous scan line
+    assert client.post('/run-scan', json={**PAYLOAD, 'job_id': JOB_2}).status_code == 200
+    html = html_of(JOB_2)
+    assert f'<a href="/report/{JOB_1}/{SCOPE_ID}">view</a>' in html  # the header's Previous scan line
     assert '<h2>Changes since last scan</h2>' in html
     assert '+1 new · −1 resolved' in html
     assert '<tr class="row-new"><td class="nowrap code"><code class="chip">ml-dev</code></td>' in html
     assert '<li>web-prod · user:alice@example.com · roles/owner</li>' in html
-    csv_text = gcp.bucket.objects[f'job-2/{SCOPE_ID}_report.csv'][0]
+    csv_text = gcp.bucket.objects[f'{JOB_2}/{SCOPE_ID}_report.csv'][0]
     iam_rows = [row for row in csv_sections(csv_text)['Security & Identity'] if row and row[0] == 'Project IAM Hygiene']
     assert [(row[2], row[-1]) for row in iam_rows] == [('data-lake', ''), ('ml-dev', 'yes')]
     summaries = sorted(name for name in gcp.bucket.objects if name.startswith(f'scopes/{SCOPE}/{SCOPE_ID}/'))
-    assert [name.rpartition('_')[2] for name in summaries] == ['job-1.json', 'job-2.json']
+    assert [name.rpartition('_')[2] for name in summaries] == [f'{JOB_1}.json', f'{JOB_2}.json']
 
     # A retried render of job-2 compares with job-1 again, never with job-2's own summary.
-    assert client.post('/run-scan', json={**PAYLOAD, 'job_id': 'job-2'}).status_code == 200
-    assert f'<a href="/report/job-1/{SCOPE_ID}">view</a>' in html_of('job-2') and '+1 new · −1 resolved' in html_of('job-2')
+    assert client.post('/run-scan', json={**PAYLOAD, 'job_id': JOB_2}).status_code == 200
+    assert f'<a href="/report/{JOB_1}/{SCOPE_ID}">view</a>' in html_of(JOB_2) and '+1 new · −1 resolved' in html_of(JOB_2)
 
 
 @pytest.mark.parametrize('kwargs', [
-    {'json': {'scope': 'project', 'scope_id': 'p1'}},  # no job_id: no status to update, nothing to clean up
+    {'json': {'scope': 'project', 'scope_id': 'proj-one'}},  # no job_id: no status to update, nothing to clean up
     {'json': {'scope': 'project', 'job_id': JOB_ID}},  # no scope_id
     {'json': {'scope_id': SCOPE_ID, 'job_id': JOB_ID}},  # no scope
-    {'json': ['project', 'p1', JOB_ID]},
+    {'json': ['project', 'proj-one', JOB_ID]},
     {'data': 'null', 'content_type': 'application/json'},
     {'data': '{"scope": ', 'content_type': 'application/json'},  # invalid JSON: 400 before the job starts
     {'data': 'scope=project', 'content_type': 'text/plain'},  # force=True parses any content type
 ])
-def test_malformed_tasks_match_legacy(kwargs, legacy_client, client, gcp, scripted_scan):
+def test_malformed_tasks_are_refused_before_any_work(kwargs, legacy_client, client, gcp, scripted_scan):
+    """Legacy answered 400 or 500 (a KeyError inside the job); since v18.6.1 the new app validates the body first and
+    answers 400 with the reason (Cloud Tasks retries either status the same bounded way). Neither writes anything."""
     legacy_run, run = run_both(legacy_client, client, gcp.bucket, **kwargs)
-    assert_same_response(legacy_run.response, run.response, html=True)
-    assert run.response.status_code in (400, 500)
+    assert legacy_run.response.status_code in (400, 500)
+    assert run.response.status_code == 400 and set(run.response.get_json()) == {'error'}
     assert run.uploads == legacy_run.uploads == []
     assert run.deleted == legacy_run.deleted == []
     assert scripted_scan.calls == []
+
+
+@pytest.mark.parametrize('body, message', [
+    ({**PAYLOAD, 'job_id': 'job-42'}, 'job_id must be a UUID.'),
+    ({**PAYLOAD, 'scope_id': '../other'}, "scope_id must be the organization's number."),
+    ({**PAYLOAD, 'scope': 'team'}, 'scope must be organization, folder or project.'),
+    ({**PAYLOAD, 'requested_by': 'x' * 400}, 'requested_by must be a short, printable name.'),
+])
+def test_tasks_with_identifiers_that_are_not_ones_are_refused(body, message, client, gcp, scripted_scan):
+    """v18.6.1, the new app alone (legacy ran whatever it was given): a job ID that is not a UUID, a scope ID or scope
+    that is not one — 400 naming the field, nothing written, no check run."""
+    response = client.post('/run-scan', json=body)
+    assert (response.status_code, response.get_json()) == (400, {'error': message})
+    assert gcp.bucket.uploads == [] and scripted_scan.calls == []
 
 
 def test_scan_without_projects_runs_the_scope_level_checks(legacy_client, client, gcp, legacy, monkeypatch):

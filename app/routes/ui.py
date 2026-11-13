@@ -11,23 +11,34 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Pages: the landing form, scan submission, the status page, the report viewer, the CSV download, and the history page (v17)."""
-import uuid
+"""Pages: the landing form, scan submission, the status page, the report viewer, the CSV download, and the history page (v17).
 
-from flask import Blueprint, Response, redirect, render_template, request, stream_with_context, url_for
+Every identifier a URL or the form carries goes through ``app.validation`` first (v18.6.1): a malformed one is a 400 before
+anything is read or written. ``POST /scan`` is also same-origin only (``app.routes.guards``) and starts nothing while the
+scope's previous scan is still running (409, ``app.services.schedules``).
+"""
+from flask import Blueprint, Response, jsonify, redirect, render_template, request, stream_with_context, url_for
 from werkzeug.utils import secure_filename
 
-from app import identity
+from app import identity, validation
 from app.config import HISTORY_PAGE_SCANS
 from app.extensions import get_services
 from app.reporting.history import build_history
-from app.services import tasks
+from app.routes import guards
+from app.services import schedules
 
 bp = Blueprint("ui", __name__)
-SCOPES = ("organization", "folder", "project")
+bp.before_request(guards.same_origin_required)
+SCOPES = validation.SCOPES
 # How much of a CSV report the download route holds at a time (v16.1: the status page's Download CSV
 # goes through this route, so an organization-sized CSV must not sit whole in the web service's memory).
 CSV_CHUNK_BYTES = 1024 * 1024
+
+
+@bp.errorhandler(validation.RequestError)
+def bad_request(error):
+    """A malformed identifier in a page URL or the form: 400 with the reason."""
+    return str(error), 400
 
 
 @bp.route('/', methods=['GET'])
@@ -40,23 +51,25 @@ def index():
 def create_scan_task():
     """
     Receives the scope ( Org, Folder or Project ) from the form, creates an asynchronous Cloud Task
-    to perform the scan, and redirects the user to a status page.
+    to perform the scan, and redirects the user to a status page — or, while the scope's previous
+    scan is still running, answers 409 with that scan's status page (v18.6.1).
     """
-    scope = request.form['scope']
-    scope_id = request.form['scope_id']
-    if not scope_id or not scope:
-        return "Scope and ID are required.", 400
-
-    job_id = str(uuid.uuid4())
+    scope = validation.clean_scope(request.form.get('scope'))
+    scope_id = validation.clean_scope_id(scope, request.form.get('scope_id'))
     requested_by = identity.current_user_email()  # None unless the request came through Identity-Aware Proxy
-    print(f"Creating scan task for {scope}: {scope_id} with Job ID: {job_id}" + (f" (requested by {requested_by})" if requested_by else ""))
 
-    services = get_services()
-    tasks.enqueue_scan(services.settings, services.get_worker_url(), scope, scope_id, job_id,
-                       client=services.get_tasks_client(), requested_by=requested_by)
+    try:
+        note = schedules.start_scan(get_services(), scope, scope_id, requested_by=requested_by)
+    except schedules.ScanInProgress as running:
+        lock = running.lock
+        status_path = url_for('ui.get_status', job_id=lock['job_id'], scope_id=scope_id, scope=scope)
+        if request.accept_mimetypes.best_match(("text/html", "application/json")) == "application/json":
+            return jsonify({"error": str(running), "job_id": lock["job_id"], "started_at": lock.get("started_at"),
+                            "requested_by": lock.get("requested_by"), "status_path": status_path}), 409
+        return render_template("scan_running.html", scope=scope, scope_id=scope_id, lock=lock, status_path=status_path), 409
 
     # NEW: Pass both IDs to the status page
-    return redirect(url_for('ui.get_status', job_id=job_id, scope_id=scope_id, scope=scope))
+    return redirect(url_for('ui.get_status', job_id=note['job_id'], scope_id=scope_id, scope=scope))
 
 
 @bp.route('/status/<string:job_id>/<string:scope>/<string:scope_id>')
@@ -67,15 +80,16 @@ def get_status(job_id, scope, scope_id):
     completes it links to the report and to the CSV download route (v16.1 —
     before, a signed Cloud Storage URL good for an hour, minted here).
     """
-    if not scope_id:
-        return "Error:  ID is missing from the status URL.", 400
-
+    job_id = validation.clean_job_id(job_id)
+    scope = validation.clean_scope(scope)
+    scope_id = validation.clean_scope_id(scope, scope_id)
     return render_template("status.html", job_id=job_id, scope_id=scope_id, scope=scope)
 
 
 @bp.route('/report/<string:job_id>/<string:scope_id>')
 def view_report(job_id, scope_id):
     """Serves the final HTML report from GCS to the user."""
+    job_id, scope_id = validation.clean_job_id(job_id), validation.clean_any_scope_id(scope_id)
     try:
         report_html = get_services().results_store.read_report(job_id, scope_id)
         if report_html is None:
@@ -97,6 +111,7 @@ def download_report_csv(job_id, scope_id):
     rows of a check; the CSV has every row, so it is read ``CSV_CHUNK_BYTES``
     at a time and sent with the object's size as ``Content-Length``.
     """
+    job_id, scope_id = validation.clean_job_id(job_id), validation.clean_any_scope_id(scope_id)
     try:
         opened = get_services().results_store.open_report(job_id, scope_id, extension="csv", chunk_size=CSV_CHUNK_BYTES)
         if opened is None:
@@ -125,6 +140,7 @@ def view_history(scope, scope_id):
     from the summaries the finished scans filed under ``scopes/`` (``app.reporting.history``)."""
     if scope not in SCOPES:
         return "Scope must be organization, folder or project.", 404
+    scope_id = validation.clean_scope_id(scope, scope_id)
     try:
         summaries, total = get_services().results_store.list_summaries(scope, scope_id, limit=HISTORY_PAGE_SCANS, with_total=True)
     except Exception as e:

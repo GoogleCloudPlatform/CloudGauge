@@ -28,6 +28,10 @@ an assertion names a key it does not have. The project number the audience
 needs is ``PROJECT_NUMBER`` or, on Cloud Run, the metadata server's (read once).
 Without it an assertion cannot be verified and counts as absent, with one
 warning in the log.
+
+Who is calling (v18.6.1): ``CallerVerifier`` does the same for the worker routes'
+callers — the Google OIDC token Cloud Tasks and Cloud Scheduler mint for the
+service account (``app.routes.guards``).
 """
 import logging
 import threading
@@ -39,6 +43,9 @@ from google.auth import jwt as google_jwt
 IAP_ASSERTION_HEADER = "X-Goog-IAP-JWT-Assertion"
 IAP_ISSUER = "https://cloud.google.com/iap"
 IAP_PUBLIC_KEYS_URL = "https://www.gstatic.com/iap/verify/public_key"
+# The worker's callers (v18.6.1): Google-issued OIDC tokens, signed with these rotating certificates.
+GOOGLE_CERTS_URL = "https://www.googleapis.com/oauth2/v1/certs"
+GOOGLE_ISSUERS = ("https://accounts.google.com", "accounts.google.com")
 METADATA_PROJECT_NUMBER_URL = "http://metadata.google.internal/computeMetadata/v1/project/numeric-project-id"
 KEYS_TTL_SECONDS = 3600
 FETCH_TIMEOUT_SECONDS = 5
@@ -56,6 +63,15 @@ def fetch_public_keys():
     import requests
 
     response = requests.get(IAP_PUBLIC_KEYS_URL, timeout=FETCH_TIMEOUT_SECONDS)
+    response.raise_for_status()
+    return response.json()
+
+
+def fetch_google_certs():
+    """Google's current OIDC signing certificates: key ID → X.509 certificate in PEM form."""
+    import requests
+
+    response = requests.get(GOOGLE_CERTS_URL, timeout=FETCH_TIMEOUT_SECONDS)
     response.raise_for_status()
     return response.json()
 
@@ -148,6 +164,57 @@ class IapVerifier:
         if not self._warned_no_audience:
             self._warned_no_audience = True
             logging.warning(f"IAP identities cannot be verified: {reason}.")
+
+
+class CallerVerifier:
+    """Verifies the ID tokens Cloud Tasks and Cloud Scheduler send to the worker routes (v18.6.1).
+
+    Both mint a Google OIDC token for the service account: ``iss`` ``https://accounts.google.com``,
+    ``aud`` the task URL (or ``WORKER_AUDIENCE``, or the worker URL for a scheduler job), ``email`` the
+    account, an hour's ``exp``, signed RS256 with a key from ``GOOGLE_CERTS_URL``. ``verify`` accepts a
+    token when the signature, the issuer, one of the given audiences, the expiry and the email all hold;
+    the keys are cached like IAP's. ``fetch_keys`` and ``now`` are injectable for the tests.
+    """
+
+    def __init__(self, settings, fetch_keys=None, now=None):
+        self.settings = settings
+        self._fetch_keys = fetch_keys or fetch_google_certs
+        self._now = now or time.time
+        self._keys = None
+        self._keys_fetched_at = 0.0
+        self._lock = threading.Lock()
+
+    def keys(self, refresh=False):
+        """Google's current OIDC signing certificates, cached for ``KEYS_TTL_SECONDS``."""
+        with self._lock:
+            stale = self._keys is None or self._now() - self._keys_fetched_at > KEYS_TTL_SECONDS
+            if refresh or stale:
+                self._keys = dict(self._fetch_keys())
+                self._keys_fetched_at = self._now()
+            return self._keys
+
+    def verify(self, token, audiences):
+        """The token's claims when it is the service account's, current, and meant for one of ``audiences``; else None."""
+        expected = self.settings.service_account_email
+        if not expected:
+            logging.warning("Worker token rejected: SERVICE_ACCOUNT_EMAIL is not set, so no caller can be accepted")
+            return None
+        try:
+            key_id = google_jwt.decode_header(token).get("kid")
+            keys = self.keys()
+            if key_id and key_id not in keys:
+                keys = self.keys(refresh=True)  # Google rotates its keys; one refetch covers a rotation
+            claims = google_jwt.decode(token, certs=keys, audience=list(audiences), clock_skew_in_seconds=CLOCK_SKEW_SECONDS)
+        except Exception as e:  # noqa: BLE001 - ValueError from google-auth, or the key fetch failed
+            logging.warning(f"Worker token rejected: {e}")
+            return None
+        if claims.get("iss") not in GOOGLE_ISSUERS:
+            logging.warning(f"Worker token rejected: issuer {claims.get('iss')!r} is not Google's")
+            return None
+        if claims.get("email") != expected or not claims.get("email_verified", True):
+            logging.warning(f"Worker token rejected: {claims.get('email')!r} is not the service account")
+            return None
+        return claims
 
 
 def current_user_email():

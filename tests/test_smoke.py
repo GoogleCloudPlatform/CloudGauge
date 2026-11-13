@@ -34,7 +34,7 @@ from google.api_core.exceptions import ServiceUnavailable
 import fakes
 from app import scan_job
 
-JOB_ID, SCOPE, SCOPE_ID = 'test-job-id', 'project', 'web-prod'
+JOB_ID, SCOPE, SCOPE_ID = '7e57a0b1-7e57-47e5-87e5-7e57a0b17e57', 'project', 'web-prod'  # v18.6.1: a job ID is a UUID
 PENDING = {'status': 'pending', 'progress': 0, 'current_task': 'Waiting for task to start...'}
 
 
@@ -119,7 +119,7 @@ def test_scan_enqueues_a_task_and_redirects_to_the_status_page(client, gcp):
 
 def test_scan_validates_its_form(client, gcp):
     response = client.post('/scan', data={'scope': SCOPE, 'scope_id': ''})
-    assert (response.status_code, response.get_data(as_text=True)) == (400, 'Scope and ID are required.')
+    assert (response.status_code, response.get_data(as_text=True)) == (400, 'scope_id is required.')
     assert gcp.tasks.tasks == []
 
 
@@ -171,12 +171,11 @@ def test_worker_writes_status_and_reports_that_the_ui_reads_back(client, gcp, mo
 
 
 def test_worker_fails_cleanly_on_an_incomplete_task(client, gcp):
-    """A payload without job_id is caught and turned into a 500, matching the legacy worker; nothing is uploaded.
-
-    (A 4xx would stop Cloud Tasks retrying a payload that can never succeed; that is a deferred behaviour change.)
-    """
+    """A payload without job_id is refused before the job starts: 400 naming the field (v18.6.1; the legacy worker
+    and the releases before answered 500 from inside the job). Nothing is uploaded; Cloud Tasks retries either status
+    the same bounded number of times."""
     response = client.post('/run-scan', json={'scope': SCOPE, 'scope_id': SCOPE_ID})
-    assert (response.status_code, response.get_data(as_text=True)) == (500, 'Internal Server Error')
+    assert (response.status_code, response.get_json()) == (400, {'error': 'job_id is required.'})
     assert gcp.bucket.uploads == []
 
 

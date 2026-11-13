@@ -45,8 +45,9 @@ from app.synthetic.memory_store import memory_results_store
 from app.synthetic.world import ORG_ID
 from helpers import DEPLOYED_ENV, make_settings, set_env
 
-JOB, SCOPE_ID = 'job-f1', '123456789'
+JOB, SCOPE_ID = 'f1f1f1f1-f1f1-4f1f-8f1f-f1f1f1f1f1f1', '123456789'  # v18.6.1: the routes take UUID job IDs
 BODY = {'scope': 'organization', 'scope_id': SCOPE_ID, 'job_id': JOB}
+JOB_UI, JOB_E2E, JOB_CRASH = 'ab1eab1e-ab1e-4ab1-8ab1-ab1eab1eab1e', 'e2e0e2e0-e2e0-4e2e-8e2e-e2e0e2e0e2e0', 'c0a5c0a5-c0a5-4c0a-8c0a-c0a5c0a5c0a5'
 
 
 def projects(n, prefix='p'):
@@ -880,11 +881,11 @@ def test_sharded_scan_end_to_end_matches_a_single_task_scan(gcp, monkeypatch):
     set_env(monkeypatch, synthetic_env(50, 20))
     app = create_app()
     client = app.test_client()
-    job = {'scope': 'organization', 'scope_id': ORG_ID, 'job_id': 'job-e2e'}
+    job = {'scope': 'organization', 'scope_id': ORG_ID, 'job_id': JOB_E2E}
 
     assert client.post('/run-scan', json=job).status_code == 200
-    assert gcp.tasks.task_ids() == ['job-e2e-scope', 'job-e2e-shard-001', 'job-e2e-shard-002', 'job-e2e-shard-003', 'job-e2e-sweep-1']
-    status_blob = gcp.bucket.blob(f'job-e2e/{ORG_ID}_status.json')
+    assert gcp.tasks.task_ids() == [f'{JOB_E2E}-scope', f'{JOB_E2E}-shard-001', f'{JOB_E2E}-shard-002', f'{JOB_E2E}-shard-003', f'{JOB_E2E}-sweep-1']
+    status_blob = gcp.bucket.blob(f'{JOB_E2E}/{ORG_ID}_status.json')
     assert json.loads(status_blob.download_as_text())['current_task'] == 'Scanning 50 projects in parallel...'
 
     deliveries = gcp.tasks.drain(client, skip_scheduled=True)  # the shards, then the aggregation
@@ -892,7 +893,7 @@ def test_sharded_scan_end_to_end_matches_a_single_task_scan(gcp, monkeypatch):
     assert [path for path, _, _, _ in gcp.tasks.deliveries] == ['/scan-shard'] * 4 + ['/run-aggregation']
     status = json.loads(status_blob.download_as_text())
     assert (status['status'], status['progress'], status['completed_shards'], status['failed_shards']) == ('completed', 100, 4, 0)
-    html = gcp.bucket.blob(f'job-e2e/{ORG_ID}_report.html').download_as_text()
+    html = gcp.bucket.blob(f'{JOB_E2E}/{ORG_ID}_report.html').download_as_text()
     assert coverage_line(html) == '50 of 50 projects · organization-level checks completed' and 'SYNTHETIC LOAD TEST' in html
     assert 'pill-error">Error<' not in html
     assert [name for name in gcp.bucket.objects if name.startswith('intermediate/')] == []
@@ -901,7 +902,7 @@ def test_sharded_scan_end_to_end_matches_a_single_task_scan(gcp, monkeypatch):
     assert gcp.tasks.drain(client) == 1 and gcp.tasks.deliveries[-1][0] == '/sweep'
 
     # The same organization in one task (shards of 1,000): same checks, same statuses, same rows.
-    sharded_csv = gcp.bucket.blob(f'job-e2e/{ORG_ID}_report.csv').download_as_text()
+    sharded_csv = gcp.bucket.blob(f'{JOB_E2E}/{ORG_ID}_report.csv').download_as_text()
     provider = SyntheticGcp(50, latency_ms=0, denied_fraction=0)
     gcp_clients.install_provider(provider)
     store = memory_results_store()
@@ -919,7 +920,7 @@ def test_sharded_scan_survives_a_crashing_shard(gcp, monkeypatch):
     set_env(monkeypatch, synthetic_env(50, 20))
     app = create_app()
     client = app.test_client()
-    job = {'scope': 'organization', 'scope_id': ORG_ID, 'job_id': 'job-crash'}
+    job = {'scope': 'organization', 'scope_id': ORG_ID, 'job_id': JOB_CRASH}
     real_plan = fanout.project_check_plan
 
     def crashing_plan(scope, scope_id, job_id, plist, zones, regions, location_errors=None):
@@ -932,9 +933,9 @@ def test_sharded_scan_survives_a_crashing_shard(gcp, monkeypatch):
     gcp.tasks.drain(client, skip_scheduled=True)
     attempts = [(path, body['shard_id'], retry, code) for path, body, retry, code in gcp.tasks.deliveries if path == '/scan-shard']
     assert [(retry, code) for _, shard, retry, code in attempts if shard == 'shard-002'] == [(0, 500), (1, 500), (2, 200)]
-    status = json.loads(gcp.bucket.blob(f'job-crash/{ORG_ID}_status.json').download_as_text())
+    status = json.loads(gcp.bucket.blob(f'{JOB_CRASH}/{ORG_ID}_status.json').download_as_text())
     assert (status['status'], status['failed_shards']) == ('completed', 1)
-    html = gcp.bucket.blob(f'job-crash/{ORG_ID}_report.html').download_as_text()
+    html = gcp.bucket.blob(f'{JOB_CRASH}/{ORG_ID}_report.html').download_as_text()
     assert coverage_line(html) == '30 of 50 projects · 20 not scanned · organization-level checks completed'
     assert coverage_note(html) == ('30 of 50 projects scanned (60%), 20 not scanned; organization-level checks completed. '
                                    'Checks that could not run are listed as errors in their sections.')
@@ -947,15 +948,15 @@ def test_sharded_scan_survives_a_crashing_shard(gcp, monkeypatch):
 def test_status_page_and_api_follow_a_sharded_job(gcp, monkeypatch):
     set_env(monkeypatch, synthetic_env(25, 20))
     client = create_app().test_client()
-    job = {'scope': 'organization', 'scope_id': ORG_ID, 'job_id': 'job-ui'}
+    job = {'scope': 'organization', 'scope_id': ORG_ID, 'job_id': JOB_UI}
     assert client.post('/run-scan', json=job).status_code == 200
-    status = client.get(f'/api/status/job-ui/{ORG_ID}').get_json()
+    status = client.get(f'/api/status/{JOB_UI}/{ORG_ID}').get_json()
     assert status['status'] == 'running' and status['progress'] == 5 and status['current_task'] == 'Scanning 25 projects in parallel...'
     gcp.tasks.drain(client, skip_scheduled=True)
-    status = client.get(f'/api/status/job-ui/{ORG_ID}').get_json()
+    status = client.get(f'/api/status/{JOB_UI}/{ORG_ID}').get_json()
     assert status['status'] == 'completed' and status['progress'] == 100
-    assert client.get(f'/report/job-ui/{ORG_ID}').status_code == 200
-    assert client.get(f'/status/job-ui/organization/{ORG_ID}').status_code == 200
+    assert client.get(f'/report/{JOB_UI}/{ORG_ID}').status_code == 200
+    assert client.get(f'/status/{JOB_UI}/organization/{ORG_ID}').status_code == 200
 
 
 def test_services_build_the_fanout_from_the_app_configuration(prod_app):

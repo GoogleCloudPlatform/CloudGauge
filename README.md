@@ -26,6 +26,7 @@ Final results are delivered as an interactive **HTML report** (an Overview, a on
   * [Method 3: Deploy with Terraform](#method-3-deploy-with-terraform)
   * [Who can use it](#who-can-use-it)
   * [A public deployment (discouraged)](#a-public-deployment-discouraged)
+  * [Request hardening](#request-hardening)
 * [Configuration Reference](#configuration-reference)
   * [Customising the policy table](#customising-the-policy-table)
 * [Updating an Existing Deployment (Zero-Downtime)](#updating-an-existing-deployment-zero-downtime)
@@ -323,12 +324,15 @@ app/
 ├── __init__.py          # create_app(): settings, startup checks, blueprints
 ├── config.py            # Settings read from environment variables; profiles; the release (VERSION)
 ├── extensions.py        # Shared, lazily created clients and the resolved worker URL
+├── identity.py          # Who is signed in (IAP's assertion, verified) and who is calling the worker (the service account's ID token, v18.6.1)
+├── validation.py        # The shapes of scope, scope ID, job ID and the task bodies; every route validates with it (v18.6.1)
 ├── scan_job.py          # Background scan: run checks -> build reports -> upload -> clean up (or dispatch shards)
 ├── fanout.py            # Sharded scans: dispatcher, shard worker, marker fan-in, aggregation, sweeper
 ├── routes/              # Blueprints
 │   ├── ui.py            #   /, /scan, /status/..., /report/..., /history/<scope>/<scope_id> (v17)
 │   ├── api.py           #   /api/list-resources, /api/status/..., /api/get-summary, /api/get-suggestions, /api/get-insights
-│   └── worker.py        #   /run-scan, /scan-shard, /run-aggregation, /sweep (invoked by Cloud Tasks); /scheduled-scan (Cloud Scheduler, v17)
+│   ├── worker.py        #   /run-scan, /scan-shard, /run-aggregation, /sweep (invoked by Cloud Tasks); /scheduled-scan (Cloud Scheduler, v17)
+│   └── guards.py        #   Same-origin on the POST routes; the worker's caller check (v18.6.1)
 ├── checks/              # Checks grouped by pillar: security, cost, reliability, operations, network, capacity (v17), the SSRF chain (v17.1)
 │   ├── registry.py      #   The check plan: which checks run, and in what order
 │   ├── runner.py        #   Runs the plan concurrently (ThreadPoolExecutor) and reports progress
@@ -702,6 +706,18 @@ gcloud run services add-iam-policy-binding ${SERVICE_NAME} --region ${REGION} --
 
 Where the **Domain Restricted Sharing** organization policy (`iam.allowedPolicyMemberDomains`) forbids `allUsers`, `--allow-unauthenticated` fails; `--no-invoker-iam-check` in its place makes the service public by skipping the invoker check altogether. Behind neither IAP nor IAM the pages show no name and scans record none. To move such a deployment to the two services later, run `tools/deploy.sh` with its names: it adds the worker and turns the service into the web service.
 
+Since v18.6.1 the worker endpoints of such a service (`/run-scan` and the rest) still answer only Cloud Tasks and Cloud Scheduler: they verify the service account's ID token in-process (see [Request hardening](#request-hardening)), so an anonymous `POST /run-scan` gets 401 even though the service is public. What stays open on a public service is what the pages offer anyone with the URL — starting scans and reading every report — which is why the two services are the recommendation.
+
+### **Request hardening**
+
+Whatever the deployment, the application checks its own requests (v18.6.1):
+
+* **Every identifier is validated** before it reaches a bucket key, a task body or an API call: `scope` is `organization`, `folder` or `project`; `scope_id` an organization or folder number, or a project ID; `job_id` the UUID `POST /scan` minted. A malformed one is a **400** — on the pages, the API and the worker endpoints alike — and the results store refuses to build an object key from anything but a plain key segment, so a value can never steer an object under another job's prefix.
+* **The POST routes are same-origin only** (`POST /scan`, `/api/get-summary`, `/api/get-suggestions`, `/api/get-insights`): Identity-Aware Proxy says who is in the browser, not which page sent the request, so a form on another site could otherwise start a scan as the operator. Browsers label every request with `Sec-Fetch-Site`; it must read `same-origin` or `none`, else the `Origin` (then the `Referer`) must name this service — a cross-site request gets **403**. A request with none of those headers (`curl`, a script) has no victim's browser behind it and is allowed.
+* **A scope scans once at a time**, whoever asks: `POST /scan` while the scope's previous scan is still running answers **409** with a page naming that scan and linking its status page (JSON for a client that asks for it); nothing new is started. Scheduled scans have followed the same rule since v17. A scan counts as running while its status file says so; one that has not started within 10 minutes no longer blocks its scope.
+* **The suggestions batch is bounded**: `/api/get-suggestions` takes at most 20 findings per request (the report sends 5), each with at most 20,000 characters of text; no request body may exceed 1 MiB (**413**).
+* **The worker endpoints verify their caller**: Cloud Run's IAM check is what keeps everyone but the service account out of the worker service, and Cloud Run hands the `Authorization` header on to the container, so the worker verifies the token too — Google's signature, the service account's `email`, an audience among `WORKER_AUDIENCE`, the worker's URL and the request's URL, the expiry — and answers **401** otherwise. This is defence in depth behind IAM in the two-service deployment and the only guard in the public one. `WORKER_TOKEN_CHECK=off` switches it off (if a front in your path rewrites the token); it runs in the `production` and `synthetic` profiles only.
+
 ## **Configuration Reference**
 
 CloudGauge is configured entirely through environment variables on the Cloud Run service.
@@ -719,6 +735,7 @@ CloudGauge is configured entirely through environment variables on the Cloud Run
 | `VERTEX_LOCATION` | No | `global` | Vertex AI location used for Gemini calls. |
 | `WORKER_URL` | `web`: yes | discovered | URL that Cloud Tasks calls for `/run-scan` and the other worker endpoints. On a `web` service: the worker service's URL (required; the web service never runs scans). On a `worker` or `all` service: its own URL — discovered at startup through the Cloud Run Admin API (needs `roles/run.viewer` on the service) unless set; `tools/deploy.sh` sets it to the deterministic `https://<service>-<project number>.<region>.run.app`. For a canary, the worker's tag URL. |
 | `WORKER_AUDIENCE` | No | the task URL | Audience of the OIDC token on the tasks. Leave unset normally. For a canary, set it to the **worker's main** URL: Cloud Run rejects tokens whose audience is a revision tag URL (HTTP 401). |
+| `WORKER_TOKEN_CHECK` | No | `on` | Whether the worker endpoints verify the caller's ID token in-process, on top of Cloud Run's IAM check (v18.6.1, [Request hardening](#request-hardening)). `off` is the way back if a front in your path rewrites the token. Enforced in the `production` and `synthetic` profiles only. |
 | `BEST_PRACTICES_CSV_URL` | No | the bundled table | Source of the best-practices table the Organization Policies check scores against: unset, the table shipped inside the image (`assets/gcp_best_practices.csv`); a `gs://bucket/object` the service account can read; or an `https://` URL fetched anonymously (the pre-v18.1 default was the GitHub copy). An overrides file in the results bucket amends whichever is in use — see [Customising the policy table](#customising-the-policy-table). |
 | `SERVICE_HEALTH_WINDOW_DAYS` | No | `90` | How far back the **Service Health Incidents** briefing looks (1–366 days). |
 | `SERVICE_HEALTH_RELEVANCE` | No | `IMPACTED` | Which Personalized Service Health relevance levels the briefing lists, comma-separated: `IMPACTED`, `RELATED`, `PARTIALLY_RELATED`, `NOT_IMPACTED`, `UNKNOWN`. Whatever the setting, the *Related* incidents confined to specific locations are listed too (Incident Exposure reads them) and the global ones are counted in a note; `IMPACTED,RELATED` (the default until v17.2) lists every Related incident. |

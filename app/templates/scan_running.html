@@ -1,0 +1,67 @@
+{#
+  Copyright 2025 Google LLC
+
+  Licensed under the Apache License, Version 2.0 (the "License");
+  you may not use this file except in compliance with the License.
+  You may obtain a copy of the License at
+
+      https://www.apache.org/licenses/LICENSE-2.0
+
+  Unless required by applicable law or agreed to in writing, software
+  distributed under the License is distributed on an "AS IS" BASIS,
+  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+  See the License for the specific language governing permissions and
+  limitations under the License.
+#}
+{#
+  POST /scan while the scope's previous scan is still running (v18.6.1, HTTP 409):
+  one centred card in the status page's design naming the running job, with a
+  button to its status page and a link back to the form. Nothing was started.
+#}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Scan already running</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+    <style>
+{% include "_design.css" %}
+        body { min-height: 100vh; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px; padding: 24px; }
+        .status-card { width: 100%; max-width: 448px; padding: 32px; }
+        .notice { width: 100%; max-width: 448px; }
+        .brand { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; margin-bottom: 28px; font-size: 13px; font-weight: 600; letter-spacing: -0.01em; color: var(--ink); }
+        .signed-in { font-weight: 400; letter-spacing: 0; font-size: 12px; color: var(--muted); overflow-wrap: anywhere; text-align: right; }
+        .status-card h1 { font-size: 22px; margin-bottom: 6px; }
+        .scope-line { margin-bottom: 20px; font-family: var(--font-mono); font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
+        .lede { margin-bottom: 8px; color: var(--muted); }
+        .running { margin: 0 0 4px; padding: 10px 12px; border: 1px solid var(--hairline); border-radius: var(--radius-control); background: var(--canvas); font-size: 13px; color: var(--body); overflow-wrap: anywhere; }
+        .running dt { display: inline; color: var(--muted); }
+        .running dd { display: inline; margin: 0; font-family: var(--font-mono); font-size: 12px; }
+        .running div + div { margin-top: 4px; }
+        .button-group { display: flex; flex-direction: column; gap: 10px; margin-top: 24px; }
+        .button-group .btn { padding: 11px 14px; }
+        .again { font-size: 13px; }
+    </style>
+</head>
+<body class="dotgrid">
+    {% if banner %}<div role="note" class="notice notice-amber">{{ banner }}</div>{% endif %}
+    <main class="card status-card">
+        <div class="brand">CloudGauge{% if current_user %}<span class="signed-in">Signed in as {{ current_user }}</span>{% endif %}</div>
+        <h1>Scan already running</h1>
+        <p class="scope-line">{{ scope }} {{ scope_id }}</p>
+        <p class="lede">A scan of this scope is still running, so nothing new was started. A new scan can start once it finishes.</p>
+        <dl class="running">
+            <div><dt>Started</dt> <dd>{{ lock.started_at or "—" }}</dd></div>
+            {% if lock.requested_by %}<div><dt>Requested by</dt> <dd>{{ lock.requested_by }}</dd></div>{% endif %}
+            <div><dt>Job</dt> <dd>{{ lock.job_id }}</dd></div>
+        </dl>
+        <div class="button-group">
+            <a href="{{ status_path }}" class="btn btn-primary">Open the running scan</a>
+            <a href="/" class="btn btn-outline">Back to the form</a>
+        </div>
+    </main>
+</body>
+</html>

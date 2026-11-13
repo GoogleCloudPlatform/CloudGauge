@@ -34,7 +34,8 @@ from helpers import make_settings
 
 WORKER_URL = 'https://cloudgauge-worker-123.us-central1.run.app'
 WORKER_PATHS = ('/run-scan', '/scan-shard', '/run-aggregation', '/sweep', '/scheduled-scan')
-PAGE_PATHS = ('/', '/status/job-1/project/p1', '/report/job-1/p1', '/api/status/job-1/p1', '/history/project/p1')
+PAGE_PATHS = ('/', '/status/11111111-1111-4111-8111-111111111111/project/proj-one', '/report/11111111-1111-4111-8111-111111111111/proj-one',
+              '/api/status/11111111-1111-4111-8111-111111111111/proj-one', '/history/project/proj-one')
 BLUEPRINTS = {'all': {'ui', 'api', 'worker'}, 'web': {'ui', 'api'}, 'worker': {'worker'}}
 WEB_NEEDS_WORKER_URL = ("FATAL: CLOUDGAUGE_ROLE=web needs WORKER_URL, the URL of the worker service "
                         "(the one deployed with CLOUDGAUGE_ROLE=worker); the web service never runs scans itself.")
@@ -78,7 +79,7 @@ def test_the_worker_service_has_no_pages(gcp):
     """Nothing to sign in to: the worker is reachable by Cloud Tasks only, and serves it only."""
     http = create_app(make_settings('testing', CLOUDGAUGE_ROLE='worker')).test_client()
     assert [http.get(path).status_code for path in PAGE_PATHS] == [404] * len(PAGE_PATHS)
-    assert http.post('/scan', data={'scope': 'project', 'scope_id': 'p1'}).status_code == 404
+    assert http.post('/scan', data={'scope': 'project', 'scope_id': 'proj-one'}).status_code == 404
     assert http.post('/run-scan', json={}).status_code != 404  # the endpoint exists (and rejects the empty task)
 
 
@@ -105,11 +106,11 @@ def test_a_web_service_sends_scans_to_the_worker_and_never_discovers_itself(gcp,
     assert services_of(app).worker_url == WORKER_URL
     assert gcp.discovery.calls == []  # no Cloud Run Admin API call, so no roles/run.viewer needed
     assert len(gcp.tasks.queues) == 1  # the queue is created by whichever service starts first
-    assert app.test_client().post('/scan', data={'scope': 'project', 'scope_id': 'p1'}).status_code == 302
+    assert app.test_client().post('/scan', data={'scope': 'project', 'scope_id': 'proj-one'}).status_code == 302
     ((_, task),) = gcp.tasks.tasks
     assert task['http_request']['url'] == f'{WORKER_URL}/run-scan'
     body = json.loads(task['http_request']['body'])
-    assert body == {'scope': 'project', 'scope_id': 'p1', 'job_id': body['job_id']}  # the legacy body: no requested_by without IAP
+    assert body == {'scope': 'project', 'scope_id': 'proj-one', 'job_id': body['job_id']}  # the legacy body: no requested_by without IAP
     assert "CloudGauge role 'web': serving the pages and the API (scans run on WORKER_URL)." in caplog.text
 
 

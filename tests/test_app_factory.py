@@ -75,8 +75,8 @@ def test_testing_profile_needs_no_configuration(gcp, monkeypatch):
 
 def test_testing_profile_resolves_the_worker_url_once_on_first_use(testing_app, gcp):
     http = testing_app.test_client()
-    for _ in range(2):
-        assert http.post('/scan', data={'scope': 'project', 'scope_id': 'p1'}).status_code == 302
+    for scope_id in ('proj-one', 'proj-two'):  # two scopes: a second scan of the same one is a 409 while the first runs (v18.6.1)
+        assert http.post('/scan', data={'scope': 'project', 'scope_id': scope_id}).status_code == 302
     assert gcp.discovery.run_services == [RUN_SERVICE]
     assert [task['http_request']['url'] for _, task in gcp.tasks.tasks] == [f'{fakes.WORKER_URL}/run-scan'] * 2
 
@@ -146,7 +146,7 @@ def test_canary_settings_send_the_task_to_the_tag_url_with_the_main_url_as_audie
     canary, main = 'https://canary---cloudgauge-123.us-central1.run.app', 'https://cloudgauge-123.us-central1.run.app'
     monkeypatch.setenv('WORKER_URL', canary)
     monkeypatch.setenv('WORKER_AUDIENCE', main)
-    assert create_app().test_client().post('/scan', data={'scope': 'project', 'scope_id': 'p1'}).status_code == 302
+    assert create_app().test_client().post('/scan', data={'scope': 'project', 'scope_id': 'proj-one'}).status_code == 302
     ((_, task),) = gcp.tasks.tasks
     assert task['http_request']['url'] == f'{canary}/run-scan'
     assert task['http_request']['oidc_token'] == {'service_account_email': fakes.TEST_ENV['SERVICE_ACCOUNT_EMAIL'],
@@ -201,9 +201,9 @@ def test_each_app_has_its_own_services(gcp, env):
     app_b = create_app(make_settings(RESULTS_BUCKET='bucket-b'))
     assert services_of(app_a) is not services_of(app_b)
     status = {'status': 'running', 'progress': 40, 'current_task': '(4/14) Finished: GKE Hygiene'}
-    gcp.storage.bucket('bucket-a').put('job-1/p1_status.json', json.dumps(status), 'application/json')
-    assert app_a.test_client().get('/api/status/job-1/p1').get_json() == status
-    assert app_b.test_client().get('/api/status/job-1/p1').get_json()['status'] == 'pending'
+    gcp.storage.bucket('bucket-a').put('11111111-1111-4111-8111-111111111111/proj-one_status.json', json.dumps(status), 'application/json')
+    assert app_a.test_client().get('/api/status/11111111-1111-4111-8111-111111111111/proj-one').get_json() == status
+    assert app_b.test_client().get('/api/status/11111111-1111-4111-8111-111111111111/proj-one').get_json()['status'] == 'pending'
 
 
 def test_routes_use_the_injected_services(env):
@@ -215,10 +215,10 @@ def test_routes_use_the_injected_services(env):
     app = create_app(settings, services=services)
     assert services_of(app) is services
 
-    storage.bucket('injected-bucket').put('job-1/p1_report.html', '<p>injected</p>', 'text/html')
+    storage.bucket('injected-bucket').put('11111111-1111-4111-8111-111111111111/proj-one_report.html', '<p>injected</p>', 'text/html')
     http = app.test_client()
-    assert http.get('/report/job-1/p1').get_data(as_text=True) == '<p>injected</p>'
-    assert http.post('/scan', data={'scope': 'project', 'scope_id': 'p1'}).status_code == 302
+    assert http.get('/report/11111111-1111-4111-8111-111111111111/proj-one').get_data(as_text=True) == '<p>injected</p>'
+    assert http.post('/scan', data={'scope': 'project', 'scope_id': 'proj-one'}).status_code == 302
     [(parent, task)] = tasks_client.tasks
     assert parent == 'projects/test-project/locations/us-central1/queues/test-queue'
     assert task['http_request']['url'] == 'https://injected.example/run-scan'

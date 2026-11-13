@@ -103,16 +103,24 @@ def sentence_case(text):
 
 @pytest.fixture
 def pages(client, gcp):
-    """The pages as a browser gets them (v17: the history page too, with one scan on record)."""
+    """The pages as a browser gets them (v17: the history page too, with one scan on record; v18.6.1: the *scan already
+    running* page, a POST /scan while the scope's noted job has not finished)."""
+    import json
+    from datetime import datetime, timezone
+
     from app.reporting.html_report import generate_reports
 
     summary = generate_reports('organization', '123456789', 'job-1', samples.FINDINGS, total_projects=4)[2]
-    gcp.bucket.put(f"scopes/organization/123456789/{summary['generated_ts']}_job-1.json", __import__('json').dumps(summary), 'application/json')
+    gcp.bucket.put(f"scopes/organization/123456789/{summary['generated_ts']}_job-1.json", json.dumps(summary), 'application/json')
+    gcp.bucket.put('schedules/project/web-prod.json', json.dumps({
+        'job_id': '11111111-1111-4111-8111-111111111111', 'scope': 'project', 'scope_id': 'web-prod', 'requested_by': 'alice@example.com',
+        'started_at': datetime.now(timezone.utc).isoformat(timespec='seconds')}), 'application/json')
     return {
         'report': render(samples.FINDINGS),
         'index': client.get('/').get_data(as_text=True),
-        'status': client.get('/status/job-1/project/web-prod').get_data(as_text=True),
+        'status': client.get('/status/11111111-1111-4111-8111-111111111111/project/web-prod').get_data(as_text=True),
         'history': client.get('/history/organization/123456789').get_data(as_text=True),
+        'running': client.post('/scan', data={'scope': 'project', 'scope_id': 'web-prod'}).get_data(as_text=True),
     }
 
 
@@ -166,6 +174,7 @@ def test_the_primary_button_is_ink_on_white(pages):
     assert re.findall(r'class="btn btn-primary[^"]*"[^>]*>([^<]+)<', pages['report']) == ['Generate executive summary']
     assert re.findall(r'class="btn btn-primary[^"]*"[^>]*>([^<]+)<', pages['status']) == ['View interactive report']
     assert re.findall(r'class="btn btn-primary[^"]*"[^>]*>([^<]+)<', pages['history']) == []  # a page to read: outline actions only
+    assert re.findall(r'class="btn btn-primary[^"]*"[^>]*>([^<]+)<', pages['running']) == ['Open the running scan']
 
 
 def test_status_is_a_dot_and_a_soft_pill_in_its_semantic_colour(pages):

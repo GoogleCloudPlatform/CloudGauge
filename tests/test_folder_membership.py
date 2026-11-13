@@ -41,7 +41,7 @@ from app.services.resource_manager import (ASSET_INVENTORY_ONLY, MEMBERSHIP, RES
                                            folder_membership, list_projects_for_scope, parent_of)
 from app.utils import ThrottledProgressReporter
 
-FOLDER, PARENT, JOB = '42', 'folders/42', 'job-m1'
+FOLDER, PARENT, JOB = '42', 'folders/42', 'a1a1a1a1-a1a1-4a1a-8a1a-a1a1a1a1a1a1'
 # Resource Manager's direct children, as v3 projects.list returns them.
 WEB_PROD = {'projectId': 'web-prod', 'displayName': 'Web Prod', 'name': 'projects/111'}
 MOVED_IN = {'projectId': 'moved-in', 'displayName': 'Moved In', 'name': 'projects/555'}

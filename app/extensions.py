@@ -45,6 +45,8 @@ class Services:
             build it on first use from the fields above.
         identity_verifier: Verifies the Identity-Aware Proxy assertion on requests
             (``app.identity.IapVerifier``); ``None`` means build it on first use.
+        caller_verifier: Verifies the ID token on the worker routes (``app.identity.CallerVerifier``,
+            v18.6.1); ``None`` means build it on first use.
         exporter: Loads finished scans into BigQuery (``app.services.bigquery_export.BigQueryExporter``);
             ``None`` means build it on first use — and it stays ``None`` without ``BIGQUERY_DATASET``.
     """
@@ -55,6 +57,7 @@ class Services:
     report_banner: str | None = None
     fanout: object = None
     identity_verifier: object = None
+    caller_verifier: object = None
     exporter: object = None
     _exporter_built: bool = field(default=False, init=False, repr=False, compare=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False, compare=False)
@@ -115,6 +118,16 @@ class Services:
                 if self.identity_verifier is None:
                     self.identity_verifier = IapVerifier(self.settings)
         return self.identity_verifier
+
+    def get_caller_verifier(self):
+        """Returns the worker routes' ID-token verifier (v18.6.1), built on first use."""
+        if self.caller_verifier is None:
+            from app.identity import CallerVerifier
+
+            with self._lock:
+                if self.caller_verifier is None:
+                    self.caller_verifier = CallerVerifier(self.settings)
+        return self.caller_verifier
 
 
 def build_services(settings):

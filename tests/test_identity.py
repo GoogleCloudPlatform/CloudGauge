@@ -255,13 +255,13 @@ def test_the_pages_say_who_is_signed_in(testing_app, gcp):
 
     home = http.get('/', headers=with_assertion(iap.assertion())).get_data(as_text=True)
     assert '<span class="signed-in">Signed in as alice@example.com</span>' in home
-    status = http.get('/status/job-1/project/p1', headers=with_assertion(iap.assertion())).get_data(as_text=True)
+    status = http.get('/status/11111111-1111-4111-8111-111111111111/project/proj-one', headers=with_assertion(iap.assertion())).get_data(as_text=True)
     assert 'const signed_in_as = "alice@example.com";' in status
 
     # Not behind IAP (or the raw header alone): the pages say nothing.
     for headers in ({}, {RAW_EMAIL_HEADER: f'accounts.google.com:{EMAIL}'}):
         assert 'Signed in as' not in http.get('/', headers=headers).get_data(as_text=True)
-        assert 'const signed_in_as = "";' in http.get('/status/job-1/project/p1', headers=headers).get_data(as_text=True)
+        assert 'const signed_in_as = "";' in http.get('/status/11111111-1111-4111-8111-111111111111/project/proj-one', headers=headers).get_data(as_text=True)
 
 
 def test_the_name_is_escaped_on_the_pages(testing_app, gcp):
@@ -276,15 +276,15 @@ def test_a_scan_records_who_asked_for_it(testing_app, gcp):
     iap = Iap()
     install(testing_app, iap)
     http = testing_app.test_client()
-    form = {'scope': 'project', 'scope_id': 'p1'}
+    forms = [{'scope': 'project', 'scope_id': scope_id} for scope_id in ('proj-one', 'proj-two', 'proj-three')]  # one scope scans once at a time (v18.6.1)
 
-    assert http.post('/scan', data=form, headers=with_assertion(iap.assertion())).status_code == 302
-    assert http.post('/scan', data=form).status_code == 302
-    assert http.post('/scan', data=form, headers={RAW_EMAIL_HEADER: f'accounts.google.com:{EMAIL}'}).status_code == 302
+    assert http.post('/scan', data=forms[0], headers=with_assertion(iap.assertion())).status_code == 302
+    assert http.post('/scan', data=forms[1]).status_code == 302
+    assert http.post('/scan', data=forms[2], headers={RAW_EMAIL_HEADER: f'accounts.google.com:{EMAIL}'}).status_code == 302
     bodies = [json.loads(task['http_request']['body']) for _, task in gcp.tasks.tasks]
-    assert bodies[0] == {'scope': 'project', 'scope_id': 'p1', 'job_id': bodies[0]['job_id'], 'requested_by': EMAIL}
-    for body in bodies[1:]:  # the legacy body, exactly
-        assert body == {'scope': 'project', 'scope_id': 'p1', 'job_id': body['job_id']}
+    assert bodies[0] == {'scope': 'project', 'scope_id': 'proj-one', 'job_id': bodies[0]['job_id'], 'requested_by': EMAIL}
+    for body, form in zip(bodies[1:], forms[1:]):  # the legacy body, exactly
+        assert body == {'scope': 'project', 'scope_id': form['scope_id'], 'job_id': body['job_id']}
 
 
 def test_build_scan_task_adds_requested_by_only_when_known():
@@ -297,7 +297,7 @@ def test_build_scan_task_adds_requested_by_only_when_known():
 
 # --- In the report ---
 
-JOB_ID, SCOPE_ID = 'job-7', 'p-alpha'
+JOB_ID, SCOPE_ID = '77777777-7777-4777-8777-777777777777', 'p-alpha'
 REQUESTED_BY_ROW = f'<dt>Requested by</dt><dd>{EMAIL}</dd>'
 
 

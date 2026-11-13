@@ -28,7 +28,11 @@ endpoints, so nobody who passes Identity-Aware Proxy can post to
 ``/run-aggregation``; ``worker`` has only the Cloud Tasks endpoints; ``all``
 has everything on one service.
 
-Handlers get their dependencies from ``app.extensions.get_services()``.
+Handlers get their dependencies from ``app.extensions.get_services()``. Before a
+handler runs, ``app.routes.guards`` checks the request (v18.6.1): the POST routes
+of ``ui`` and ``api`` must be same-origin, the ``worker`` routes must carry the
+service account's ID token; every handler validates its identifiers with
+``app.validation``.
 """
 from app.routes import api, ui, worker
 

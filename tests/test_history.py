@@ -172,7 +172,7 @@ def test_the_report_and_the_status_page_link_to_the_history(client, gcp):
 
     assert '<dt>History</dt><dd class="history-link"><a href="/history/organization/123456789">every scan of this organization</a></dd>' in \
         generate_html_report(SCOPE, SCOPE_ID, 'job-1')
-    status_page = client.get(f'/status/job-1/{SCOPE}/{SCOPE_ID}').get_data(as_text=True)
+    status_page = client.get(f'/status/11111111-1111-4111-8111-111111111111/{SCOPE}/{SCOPE_ID}').get_data(as_text=True)
     assert 'const history_url = `/history/${scope}/${scope_id}`;' in status_page and '>View history</a>' in status_page
     index = client.get('/').get_data(as_text=True)
     assert 'id="history-link"' in index and 'historyLink.href = `/history/${encodeURIComponent(scopeSelect.value)}/${encodeURIComponent(this.value)}`' in index
@@ -182,7 +182,7 @@ def test_the_report_and_the_status_page_link_to_the_history(client, gcp):
 
 def test_the_scheduler_body_is_validated():
     assert schedules.validate({'scope': 'organization', 'scope_id': ' 123 ', 'name': 'weekly-org'}) == ('organization', '123', 'weekly-org')
-    assert schedules.validate({'scope': 'project', 'scope_id': 'p1'}) == ('project', 'p1', 'unnamed')
+    assert schedules.validate({'scope': 'project', 'scope_id': 'proj-one'}) == ('project', 'proj-one', 'unnamed')
     for body in (None, [], {'scope': 'team', 'scope_id': 'x'}, {'scope': 'folder'}, {'scope': 'folder', 'scope_id': ''},
                  {'scope': 'folder', 'scope_id': 'a/b'}, {'scope': 'folder', 'scope_id': '42', 'name': 'bad name'}, {'scope': 'folder', 'scope_id': '42', 'name': 'x' * 65}):
         with pytest.raises(ValueError):
@@ -193,8 +193,10 @@ def test_the_scheduler_body_is_validated():
 def test_scan_in_progress_reads_the_locked_jobs_status(gcp):
     store = GcsResultsStore('test-bucket', client=gcp.storage)
     lock = {'job_id': 'job-9', 'scope_id': SCOPE_ID, 'started_at': (NOW - timedelta(hours=1)).isoformat()}
+    queued = {**lock, 'started_at': (NOW - timedelta(minutes=5)).isoformat()}
     assert schedules.scan_in_progress(store, None, NOW) is False and schedules.scan_in_progress(store, {}, NOW) is False
-    assert schedules.scan_in_progress(store, lock, NOW) is True  # no status file yet: queued
+    assert schedules.scan_in_progress(store, queued, NOW) is True  # no status file yet, started 5 minutes ago: queued
+    assert schedules.scan_in_progress(store, lock, NOW) is False  # v18.6.1: no status file after an hour: the task never came
     store.update_status('job-9', SCOPE_ID, 50, 'scanning')
     assert schedules.scan_in_progress(store, lock, NOW) is True
     store.update_status('job-9', SCOPE_ID, 100, 'done', status='completed')
@@ -235,7 +237,7 @@ def test_the_scheduled_scan_endpoint_enqueues_a_scan_once_per_running_scope(work
     assert again.status_code == 409 and again.get_json()['job_id'] == job_id and 'is still running' in again.get_json()['error']
     assert len(gcp.tasks.tasks) == 1
     # Another scope is unaffected; once the job completes, the scope can be scanned again.
-    assert client.post('/scheduled-scan', json={'scope': 'project', 'scope_id': 'p1', 'name': 'nightly-p1'}).status_code == 202
+    assert client.post('/scheduled-scan', json={'scope': 'project', 'scope_id': 'proj-one', 'name': 'nightly-p1'}).status_code == 202
     services.results_store.update_status(job_id, SCOPE_ID, 100, 'Scan complete!', status='completed')
     assert client.post('/scheduled-scan', json={'scope': SCOPE, 'scope_id': SCOPE_ID, 'name': 'weekly-org'}).status_code == 202
     assert len(gcp.tasks.tasks) == 3

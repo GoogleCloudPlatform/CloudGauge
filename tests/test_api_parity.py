@@ -37,6 +37,10 @@ from helpers import assert_same_response, normalized_lines, page_facts, status_p
 
 SA_EMAIL = fakes.TEST_ENV['SERVICE_ACCOUNT_EMAIL']
 XSS = '"><img src=x onerror=alert(1)>'  # no "/": a URL segment can't contain one
+# v18.6.1: the new app validates every identifier (app.validation) — the parity requests use a real job ID shape and a
+# real project ID; the malformed-input tests below assert the new app's 400 where legacy answered 200, 415 or 500.
+JOB = '11111111-1111-4111-8111-111111111111'
+P1 = 'proj-one'
 
 
 def send_both(legacy_client, client, method, path, **kwargs):
@@ -95,14 +99,21 @@ def test_scan_enqueues_the_legacy_task(legacy_client, client, gcp, monkeypatch):
 
 @pytest.mark.parametrize('kwargs', [
     {'data': {'scope': 'project', 'scope_id': ''}},
-    {'data': {'scope': '', 'scope_id': 'p1'}},
-    {'data': {'scope': 'project'}},  # no scope_id field: 400 from request.form
+    {'data': {'scope': '', 'scope_id': P1}},
+    {'data': {'scope': 'project'}},  # no scope_id field
     {'data': {}},
-    {'json': {'scope': 'project', 'scope_id': 'p1'}},  # JSON instead of a form
+    {'json': {'scope': 'project', 'scope_id': P1}},  # JSON instead of a form
+    {'data': {'scope': 'team', 'scope_id': P1}},  # v18.6.1: not a scope
+    {'data': {'scope': 'project', 'scope_id': 'p1'}},  # v18.6.1: not a project ID
+    {'data': {'scope': 'folder', 'scope_id': 'not-a-number'}},
 ])
-def test_scan_rejects_incomplete_forms(kwargs, legacy_client, client, gcp):
-    response = assert_parity(legacy_client, client, 'POST', '/scan', html=True, **kwargs)
+def test_scan_rejects_incomplete_forms(kwargs, client, gcp):
+    """Legacy answered 400 to a missing field (its own check, or werkzeug's); the new app answers 400 to those and, since
+    v18.6.1, to any scope or scope ID that is not one (app.validation) — the message names the field. Legacy accepted the
+    last three (and enqueued a scan), so this is the new app alone."""
+    response = client.post('/scan', **kwargs)
     assert response.status_code == 400
+    assert response.get_data(as_text=True).startswith(('scope', 'scope_id'))
     assert gcp.tasks.tasks == []
 
 
@@ -111,70 +122,72 @@ def test_status_page(legacy_client, client, gcp):
     documented difference since v16.1: its Download CSV is the web service's route, where legacy embedded a one-hour
     signed Cloud Storage URL (``signed_csv_url``), minted on every page load."""
     startup_auth_calls = len(gcp.auth_scopes)  # the new app's startup looked up its URL
-    response = assert_parity(legacy_client, client, 'GET', '/status/job-1/organization/123456789', facts=status_page_facts)
+    response = assert_parity(legacy_client, client, 'GET', f'/status/{JOB}/organization/123456789', facts=status_page_facts)
     assert response.status_code == 200
     page = response.get_data(as_text=True)
     assert page_facts(page) == {
         'forms': [], 'fields': [], 'options': [], 'submit_disabled': False,
-        'constants': [('job_id', '"job-1"'), ('scope_id', '"123456789"')],
+        'constants': [('job_id', f'"{JOB}"'), ('scope_id', '"123456789"')],
         'urls': ['/api/status/${job_id}/${scope_id}', '/report/${job_id}/${scope_id}', '/report/${job_id}/${scope_id}/csv'],
     }
     assert 'const scope = "organization";' in normalized_lines(page)  # new in v14.2: the card names the scope
     assert 'signed_csv_url' not in page
 
     ((legacy_blob, legacy_kwargs),) = gcp.bucket.signed_url_requests  # legacy signed; the new page asked for nothing
-    assert legacy_blob == 'job-1/123456789_report.csv'
+    assert legacy_blob == f'{JOB}/123456789_report.csv'
     assert legacy_kwargs['service_account_email'] == SA_EMAIL
     assert gcp.auth_scopes[startup_auth_calls:] == [['https://www.googleapis.com/auth/cloud-platform']]  # legacy's only
 
 
-def test_status_page_escapes_url_values(legacy_client, client):
+def test_status_page_refuses_malformed_url_values(legacy_client, client):
+    """Legacy escaped whatever the URL carried into the page's constants; since v18.6.1 the new app answers 400 to a job ID
+    that is not a UUID or a scope ID that is not one (app.validation) — nothing of the value reaches a page."""
     path = f'/status/{quote(XSS, safe="")}/project/{quote(XSS, safe="")}'
-    response = assert_parity(legacy_client, client, 'GET', path, facts=status_page_facts)
-    assert response.status_code == 200
-    page = response.get_data(as_text=True)
-    assert XSS not in page
-    assert 'const job_id = "&#34;&gt;&lt;img src=x onerror=alert(1)&gt;";' in normalized_lines(page)
-    assert 'const scope_id = "&#34;&gt;&lt;img src=x onerror=alert(1)&gt;";' in normalized_lines(page)
+    legacy_response, response = send_both(legacy_client, client, 'GET', path)
+    assert legacy_response.status_code == 200 and XSS not in legacy_response.get_data(as_text=True)
+    assert response.status_code == 400
+    assert XSS not in response.get_data(as_text=True) and response.get_data(as_text=True) == 'job_id must be a UUID.'
+    assert client.get(f'/status/{JOB}/project/{quote(XSS, safe="")}').get_data(as_text=True).startswith('scope_id must be a project ID')
+    assert client.get(f'/status/{JOB}/team/{P1}').get_data(as_text=True) == 'scope must be organization, folder or project.'
 
 
 def test_report_is_served_as_stored(legacy_client, client, gcp):
-    stored = '<!DOCTYPE html>\n<html><body>CloudGauge Report: Project p1 &amp; more</body></html>\n'
-    gcp.bucket.put('job-1/p1_report.html', stored, 'text/html')
-    response = assert_parity(legacy_client, client, 'GET', '/report/job-1/p1')
+    stored = '<!DOCTYPE html>\n<html><body>CloudGauge Report: Project proj-one &amp; more</body></html>\n'
+    gcp.bucket.put(f'{JOB}/{P1}_report.html', stored, 'text/html')
+    response = assert_parity(legacy_client, client, 'GET', f'/report/{JOB}/{P1}')
     assert response.status_code == 200
     assert response.get_data(as_text=True) == stored
 
 
 def test_missing_report(legacy_client, client):
-    response = assert_parity(legacy_client, client, 'GET', '/report/job-1/p1')
+    response = assert_parity(legacy_client, client, 'GET', f'/report/{JOB}/{P1}')
     assert (response.status_code, response.get_data(as_text=True)) == (404, 'Report not found or is still generating.')
 
 
 def test_report_storage_error(legacy_client, client, gcp):
     gcp.bucket.error = RuntimeError('503 Service Unavailable')
-    response = assert_parity(legacy_client, client, 'GET', '/report/job-1/p1')
+    response = assert_parity(legacy_client, client, 'GET', f'/report/{JOB}/{P1}')
     assert (response.status_code, response.get_data(as_text=True)) == (500, 'Could not retrieve report.')
 
 
 # --- /api/status ---
 
 def test_status_is_pending_before_the_worker_starts(legacy_client, client):
-    response = assert_parity(legacy_client, client, 'GET', '/api/status/job-1/p1')
+    response = assert_parity(legacy_client, client, 'GET', f'/api/status/{JOB}/{P1}')
     assert response.get_json() == {'status': 'pending', 'progress': 0, 'current_task': 'Waiting for task to start...'}
 
 
 def test_status_is_read_from_the_bucket(legacy_client, client, gcp):
-    status = {'job_id': 'job-1', 'scope_id': 'p1', 'progress': 35, 'current_task': '(5/14) Finished: GKE Hygiene',
+    status = {'job_id': JOB, 'scope_id': P1, 'progress': 35, 'current_task': '(5/14) Finished: GKE Hygiene',
               'status': 'running', 'timestamp': '2026-09-29T10:00:00+00:00'}
-    gcp.bucket.put('job-1/p1_status.json', json.dumps(status), 'application/json')
-    response = assert_parity(legacy_client, client, 'GET', '/api/status/job-1/p1')
+    gcp.bucket.put(f'{JOB}/{P1}_status.json', json.dumps(status), 'application/json')
+    response = assert_parity(legacy_client, client, 'GET', f'/api/status/{JOB}/{P1}')
     assert response.get_json() == status
 
 
 def test_status_storage_error(legacy_client, client, gcp):
     gcp.bucket.error = RuntimeError('503 Service Unavailable')
-    response = assert_parity(legacy_client, client, 'GET', '/api/status/job-1/p1')
+    response = assert_parity(legacy_client, client, 'GET', f'/api/status/{JOB}/{P1}')
     assert response.status_code == 500
     assert response.get_json() == {'status': 'error', 'message': '503 Service Unavailable'}
 
@@ -310,7 +323,7 @@ def test_insight_type_errors_are_skipped(legacy_client, client, insight_scope, r
 
 def test_insights_without_projects(legacy_client, client, insight_scope, recommender_insights):
     insight_scope.clear()
-    response = assert_parity(legacy_client, client, 'POST', '/api/get-insights', json={'scope': 'project', 'scope_id': 'p1'})
+    response = assert_parity(legacy_client, client, 'POST', '/api/get-insights', json={'scope': 'project', 'scope_id': P1})
     assert (response.status_code, response.get_json()) == (200, [])
     assert recommender_insights.parents == []
 
@@ -326,11 +339,19 @@ def test_insights_project_listing_error(legacy_client, client, legacy, monkeypat
         'error': 'An internal error occurred while fetching insights: Cloud Asset API has not been used in project test-project'}
 
 
-@pytest.mark.parametrize('body', [{'scope': 'folder'}, {'scope_id': '42'}, {}])
-def test_insights_require_scope_and_id(body, legacy_client, client):
-    response = assert_parity(legacy_client, client, 'POST', '/api/get-insights', json=body)
+@pytest.mark.parametrize('body, message', [
+    ({'scope': 'folder'}, 'scope_id is required.'),
+    ({'scope_id': '42'}, 'scope is required.'),
+    ({}, 'scope is required.'),
+    ({'scope': 'folder', 'scope_id': 'forty-two'}, "scope_id must be the folder's number."),  # v18.6.1
+    ({'scope': 'organization', 'scope_id': '12/34'}, "scope_id must be the organization's number."),
+])
+def test_insights_require_scope_and_id(body, message, legacy_client, client):
+    """Legacy answered 400 to a missing field; the new app does the same and, since v18.6.1, names what is wrong (and
+    refuses a scope ID that is not one, which legacy passed on to the Asset API)."""
+    legacy_response, response = send_both(legacy_client, client, 'POST', '/api/get-insights', json=body)
     assert response.status_code == 400
-    assert response.get_json() == {'error': 'Scope and Scope ID are required.'}
+    assert response.get_json() == {'error': message}
 
 
 # --- /api/get-summary ---
@@ -339,9 +360,9 @@ CSV_REPORT = 'Organization Policies\r\nCategory,Policy,Expected Value,Current Va
 
 
 def test_summary(legacy_client, client, gcp):
-    gcp.bucket.put('job-1/p1_report.csv', CSV_REPORT, 'text/csv')
+    gcp.bucket.put(f'{JOB}/{P1}_report.csv', CSV_REPORT, 'text/csv')
     gcp.gemini.reply = '**Overall:** a solid baseline.\n\n* Opportunity to Enhance Data Security'
-    response = assert_parity(legacy_client, client, 'POST', '/api/get-summary', json={'scope_id': 'p1', 'job_id': 'job-1'})
+    response = assert_parity(legacy_client, client, 'POST', '/api/get-summary', json={'scope_id': P1, 'job_id': JOB})
     assert response.status_code == 200
     assert response.get_json() == {'summary': gcp.gemini.reply}
     (legacy_prompt,), (prompt,) = halves(gcp.gemini.prompts)
@@ -354,7 +375,7 @@ def test_summary(legacy_client, client, gcp):
 
 
 def test_summary_without_a_csv_report(legacy_client, client, gcp):
-    response = assert_parity(legacy_client, client, 'POST', '/api/get-summary', json={'scope_id': 'p1', 'job_id': 'job-1'})
+    response = assert_parity(legacy_client, client, 'POST', '/api/get-summary', json={'scope_id': P1, 'job_id': JOB})
     assert response.status_code == 404
     assert response.get_json() == {'error': 'CSV report not found. Cannot generate summary.'}
     assert gcp.gemini.prompts == []
@@ -363,9 +384,9 @@ def test_summary_without_a_csv_report(legacy_client, client, gcp):
 def test_summary_speaks_of_the_scope_the_page_sends(client, gcp):
     """New (v15.3): the report page sends its scope with the request, and a folder or project scan's summary
     opens on the folder or project. Without a scope (``test_summary``: the legacy request) the prompt is legacy's."""
-    gcp.bucket.put('job-1/42_report.csv', CSV_REPORT, 'text/csv')
+    gcp.bucket.put(f'{JOB}/42_report.csv', CSV_REPORT, 'text/csv')
     gcp.gemini.reply = 'summary'
-    response = client.post('/api/get-summary', json={'scope': 'folder', 'scope_id': '42', 'job_id': 'job-1'})
+    response = client.post('/api/get-summary', json={'scope': 'folder', 'scope_id': '42', 'job_id': JOB})
     assert response.status_code == 200 and response.get_json() == {'summary': 'summary'}
     (_, prompt), = gcp.gemini.prompts
     assert "summarizes the overall state of the folder's cloud environment." in prompt
@@ -373,27 +394,37 @@ def test_summary_speaks_of_the_scope_the_page_sends(client, gcp):
 
 
 def test_summary_gemini_error(legacy_client, client, gcp):
-    gcp.bucket.put('job-1/p1_report.csv', CSV_REPORT, 'text/csv')
+    gcp.bucket.put(f'{JOB}/{P1}_report.csv', CSV_REPORT, 'text/csv')
     gcp.gemini.error = RuntimeError('404 Publisher Model gemini-2.5-flash was not found')
-    response = assert_parity(legacy_client, client, 'POST', '/api/get-summary', json={'scope_id': 'p1', 'job_id': 'job-1'})
+    response = assert_parity(legacy_client, client, 'POST', '/api/get-summary', json={'scope_id': P1, 'job_id': JOB})
     assert response.status_code == 500
     assert response.get_json() == {'error': 'An internal error occurred while generating the AI summary.'}
 
 
-@pytest.mark.parametrize('body', [{'scope_id': 'p1'}, {'job_id': 'job-1'}, {}])
-def test_summary_requires_scope_and_job_ids(body, legacy_client, client):
-    response = assert_parity(legacy_client, client, 'POST', '/api/get-summary', json=body)
+@pytest.mark.parametrize('body, message', [
+    ({'scope_id': P1}, 'job_id is required.'),
+    ({'job_id': JOB}, 'scope_id is required.'),
+    ({}, 'job_id is required.'),
+    ({'scope_id': P1, 'job_id': 'job-1'}, 'job_id must be a UUID.'),  # v18.6.1
+    ({'scope_id': '../other', 'job_id': JOB}, 'scope_id must be an organization or folder number, or a project ID.'),
+    ({'scope': 'project', 'scope_id': '42', 'job_id': JOB}, 'scope_id must be a project ID: 6-30 lower-case letters, digits and hyphens, starting with a letter.'),
+])
+def test_summary_requires_scope_and_job_ids(body, message, legacy_client, client, gcp):
+    """Legacy answered 400 to a missing ID; the new app does the same and, since v18.6.1, refuses IDs that are not ones —
+    before anything is read from the bucket."""
+    legacy_response, response = send_both(legacy_client, client, 'POST', '/api/get-summary', json=body)
     assert response.status_code == 400
-    assert response.get_json() == {'error': 'Scope ID and Job ID are required.'}
+    assert response.get_json() == {'error': message}
+    assert gcp.gemini.prompts == []
 
 
 def test_gemini_model_and_location_come_from_settings(gcp, env, monkeypatch):
     """New: GEMINI_MODEL pins a model and VERTEX_LOCATION replaces the hardcoded "global" (still the default)."""
     monkeypatch.setenv('GEMINI_MODEL', 'gemini-replacement-model')
     monkeypatch.setenv('VERTEX_LOCATION', 'us-central1')
-    gcp.bucket.put('job-1/p1_report.csv', CSV_REPORT, 'text/csv')
+    gcp.bucket.put(f'{JOB}/{P1}_report.csv', CSV_REPORT, 'text/csv')
     http = create_app().test_client()
-    assert http.post('/api/get-summary', json={'scope_id': 'p1', 'job_id': 'job-1'}).status_code == 200
+    assert http.post('/api/get-summary', json={'scope_id': P1, 'job_id': JOB}).status_code == 200
     findings = [{'index': 0, 'finding_text': 'Bucket public-assets is publicly readable', 'project_id': 'data-lake'}]
     assert http.post('/api/get-suggestions', json={'findings': findings}).status_code == 200
     assert [model for model, _ in gcp.gemini.prompts] == ['gemini-replacement-model'] * 2
@@ -464,10 +495,13 @@ def test_suggestions_rate_limit(legacy_client, client, gcp, monkeypatch):
 
 
 def test_suggestions_malformed_finding(legacy_client, client):
+    """Legacy answered 500 to a finding without an index; since v18.6.1 the new app validates the batch first: 400, naming
+    what is wrong, and never calls Gemini."""
     findings = [{'finding_text': 'no index', 'project_id': 'web-prod'}]
-    response = assert_parity(legacy_client, client, 'POST', '/api/get-suggestions', json={'findings': findings})
-    assert response.status_code == 500
-    assert response.get_json() == {'error': 'An internal error occurred on the server.'}
+    legacy_response, response = send_both(legacy_client, client, 'POST', '/api/get-suggestions', json={'findings': findings})
+    assert legacy_response.status_code == 500
+    assert response.status_code == 400
+    assert response.get_json() == {'error': "A finding's index must be a non-negative integer."}
 
 
 # --- Malformed request bodies ---
@@ -480,6 +514,9 @@ def test_suggestions_malformed_finding(legacy_client, client):
     {'data': 'null', 'content_type': 'application/json'},
 ])
 def test_malformed_json_bodies(path, kwargs, legacy_client, client):
-    """Whatever the error (415, 400 or 500, JSON or an HTML error page), it is the legacy one."""
-    response = assert_parity(legacy_client, client, 'POST', path, html=True, **kwargs)
-    assert response.status_code >= 400
+    """Legacy answered whatever werkzeug or the handler raised (415, 400 or 500, JSON or an HTML error page); since
+    v18.6.1 the new app answers one thing: a 400 JSON error saying the body must be a JSON object."""
+    legacy_response, response = send_both(legacy_client, client, 'POST', path, **kwargs)
+    assert legacy_response.status_code >= 400
+    assert response.status_code == 400
+    assert response.get_json() == {'error': 'The body must be a JSON object.'}

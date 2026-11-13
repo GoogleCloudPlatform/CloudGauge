@@ -43,7 +43,7 @@ from app.services.results_store import GcsResultsStore
 from fakes import _execute
 from helpers import DEPLOYED_ENV, make_settings, set_env
 
-SCOPE, SCOPE_ID, JOB = 'organization', '123456789', 'job-17'
+SCOPE, SCOPE_ID, JOB = 'organization', '123456789', '17171717-1717-4171-8171-171717171717'  # v18.6.1: a job ID is a UUID
 
 
 def sample_results():
@@ -154,40 +154,40 @@ def test_export_stages_ndjson_and_runs_two_idempotent_load_jobs(exporter, gcp):
     summary = generate_reports(SCOPE, SCOPE_ID, JOB, sample_results(), total_projects=4)[2]
     result = exporter.export(summary, sample_results(), projects_scanned=4)
     assert (result.state, result.dataset, result.rows) == (EXPORTED, 'cloudgauge', len(finding_rows(summary, sample_results())))
-    assert result.job_ids == ('cloudgauge-job-17-scans', 'cloudgauge-job-17-findings')
+    assert result.job_ids == (f'cloudgauge-{JOB}-scans', f'cloudgauge-{JOB}-findings')
     assert result.header_text.endswith('finding rows and this scan\'s summary loaded into cloudgauge.findings and cloudgauge.scans') and result.dot_class == 'compliant'
     (scans_project, scans_body), (findings_project, findings_body) = exporter.fake.inserted
     assert scans_project == findings_project == 'test-project'
-    assert scans_body['jobReference'] == {'projectId': 'test-project', 'jobId': 'cloudgauge-job-17-scans', 'location': 'us-central1'}
+    assert scans_body['jobReference'] == {'projectId': 'test-project', 'jobId': f'cloudgauge-{JOB}-scans', 'location': 'us-central1'}
     load = findings_body['configuration']['load']
-    assert load['sourceUris'] == ['gs://test-bucket/exports/job-17/findings.ndjson'] and load['sourceFormat'] == 'NEWLINE_DELIMITED_JSON'
+    assert load['sourceUris'] == [f'gs://test-bucket/exports/{JOB}/findings.ndjson'] and load['sourceFormat'] == 'NEWLINE_DELIMITED_JSON'
     assert load['destinationTable'] == {'projectId': 'test-project', 'datasetId': 'cloudgauge', 'tableId': 'findings'}
     assert (load['writeDisposition'], load['createDisposition'], load['schemaUpdateOptions']) == ('WRITE_APPEND', 'CREATE_IF_NEEDED', ['ALLOW_FIELD_ADDITION'])
     assert load['timePartitioning'] == {'type': 'DAY', 'field': 'generated_at'} and load['clustering'] == {'fields': ['scope_id', 'check_name']}
     assert load['schema'] == {'fields': FINDINGS_SCHEMA} and scans_body['configuration']['load']['schema'] == {'fields': SCANS_SCHEMA}
     # The staging files were written as NDJSON, one object per line, and deleted once the jobs were done.
     staged = [(name, data) for name, data, content_type in gcp.bucket.uploads if name.startswith('exports/')]
-    assert [name for name, _ in staged] == ['exports/job-17/scans.ndjson', 'exports/job-17/findings.ndjson']
+    assert [name for name, _ in staged] == [f'exports/{JOB}/scans.ndjson', f'exports/{JOB}/findings.ndjson']
     assert json.loads(staged[0][1].splitlines()[0])['job_id'] == JOB and len(staged[1][1].splitlines()) == result.rows
-    assert sorted(name for name in gcp.bucket.deleted if name.startswith('exports/')) == ['exports/job-17/findings.ndjson', 'exports/job-17/scans.ndjson']
+    assert sorted(name for name in gcp.bucket.deleted if name.startswith('exports/')) == [f'exports/{JOB}/findings.ndjson', f'exports/{JOB}/scans.ndjson']
     assert not any(name.startswith('exports/') for name in gcp.bucket.objects)
     # A retry: the jobs exist already (409); they are polled, not re-inserted, and the result is the same.
-    exporter.fake.insert_error = http_error(409, 'Already Exists: Job cloudgauge-job-17-scans')
+    exporter.fake.insert_error = http_error(409, f'Already Exists: Job cloudgauge-{JOB}-scans')
     assert exporter.export(summary, sample_results()).state == EXPORTED
     assert exporter.load_job_id('a b/c', 'scans') == 'cloudgauge-a_b_c-scans'
 
 
 def test_export_reports_a_failed_job_a_slow_job_and_an_api_that_is_down(exporter, gcp):
     summary = generate_reports(SCOPE, SCOPE_ID, JOB, sample_results(), total_projects=4)[2]
-    exporter.fake.states['cloudgauge-job-17-findings'] = [{'state': 'DONE', 'errorResult': {'message': 'Access Denied: Dataset cloudgauge'}}]
+    exporter.fake.states[f'cloudgauge-{JOB}-findings'] = [{'state': 'DONE', 'errorResult': {'message': 'Access Denied: Dataset cloudgauge'}}]
     result = exporter.export(summary, sample_results())
-    assert result.state == FAILED and result.header_text == 'export to cloudgauge failed: cloudgauge-job-17-findings: Access Denied: Dataset cloudgauge'
+    assert result.state == FAILED and result.header_text == f'export to cloudgauge failed: cloudgauge-{JOB}-findings: Access Denied: Dataset cloudgauge'
     assert result.dot_class == 'error' and any(name.startswith('exports/') for name in gcp.bucket.objects)  # staging kept for a look
-    exporter.fake.states = {'cloudgauge-job-17-findings': [{'state': 'RUNNING'}, {'state': 'RUNNING'}, {'state': 'RUNNING'}, {'state': 'RUNNING'},
+    exporter.fake.states = {f'cloudgauge-{JOB}-findings': [{'state': 'RUNNING'}, {'state': 'RUNNING'}, {'state': 'RUNNING'}, {'state': 'RUNNING'},
                                                            {'state': 'RUNNING'}, {'state': 'RUNNING'}, {'state': 'RUNNING'}]}
     result = exporter.export(summary, sample_results())
-    assert result.state == RUNNING and result.job_ids == ('cloudgauge-job-17-findings',) and result.dot_class == 'investigation'
-    assert 'still running when the report was written (cloudgauge-job-17-findings)' in result.header_text
+    assert result.state == RUNNING and result.job_ids == (f'cloudgauge-{JOB}-findings',) and result.dot_class == 'investigation'
+    assert f'still running when the report was written (cloudgauge-{JOB}-findings)' in result.header_text
     assert exporter.clock_state['now'] >= 10  # it waited the configured seconds, polling every two
     exporter.fake.states = {}
     exporter.fake.insert_error = http_error(403, 'bigquery.jobs.create denied')
@@ -249,7 +249,7 @@ def test_the_worker_exports_a_finished_scan(exporting_client, gcp):
     assert isinstance(services.get_exporter(), BigQueryExporter) and services.get_fanout().exporter is services.get_exporter()
     response = client.post('/run-scan', json={'scope': SCOPE, 'scope_id': SCOPE_ID, 'job_id': JOB})
     assert response.status_code == 200
-    assert [body['jobReference']['jobId'] for _, body in bigquery.inserted] == ['cloudgauge-job-17-scans', 'cloudgauge-job-17-findings']
+    assert [body['jobReference']['jobId'] for _, body in bigquery.inserted] == [f'cloudgauge-{JOB}-scans', f'cloudgauge-{JOB}-findings']
     html, _ = gcp.bucket.objects[f'{JOB}/{SCOPE_ID}_report.html']
     assert '<dt>BigQuery export</dt><dd class="coverage"><span class="dot dot-compliant"></span>' in html
     assert 'loaded into cloudgauge.findings and cloudgauge.scans' in html

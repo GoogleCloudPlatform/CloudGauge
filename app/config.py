@@ -26,7 +26,7 @@ from dataclasses import dataclass
 # The release, as the image tag names it ("15.6" for v15.6; tests/test_packaging.py pins it to the newest entry
 # of RELEASE_NOTES.md). The report's footer shows it, and every scan summary records it so the next scan can tell
 # a check that is new to the release from one that merely had nothing to check last time (app.reporting.changes).
-VERSION = "18.6"
+VERSION = "18.6.1"
 # The policy table of the Organization Policies check (v18.1): by default the one shipped with the release
 # (assets/gcp_best_practices.csv, copied into the image), so a scan never depends on GitHub and the rules move only
 # with a release. BEST_PRACTICES_CSV_URL set to a gs:// object (read as the service account) or an https:// URL
@@ -139,6 +139,18 @@ DEFAULT_BIGQUERY_EXPORT_WAIT_SECONDS = 60
 # How many scans the history page shows (the newest first).
 HISTORY_PAGE_SCANS = 52
 
+# --- Request hardening (v18.6.1) ---
+# WORKER_TOKEN_CHECK: whether the worker routes verify the caller's ID token in-process (app.routes.guards),
+# on top of Cloud Run's IAM check. On by default; "off" is the way back if a deployment's front alters the
+# token path. Only the production and synthetic profiles enforce it (both receive real Cloud Tasks calls).
+# The largest request body any route takes (the form, the JSON bodies, the task bodies are all far smaller).
+MAX_REQUEST_BYTES = 1024 * 1024
+# /api/get-suggestions: at most this many findings per request (the report's script sends 5 at a time) and this
+# much text per finding (the script keeps a table's sample to 25 rows; a free-text finding to 4,000 characters).
+MAX_SUGGESTIONS_PER_REQUEST = 20
+MAX_SUGGESTION_TEXT_CHARS = 20_000
+MAX_SUGGESTION_PROJECT_CHARS = 128
+
 # Configures logging to display INFO level messages with a timestamp.
 LOG_FORMAT = '%(levelname)s: [%(asctime)s] %(message)s'
 LOG_DATEFMT = '%Y-%m-%d %H:%M:%S'
@@ -249,6 +261,8 @@ class Settings:
     # Needed when WORKER_URL is a revision tag URL (canary): Cloud Run rejects
     # tokens whose audience is a tag URL (401), so set this to the service's main URL.
     worker_audience: str | None = None
+    # Whether the worker routes verify the caller's ID token in-process (v18.6.1; WORKER_TOKEN_CHECK, default on).
+    worker_token_check: bool = True
     # Which half of the tool this service is (see ROLES). 'web' needs WORKER_URL.
     role: str = DEFAULT_ROLE
     # The project's number, which the IAP assertion's audience carries (app.identity). Unset: read from
@@ -314,6 +328,7 @@ class Settings:
             k_service=env.get('K_SERVICE'),
             worker_url=env.get('WORKER_URL') or None,
             worker_audience=env.get('WORKER_AUDIENCE') or None,
+            worker_token_check=_switch(env.get('WORKER_TOKEN_CHECK'), 'WORKER_TOKEN_CHECK'),
             role=role,
             project_number=(env.get('PROJECT_NUMBER') or '').strip() or None,
             gemini_model=_gemini_model(env.get('GEMINI_MODEL')),

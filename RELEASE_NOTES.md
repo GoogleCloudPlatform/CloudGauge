@@ -8,7 +8,133 @@ the test suite running inside the image, a zero-traffic canary revision scanned
 against a real organization, promotion, and a production scan compared fact for
 fact with the previous version's report.
 
-Versions are the image tags (`v5` … `v18.6`); the commit is the one that shipped.
+Versions are the image tags (`v5` … `v18.6.1`); the commit is the one that shipped.
+
+## v18.6.1 — Request hardening
+
+A point release with no check changes, answering a security review of the
+application's request handling (three findings filed against the original
+single-file version: object keys built from unvalidated identifiers, no
+cross-site protection or rate limit on scan submission, and worker endpoints
+that trusted their caller). The two-service deployment this line documents
+already closes the unauthenticated path — the pages behind Identity-Aware
+Proxy, the worker a separate `--ingress internal` service the service account
+alone may invoke — and this release adds the application-level controls the
+findings name, so they hold whatever the deployment, including the single
+public service the README still describes (discouraged). No new role, no new
+API, no new report name.
+
+### Added
+
+- **Request validation** (`app/validation.py`): one definition of what the
+  identifiers may be — `scope` one of three words; `scope_id` an organization
+  or folder number, or a project ID (6–30 characters, a letter first, letters,
+  digits and hyphens, optionally behind the domain of a domain-scoped project);
+  `job_id` the lower-case UUID `POST /scan` mints; a shard name as the fan-out
+  plans them; a sweep number; `requested_by` a short printable name — applied
+  at every entry: `POST /scan`, `/status/…`, `/report/…` (+ `/csv`),
+  `/history/…`, `/api/status/…`, `/api/get-summary`, `/api/get-insights`, and
+  the five worker bodies (`/run-scan`, `/scan-shard`, `/run-aggregation`,
+  `/sweep`, `/scheduled-scan`). A malformed value is a **400** with the reason,
+  before anything is read, written or called — on the worker routes too, where
+  a malformed task used to fail inside the job with a 500 (Cloud Tasks retries
+  either status the same bounded number of times; the log now says why).
+- **Key-part guard in the results store**: `job_id`, `scope_id`, `scope` and
+  `shard_id` pass through `key_part` wherever an object key is built (status,
+  reports, intermediate files, the scope summaries, the scope's job note) —
+  letters, digits, `.`, `_`, `:` and `-` only, never a slash or `..`, 128
+  characters at most — so no caller, present or future, can steer an object
+  under another prefix.
+- **Same-origin enforcement** (`app/routes/guards.py`) on the four POST
+  routes — `POST /scan`, `/api/get-summary`, `/api/get-suggestions`,
+  `/api/get-insights`: `Sec-Fetch-Site` must be `same-origin` or `none`; without
+  it the `Origin`, then the `Referer`, must name this service; a request with
+  none of the three (`curl`, a script) is allowed, having no victim's browser
+  behind it. A cross-site request gets **403**. IAP authenticates the person,
+  not the page: without this a form on another site could start a scan as
+  the signed-in operator.
+- **One scan per scope at a time, whoever asks**: `POST /scan` now writes and
+  consults the scope's job note (`schedules/<scope>/<scope_id>.json`, the one
+  scheduled scans have kept since v17) and, while the noted job is still
+  running, answers **409** with a page in the status page's design naming the
+  running scan — when it started, who asked, the job — with a button to its
+  status page and a link back to the form (JSON with `job_id` and
+  `status_path` for a client that asks for it); nothing new is started. A
+  noted job whose status file never appeared counts as running for 10 minutes
+  only, so a task that never dispatched cannot block its scope for the note's
+  36-hour life (this refinement applies to scheduled scans too).
+- **A bounded suggestions batch**: `/api/get-suggestions` takes at most 20
+  findings per request (the report's script sends 5), each with a numeric
+  `index`, at most 20,000 characters of `finding_text` and a printable
+  `project_id` of at most 128 characters; a body that is not a JSON object is
+  a 400 on every API route; no request body may exceed 1 MiB (**413**).
+- **The worker verifies its caller** (`app.identity.CallerVerifier`, a
+  `before_request` on the worker blueprint): the bearer ID token Cloud Tasks
+  and Cloud Scheduler send — Google's signature (certificates cached an hour,
+  refetched once on an unknown key, the IAP pattern), issuer
+  `accounts.google.com`, an audience among `WORKER_AUDIENCE`, the worker's own
+  URL (what scheduler jobs carry) and the request's URL with and without its
+  path (what Cloud Tasks carries), a current expiry, and `email` equal to
+  `SERVICE_ACCOUNT_EMAIL` — answering **401** otherwise. Cloud Run's IAM check
+  remains the guard that keeps everyone else out of the worker service in the
+  two-service deployment; Cloud Run hands the `Authorization` header on to the
+  container, so this is defence in depth there and the only guard in the
+  single-service public mode. Enforced in the `production` and `synthetic`
+  profiles (both receive real tasks); `testing` and `development` skip it; the
+  offline harness (`tools/synthetic_scan.py`) never goes through HTTP.
+- `WORKER_TOKEN_CHECK` (default `on`): `off` disables the worker's token check
+  — the way back if a front in your path rewrites the token, instead of a
+  rollback.
+
+### Changed
+
+- `POST /scan` applies the scope allow-list it had always declared
+  (`SCOPES`) and refuses a scope ID that is not one; the status, report, CSV
+  and history routes refuse a job ID that is not a UUID (every job the
+  application ever minted is one) — before, such values were only escaped into
+  the page or sanitised in the download's filename.
+- The API's error answers are uniform: a 400 JSON `{"error": …}` naming the
+  field, where legacy handlers answered 400, 415 or 500 with JSON or an HTML
+  error page depending on how the body was malformed.
+- `app/services/schedules.py` is now the one place a scan starts
+  (`start_scan`, raising `ScanInProgress`); `/scheduled-scan` keeps its
+  202/400/409 contract and its note shape.
+- README: a **Request hardening** section under the deployment chapter; the
+  public-deployment section says the worker endpoints now require the service
+  account's token; the configuration reference gains `WORKER_TOKEN_CHECK`.
+  `VERSION = "18.6.1"`.
+
+### Tests
+
+- `tests/test_request_hardening.py`: the validator table (accepted and refused
+  values per field, domain-scoped project IDs, slashes, `..`, whitespace, the
+  UUID shape); the key-part guard; every page and API route's 400; the
+  same-origin matrix (`Sec-Fetch-Site`, `Origin`, `Referer`, none) on each POST
+  route and the GET routes untouched; `POST /scan` writing the note, the 409
+  page and its JSON form, the pending allowance, a note that cannot be read or
+  written; the suggestions caps; the worker's 401 matrix with signed tokens (no
+  header, another key, another issuer, another audience, another account,
+  expired, `WORKER_TOKEN_CHECK=off`, the testing profile) and the 400 for each
+  malformed task body; the request-size limit.
+- The parity suites keep their happy paths on real identifier shapes and
+  assert the new 400s where legacy answered otherwise (`tests/test_api_parity.py`,
+  `tests/test_worker.py`); the test environment runs the worker's token check
+  off (`tests/helpers.py`) except where the new suite turns it on.
+- 1,162 tests.
+
+### Upgrade notes
+
+- Redeploy with `tools/deploy.sh` or `terraform apply` as usual; nothing to
+  grant or enable. The first scan after the upgrade shows nothing on the
+  Changes card (no check changed).
+- A public single-service deployment keeps working — its worker endpoints now
+  answer 401 to anything but the service account's token, which is what Cloud
+  Tasks sends; scripts that posted to `/run-scan` directly must send one too.
+- Scripts that submit scans by posting the form must send a real scope ID and
+  no `Origin` header of another site; a second submission for a scope whose
+  scan is still running now gets 409 instead of a second scan.
+
+---
 
 ---
 

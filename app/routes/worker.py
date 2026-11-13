@@ -26,18 +26,31 @@ rather than as a missing one.
 
 Scheduled scans (v17, ``app.services.schedules``) add ``/scheduled-scan``, which
 Cloud Scheduler posts ``{"scope", "scope_id", "name"}`` to: it enqueues a scan
-(202), or answers 409 while the scope's previous scheduled scan is still running.
+(202), or answers 409 while the scope's previous scan is still running.
 It lives on the worker because the worker is what the service account alone can
 call; nothing that passes Identity-Aware Proxy reaches it.
+
+v18.6.1: every route first verifies the caller's ID token (``app.routes.guards``;
+401 otherwise) and then its body (``app.validation``; 400 for a malformed one,
+before any work — Cloud Tasks retries a 400 as it does a 500, a bounded number
+of times, so the change is in the log, not in the retry behaviour).
 """
 from flask import Blueprint, jsonify, request
 
-from app import scan_job
+from app import scan_job, validation
 from app.extensions import get_services
 from app.fanout import RETRY_COUNT_HEADER
+from app.routes import guards
 from app.services import schedules
 
 bp = Blueprint("worker", __name__)
+bp.before_request(guards.worker_caller_required)
+
+
+@bp.errorhandler(validation.RequestError)
+def bad_request(error):
+    """A malformed task body: 400 with the reason."""
+    return jsonify({"error": str(error)}), 400
 
 
 def retry_count():
@@ -48,6 +61,11 @@ def retry_count():
         return 0
 
 
+def body():
+    """The task's JSON body (a non-JSON body counts as missing)."""
+    return request.get_json(force=True, silent=True)
+
+
 @bp.route('/run-scan', methods=['POST'])
 def run_scan_worker():
     """
@@ -55,7 +73,7 @@ def run_scan_worker():
     function and uploads the generated reports to Google Cloud Storage (or, for a
     scope with more projects than one shard holds, dispatches the shard tasks).
     """
-    data = request.get_json(force=True)
+    data = validation.clean_scan_body(body())
     services = get_services()
     if scan_job.execute_scan_job(data, store=services.results_store, banner=services.report_banner, fanout=services.get_fanout(),
                                  exporter=services.get_exporter()):
@@ -66,7 +84,7 @@ def run_scan_worker():
 @bp.route('/scan-shard', methods=['POST'])
 def scan_shard_worker():
     """Runs one shard of a sharded scan and, if it was the last one, triggers the aggregation."""
-    data = request.get_json(force=True)
+    data = validation.clean_shard_body(body())
     if get_services().get_fanout().run_shard(data, retry_count=retry_count()):
         return "Shard finished.", 200
     return "Internal Server Error", 500
@@ -75,7 +93,7 @@ def scan_shard_worker():
 @bp.route('/run-aggregation', methods=['POST'])
 def run_aggregation_worker():
     """Merges the shards' findings into the final reports and completes the job."""
-    data = request.get_json(force=True)
+    data = validation.clean_scan_body(body())
     if get_services().get_fanout().aggregate(data, retry_count=retry_count()):
         return "Aggregation completed and reports uploaded.", 200
     return "Internal Server Error", 500
@@ -84,7 +102,7 @@ def run_aggregation_worker():
 @bp.route('/sweep', methods=['POST'])
 def sweep_worker():
     """Checks on a running sharded job; finishes it if its shards have died, else re-schedules itself."""
-    data = request.get_json(force=True)
+    data = validation.clean_sweep_body(body())
     get_services().get_fanout().sweep(data)
     return "Sweep done.", 200
 
@@ -92,7 +110,6 @@ def sweep_worker():
 @bp.route('/scheduled-scan', methods=['POST'])
 def scheduled_scan():
     """Starts the scan a Cloud Scheduler job asks for (v17): 202 with the job ID, 400 for a malformed body, 409 while
-    the scope's previous scheduled scan is still running."""
-    data = request.get_json(force=True, silent=True)
-    body, status = schedules.start_scheduled_scan(get_services(), data)
-    return jsonify(body), status
+    the scope's previous scan is still running."""
+    response, status = schedules.start_scheduled_scan(get_services(), body())
+    return jsonify(response), status

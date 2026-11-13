@@ -15,17 +15,36 @@
 
 Reports already stored in GCS call ``/api/get-insights``, ``/api/get-summary``
 and ``/api/get-suggestions`` by path, so these URLs must not change.
+
+v18.6.1: every identifier is validated (``app.validation``; a malformed one is a 400 JSON
+error), the POST routes are same-origin only (``app.routes.guards``), and
+``/api/get-suggestions`` takes at most ``MAX_SUGGESTIONS_PER_REQUEST`` findings.
 """
 import concurrent.futures
 import traceback
 
 from flask import Blueprint, jsonify, request
 
+from app import validation
+from app.config import MAX_SUGGESTION_PROJECT_CHARS, MAX_SUGGESTION_TEXT_CHARS, MAX_SUGGESTIONS_PER_REQUEST
 from app.extensions import get_services
+from app.routes import guards
 from app.services import gemini, resource_manager
 from app.services import insights as insights_service
 
 bp = Blueprint("api", __name__, url_prefix="/api")
+bp.before_request(guards.same_origin_required)
+
+
+@bp.errorhandler(validation.RequestError)
+def bad_request(error):
+    """A malformed value in a path or a JSON body: 400 with the reason."""
+    return jsonify({"error": str(error)}), 400
+
+
+def json_body():
+    """The request's JSON object, or a 400 (a body that is not JSON, not an object, or ``null``)."""
+    return validation.clean_body(request.get_json(force=True, silent=True))
 
 
 @bp.route('/list-resources')
@@ -56,6 +75,8 @@ def api_check_status(job_id, scope_id):
     API endpoint for the front-end to poll. Checks the status.json file
     in GCS to provide real-time progress updates.
     """
+    job_id = validation.clean_job_id(job_id)
+    scope_id = validation.clean_any_scope_id(scope_id)
     try:
         status_data = get_services().results_store.read_status(job_id, scope_id)
         if status_data is not None:
@@ -76,11 +97,9 @@ def get_insights():
     On-demand endpoint to run a slower, more detailed scan for cost optimization
     insights, separate from the main recommendations.
     """
-    data = request.get_json()
-    scope = data.get('scope')
-    scope_id = data.get('scope_id')
-    if not scope_id or not scope:
-        return jsonify({"error": "Scope and Scope ID are required."}), 400
+    data = json_body()
+    scope = validation.clean_scope(data.get('scope'))
+    scope_id = validation.clean_scope_id(scope, data.get('scope_id'))
 
     try:
         insights = insights_service.run_cost_optimization_insights(scope, scope_id)
@@ -96,16 +115,13 @@ def get_summary():
     On-demand endpoint to generate a Gemini-powered executive summary
     from the full CSV report data stored in GCS.
     """
+    data = json_body()
+    job_id = validation.clean_job_id(data.get('job_id'))
+    scope = data.get('scope')  # v15.3: the report page sends it; absent from pages rendered earlier
+    scope = validation.clean_scope(scope) if scope else None
+    scope_id = validation.clean_scope_id(scope, data.get('scope_id')) if scope else validation.clean_any_scope_id(data.get('scope_id'))
     try:
-        data = request.get_json()
-        scope_id = data.get('scope_id')  # CORRECTED
-        job_id = data.get('job_id')
-        scope = data.get('scope')  # v15.3: the report page sends it; absent from pages rendered earlier
         print(f"🤖 Received on-demand request for AI summary for job {job_id}...")
-
-        if not scope_id or not job_id:
-            return jsonify({"error": "Scope ID and Job ID are required."}), 400
-
         services = get_services()
 
         # 1. Fetch the context (the full CSV report) from GCS
@@ -125,15 +141,39 @@ def get_summary():
         return jsonify({"error": "An internal error occurred while generating the AI summary."}), 500
 
 
+def clean_findings(data):
+    """The findings of a ``/api/get-suggestions`` body, bounded (v18.6.1): at most ``MAX_SUGGESTIONS_PER_REQUEST`` of
+    ``{index, finding_text, project_id}`` with the text and the project name capped. Raises ``RequestError``."""
+    findings = data.get('findings', [])
+    if not isinstance(findings, list):
+        raise validation.RequestError("findings must be a list.")
+    if len(findings) > MAX_SUGGESTIONS_PER_REQUEST:
+        raise validation.RequestError(f"findings holds {len(findings)} items; at most {MAX_SUGGESTIONS_PER_REQUEST} per request.")
+    cleaned = []
+    for finding in findings:
+        if not isinstance(finding, dict):
+            raise validation.RequestError("Each finding must be an object with index, finding_text and project_id.")
+        index, text, project = finding.get('index'), finding.get('finding_text'), finding.get('project_id') or ''
+        if isinstance(index, bool) or not isinstance(index, (int, str)) or not str(index).strip().isdigit():
+            raise validation.RequestError("A finding's index must be a non-negative integer.")
+        if not isinstance(text, str) or not text.strip():
+            raise validation.RequestError("A finding's finding_text must be a non-empty string.")
+        if len(text) > MAX_SUGGESTION_TEXT_CHARS:
+            raise validation.RequestError(f"A finding's finding_text is longer than {MAX_SUGGESTION_TEXT_CHARS:,} characters.")
+        if not isinstance(project, str) or len(project) > MAX_SUGGESTION_PROJECT_CHARS or not project.isprintable():
+            raise validation.RequestError(f"A finding's project_id must be a printable name of at most {MAX_SUGGESTION_PROJECT_CHARS} characters.")
+        cleaned.append({'index': str(index).strip(), 'finding_text': text, 'project_id': project.strip()})
+    return cleaned
+
+
 @bp.route('/get-suggestions', methods=['POST'])
 def get_suggestions():
     """
     Receives a batch of findings from the report and uses the Gemini API
     to generate gcloud remediation commands for each one.
     """
+    actionable_findings = clean_findings(json_body())
     try:
-        data = request.get_json()
-        actionable_findings = data.get('findings', [])
         # Read here: the worker threads below have no app context.
         settings = get_services().settings
 
