@@ -20,7 +20,7 @@ import pytest
 from google.genai import errors as genai_errors
 
 import fakes
-from app.config import AUTO_GEMINI_MODEL, FALLBACK_GEMINI_MODEL, Settings, _gemini_model
+from app.config import VERSION, AUTO_GEMINI_MODEL, FALLBACK_GEMINI_MODEL, Settings, _gemini_model
 from app.reporting.csv_report import generate_csv_data
 from app.services import gemini as gemini_service
 from app.services.gemini import FALLBACK_CACHE_TTL_SECONDS, MODEL_CACHE_TTL_SECONDS, newest_stable_flash_model
@@ -167,7 +167,8 @@ def test_get_client_targets_vertex_ai(monkeypatch):
     gemini_service.get_client.cache_clear()
     try:
         assert gemini_service.get_client('p', 'global') is gemini_service.get_client('p', 'global')
-        assert created == [{'vertexai': True, 'project': 'p', 'location': 'global'}]
+        # v18.8.1: the client identifier rides along under the lower-case key the SDK merges its label into (tests/test_attribution.py)
+        assert created == [{'vertexai': True, 'project': 'p', 'location': 'global', 'http_options': {'headers': {'user-agent': f'cloud-solutions/cloudgauge-v{VERSION}'}}}]
     finally:
         gemini_service.get_client.cache_clear()
 

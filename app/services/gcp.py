@@ -35,6 +35,14 @@ Two kinds of clients:
 
 Discovery clients are built on every call, because ``httplib2`` is not
 thread-safe and the checks run on a thread pool.
+
+v18.8.1: every client the real provider builds carries the solution's client
+identifier in its user agent (``app.services.user_agent``), unless
+``CLOUDGAUGE_DISABLE_ATTRIBUTION`` is set — the Discovery services through an
+authorized transport with the agent set (``discovery.build`` takes ``http`` or
+``credentials``, never both), the ``google-cloud-*`` clients through
+``client_info`` — and, for the gRPC ones, a transport whose channel carries it
+as its primary user agent — the one plain ``requests`` call through its headers.
 """
 import pathlib
 import threading
@@ -42,7 +50,13 @@ import threading
 import google.auth
 import requests
 from google.cloud import asset_v1, osconfig_v1, recommender_v1, storage, tasks_v2
+from google.cloud.asset_v1.services.asset_service.transports.grpc import AssetServiceGrpcTransport
+from google.cloud.osconfig_v1.services.os_config_zonal_service.transports.grpc import OsConfigZonalServiceGrpcTransport
+from google.cloud.recommender_v1.services.recommender.transports.grpc import RecommenderGrpcTransport
+from google.cloud.tasks_v2.services.cloud_tasks.transports.grpc import CloudTasksGrpcTransport
 from googleapiclient import discovery
+
+from app.services import user_agent
 
 _client_lock = threading.Lock()
 _storage_client = None
@@ -58,21 +72,30 @@ class RealGcp:
         return google.auth.default(scopes=scopes, **kwargs)
 
     def api_build(self, serviceName, version, **kwargs):
+        """``discovery.build`` with the client identifier: ``credentials`` become an authorized transport carrying it (``http=``);
+        without credentials, or with attribution off, the call is passed through as given."""
+        http = user_agent.authorized_http(kwargs.get("credentials"))
+        if http is not None:
+            kwargs = {key: value for key, value in kwargs.items() if key != "credentials"}
+            return discovery.build(serviceName, version, http=http, **kwargs)
         return discovery.build(serviceName, version, **kwargs)
 
     def project_storage_client(self, project_id):
-        return storage.Client(project=project_id)
+        return storage.Client(project=project_id, client_info=user_agent.client_info())
 
     def asset_client(self, credentials=None):
-        return asset_v1.AssetServiceClient(credentials=credentials)
+        return asset_v1.AssetServiceClient(credentials=credentials, client_info=user_agent.client_info(), transport=user_agent.grpc_transport(AssetServiceGrpcTransport))
 
     def recommender_client(self, credentials=None):
-        return recommender_v1.RecommenderClient(credentials=credentials)
+        return recommender_v1.RecommenderClient(credentials=credentials, client_info=user_agent.client_info(), transport=user_agent.grpc_transport(RecommenderGrpcTransport))
 
     def osconfig_client(self):
-        return osconfig_v1.OsConfigZonalServiceClient()
+        return osconfig_v1.OsConfigZonalServiceClient(client_info=user_agent.client_info(), transport=user_agent.grpc_transport(OsConfigZonalServiceGrpcTransport))
 
     def http_get(self, url, **kwargs):
+        """``requests.get``; a call to a Google API carries the client identifier (the policy table's GitHub URL does not)."""
+        if ".googleapis.com/" in str(url):
+            kwargs = {**kwargs, "headers": user_agent.request_headers(kwargs.get("headers"))}
         return requests.get(url, **kwargs)
 
     def policy_table(self):
@@ -153,7 +176,7 @@ def storage_client():
     if _storage_client is None:
         with _client_lock:
             if _storage_client is None:
-                _storage_client = storage.Client()
+                _storage_client = storage.Client(client_info=user_agent.client_info())
     return _storage_client
 
 
@@ -163,7 +186,7 @@ def tasks_client():
     if _tasks_client is None:
         with _client_lock:
             if _tasks_client is None:
-                _tasks_client = tasks_v2.CloudTasksClient()
+                _tasks_client = tasks_v2.CloudTasksClient(client_info=user_agent.client_info(), transport=user_agent.grpc_transport(CloudTasksGrpcTransport))
     return _tasks_client
 
 

@@ -49,6 +49,7 @@ from google import genai
 from google.genai import errors as genai_errors
 
 from app.config import AUTO_GEMINI_MODEL, FALLBACK_GEMINI_MODEL, get_settings
+from app.services import user_agent
 
 MODEL_CACHE_TTL_SECONDS = 6 * 60 * 60
 FALLBACK_CACHE_TTL_SECONDS = 10 * 60  # retry the lookup sooner after a failure
@@ -67,8 +68,8 @@ _model_cache_lock = threading.Lock()
 
 @functools.lru_cache(maxsize=None)
 def get_client(project, location):
-    """Returns the shared Gen AI client for Vertex AI in ``project`` and ``location``."""
-    return genai.Client(vertexai=True, project=project, location=location)
+    """Returns the shared Gen AI client for Vertex AI in ``project`` and ``location`` (with the client identifier in its user agent, v18.8.1)."""
+    return genai.Client(vertexai=True, project=project, location=location, http_options=user_agent.genai_http_options())
 
 
 def reset_model_cache():

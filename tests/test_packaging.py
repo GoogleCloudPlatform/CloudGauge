@@ -323,3 +323,50 @@ def test_the_release_is_the_newest_entry_of_the_release_notes():
     assert headings[0] == VERSION, f'app.config.VERSION is {VERSION!r}; the newest release note is v{headings[0]}'
     assert re.fullmatch(r'\d+(\.\d+)*', VERSION)  # as the image tag names it, without the "v"
     assert f'`v5` … `v{VERSION}`' in text  # the intro's tag range
+
+
+# --- v18.8.1: the public-repository guardrail --------------------------------------------------------------------------
+
+# Patterns that must never reach the repository: Google-internal shortlinks, hostnames and analytics system names. The repository is
+# public; internal references belong in internal documents. ``git ls-files`` is the authority on what is in it.
+INTERNAL_PATTERNS = {
+    'internal shortlink': re.compile(r'(?<![\w/.-])go/[A-Za-z][\w-]*'),
+    'internal hostname': re.compile(r'[\w.-]*\.corp\.google\.com'),
+    'internal analytics system': re.compile(r'\b(?:concord|cloudmill|plx)\b', re.I),
+}
+TEXT_SUFFIXES = {'.py', '.md', '.txt', '.tf', '.tfvars', '.example', '.sh', '.yaml', '.yml', '.json', '.html', '.css', '.js', '.csv', '.cfg', '.toml', '.ini', ''}
+
+
+SKIPPED_DIRS = {'.git', '.venv', 'venv', '__pycache__', 'node_modules', '.pytest_cache', '.ruff_cache', '.terraform'}
+
+
+def repository_files():
+    """The repository's files, relative to ROOT: ``git ls-files`` in a checkout, a walk of the tree where git is absent (the image)."""
+    try:
+        listed = subprocess.run(['git', 'ls-files'], cwd=ROOT, capture_output=True, text=True)
+        if listed.returncode == 0 and listed.stdout.strip():
+            return listed.stdout.split()
+    except OSError:
+        pass
+    found = []
+    for directory, subdirectories, files in os.walk(ROOT):
+        subdirectories[:] = [d for d in subdirectories if d not in SKIPPED_DIRS]
+        found += [str((pathlib.Path(directory) / f).relative_to(ROOT)) for f in files]
+    return found
+
+
+def test_no_internal_reference_is_in_the_repository():
+    offences = []
+    for name in repository_files():
+        path = ROOT / name
+        if path.suffix not in TEXT_SUFFIXES or not path.is_file() or name.startswith('tests/legacy/'):
+            continue
+        try:
+            text = path.read_text(encoding='utf-8')
+        except (UnicodeDecodeError, OSError):
+            continue
+        for line_number, line in enumerate(text.splitlines(), start=1):
+            for what, pattern in INTERNAL_PATTERNS.items():
+                if pattern.search(line) and name != 'tests/test_packaging.py':
+                    offences.append(f'{name}:{line_number}: {what}: {line.strip()[:120]}')
+    assert offences == [], 'the repository is public; move these to an internal document:\n' + '\n'.join(offences)

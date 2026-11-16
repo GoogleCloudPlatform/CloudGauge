@@ -8,7 +8,93 @@ the test suite running inside the image, a zero-traffic canary revision scanned
 against a real organization, promotion, and a production scan compared fact for
 fact with the previous version's report.
 
-Versions are the image tags (`v5` … `v18.8`); the commit is the one that shipped.
+Versions are the image tags (`v5` … `v18.8.1`); the commit is the one that shipped.
+
+## v18.8.1 — API attribution
+
+A point release with no check in it. CloudGauge now identifies itself on the
+Google Cloud API calls a scan makes — a static token, `cloud-solutions/cloudgauge-v<release>`,
+appended to the SDK user agent — so that aggregate adoption of the open-source
+solution can be measured on Google's side from API usage alone, with nothing
+added to what leaves a deployment: no finding, no resource configuration, no
+organization metadata, no phone-home. The README says so in one place, and the
+opt-out is one variable.
+
+### Added
+
+- **`app/services/user_agent.py`**: the identifier (`app.config.VERSION`
+  behind the solution token: one release, not two) and one helper per SDK
+  family — `client_info` for the `google-cloud-*` clients, `authorized_http`
+  for the Discovery services (`discovery.build` takes `http` *or*
+  `credentials`, never both: the credentials become an authorized `httplib2`
+  transport with the agent set), `genai_http_options` for the Vertex AI client
+  (under the lower-case `user-agent` key the `google-genai` SDK merges its own
+  label into — an upper-case key would travel beside it), `request_headers`
+  for the one plain `requests` call to a Google API (Service Health).
+- **Every client the real provider builds carries it** (`app.services.gcp`):
+  the eighteen Discovery APIs, both `storage.Client`s, Cloud Tasks, Asset
+  Inventory, Recommender, OS Config, the Service Health REST call; and the
+  Gemini client (`app.services.gemini`). The four gRPC clients get a
+  transport whose channel carries the token as its primary user agent
+  (`grpc_transport`): on a gRPC call `client_info` reaches the
+  `x-goog-api-client` metadata only, and the `user-agent` the API front end
+  records — the canary's audit logs showed `grpc-python/…` alone — is the
+  channel's. Discovery, Storage, gRPC and `requests` calls send the token
+  first; Vertex AI calls carry it after the SDK's label. The
+  policy table's GitHub fetch (when configured) and the IAP / certificate /
+  metadata fetches are not Google Cloud APIs and are left as they were. The
+  synthetic provider calls no Google API and is unchanged.
+- **`CLOUDGAUGE_DISABLE_ATTRIBUTION`** (`app.config`, read like
+  `WORKER_TOKEN_CHECK`: `true`/`1`/`yes`/`on` turns the identifier off, any
+  case; unset or `false` keeps it; anything else fails at startup). Set it
+  through `EXTRA_ENV` (`tools/deploy.sh`) or `extra_env` (Terraform); no new
+  script variable.
+- **Terraform** carries the deploy-time counterpart: `provider_meta "google"
+  { module_name = "cloud-solutions/cloudgauge-deploy-v18.8.1" }` in
+  `versions.tf`, which the Google provider appends to its user agent while it
+  creates the deployment; the test suite keeps its release equal to
+  `app.config.VERSION`.
+- README: **Privacy & API Attribution** (under *Deployment Instructions*), the
+  Configuration Reference row, one clause in the Architecture introduction.
+- **A public-repository guardrail** (`tests/test_packaging.py`): the suite
+  fails if any tracked text file carries a Google-internal shortlink, hostname
+  or analytics system name. It found one on its first run — a note in the
+  bundled policy table (`iam.disableWorkloadIdentityClusterCreation`) pointed
+  at an internal shortlink; the note now points at the public documentation,
+  and the bundled table's digest is `922e3257c491` (138 rows, as before: the
+  report's *Policy table* line shows the new digest, and no constraint,
+  expectation or category changed).
+
+### Changed
+
+- `VERSION = "18.8.1"`; the identifier and the Terraform module name carry it.
+- The bundled policy table's digest (above). No check, rule or row changed.
+
+### Tests
+
+- `tests/test_attribution.py`: the identifier's shape (a product token, the
+  release inside, no space); the opt-out in every spelling and the startup
+  error; the helpers on and off; the authorized transport setting the agent in
+  front of the Discovery client's on every request; the gRPC transport factory
+  (the channel's primary user agent, the client's own resolution kept); the real provider handing
+  the identifier to every SDK (`http` without `credentials`, the other
+  arguments passed through, `client_info` on the six clients, the header on
+  the Google `requests` call and not on the GitHub one) and falling back
+  cleanly when it is off; the Gemini client's options under the lower-case key.
+- `tests/test_terraform.py`: the `provider_meta` module name and its release;
+  `tests/test_packaging.py`: the guardrail; `tests/helpers.py`: the variable.
+- 1,240 tests.
+
+### Upgrade notes
+
+- Nothing to do: redeploy as usual and the identifier is on. To keep it off,
+  add `CLOUDGAUGE_DISABLE_ATTRIBUTION=true` to the services' variables.
+- Verified on the canary by reading the audit logs' `callerSuppliedUserAgent`
+  of the scan's own calls (Data Access logs turned on for the deployment
+  project for the minutes of one scan, then off again): the token arrives as
+  sent, and the report is unchanged fact for fact.
+
+---
 
 ## v18.8 — Forecasts, budgets and spend
 
@@ -3392,6 +3478,7 @@ performance; modernization; enablement; roadmap and roadblocks).
 | **v18.6** | Serverless and edge exposure | *Shipped.* **Serverless Exposure** (public Cloud Run services and functions — by binding or by the disabled invoker check — and services reachable around their load balancer), **Serverless Service Accounts** (the default account on Cloud Run and Cloud Functions, by its roles), **Cloud Armor Policy Content** (legacy rulesets, policies that protect nothing, preview-only WAFs, the rule quota), **SSL Certificate Health** (expiring self-managed and failed Google-managed certificates), **Container Scanning Enabled** (Artifact Analysis off beside Docker repositories); IAP over HTTP in Load Balancer Edge; the time-travel row graded by billing model, a Note on the contested Cloud SQL flags, zonal buckets out of Cloud Storage Versioning. The first release deduced from the google/skills mining and the Workload Manager catalogue diff. No new role, no new API. |
 | **v18.7** | Folders, keys and privileged grants | *Shipped.* **Folder Primitive Roles** (Owner, Editor and Project Creator on folders, with the projects below), **Privileged Grants** (domain-wide project creation and billing roles at the organization, Organization Administrator redundancy, no deny policy; Privileged Access Manager entitlements without approval and the standing grants that duplicate them), **Secret Access Scope** (secret roles granted resource-wide, with the secrets in reach), **Secret Manager Posture** (stale secrets without a rotation schedule, single-location replication, empty secrets), **Custom Roles With IAM Powers** (custom roles that grant, impersonate or write policies, with their holders; retired roles still bound), **User-Managed Keys** (every account with a live key, beside the rotation rows). The second release deduced from the google/skills mining and the Workload Manager catalogue diff. No new role, no new API. |
 | **v18.8** | Forecasts, budgets and spend | *Shipped.* **Spend Briefing** from the organization's **billing export to BigQuery** (`BILLING_EXPORT=<project>.<dataset>`, a dataset-level read, no billing-account IAM; *Informational — not configured* when unset): month to date against last month, a 7-day-mean forecast, projects and services with their change, credits with **committed-use coverage**, freshness, every line with its `bq` query; **Spend Anomalies** (week over week ≥ 1.5 × and above a floor, new spend); the Scorecard's Efficiency line grounded in real spend; **Log Cost Levers** (retention beyond 30 days, flow-log sampling above 0.5, DEBUG volume above the free tier without an exclusion); **Serverless Cost Hygiene** (connectors in use or idle, cross-region Cloud SQL); versioning without pruning in Cloud Storage Lifecycle. Not taken: the spend-based commitment recommendations from the Recommender export (that export still carries no billing-account rows — dropped by decision), budgets and Capacity Planner forecasts (billing-account IAM), the remaining config-level cost rows (BigQuery baseline slots, staging datasets without expiry, non-production Cloud SQL HA, backend buckets without CDN, resource labels, GKE cost allocation) — Later. |
+| **v18.8.1** | API attribution | *Shipped.* The static client identifier `cloud-solutions/cloudgauge-v<release>` on the user agent of every Google Cloud API call a scan makes (and the Terraform provider's module name at deploy time), so adoption can be measured from API usage alone — nothing added to what leaves a deployment; `CLOUDGAUGE_DISABLE_ATTRIBUTION=true` turns it off; the README's *Privacy & API Attribution*; a public-repository guardrail in the test suite. No check changed. |
 | **v18.9** | Logging pipeline and alerting hygiene | **Audit Log Pipeline** (sink filters missing audit log types, destination retention and lock, the writer's grant, export errors), **Duplicate Log Routing** (central sink plus untouched `_Default` sinks; free audit streams re-stored), **Project Log Routing** (`_Default` disabled, Data Access logs in the default view, Log Analytics), **Alert Notification Channels** (policies routed to nobody, unverified or disabled channels, undeliverable Pub/Sub channels), **Synthetic and SLO Coverage**. No new role, no new API. |
 | **v19** | Footprint and detection | A **Platform Footprint** page (what runs where: services, regions, versions); the detective half of the SSRF chain over Cloud Logging — **GKE control-plane activity** (exec, webhooks, RBAC and DaemonSet changes by service accounts or external IPs), **service-account activity signals**; **Findings and vulnerabilities** — Security Command Center active findings by category (the v2 API answers under the roles already held), detector services and modules off, findings export, VM Manager OS vulnerabilities with a fix available, exposed privileged VMs (the join of three existing checks); a **Support cases** briefing (its own API and role, its own decision); the deprecations recommender, once confirmed to exist. |
 | Later | | In this order: GKE health, backup and support (cluster conditions and CA expiry, Backup for GKE, end of support, workload disruption readiness); Compute reliability (disk backup coverage, VM availability policy, MIG and load-balancer resilience, reservations); managed databases and storage finished (Cloud SQL deletion protection, maintenance windows, password policy, CA expiry, IAM authentication; AlloyDB open networks; Public Access Prevention, versioning without cleanup; BigQuery unpartitioned tables); the data plane never read (Pub/Sub, Memorystore, Filestore, Spanner, Bigtable, Firestore, NetApp); org-policy depth and residency (exceptions below the root, domain-restriction values, location and service-usage drift); SLO coverage, PDF export. The Workload Manager results import does not ship (a new role, a per-project API, a dedupe layer). |

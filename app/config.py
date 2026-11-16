@@ -26,7 +26,7 @@ from dataclasses import dataclass
 # The release, as the image tag names it ("15.6" for v15.6; tests/test_packaging.py pins it to the newest entry
 # of RELEASE_NOTES.md). The report's footer shows it, and every scan summary records it so the next scan can tell
 # a check that is new to the release from one that merely had nothing to check last time (app.reporting.changes).
-VERSION = "18.8"
+VERSION = "18.8.1"
 # The policy table of the Organization Policies check (v18.1): by default the one shipped with the release
 # (assets/gcp_best_practices.csv, copied into the image), so a scan never depends on GitHub and the rules move only
 # with a release. BEST_PRACTICES_CSV_URL set to a gs:// object (read as the service account) or an https:// URL
@@ -154,6 +154,12 @@ HISTORY_PAGE_SCANS = 52
 # token path. Only the production and synthetic profiles enforce it (both receive real Cloud Tasks calls).
 # The largest request body any route takes (the form, the JSON bodies, the task bodies are all far smaller).
 MAX_REQUEST_BYTES = 1024 * 1024
+
+# --- API attribution (v18.8.1) ---
+# CLOUDGAUGE_DISABLE_ATTRIBUTION: ``true`` (also ``1``, ``yes``, ``on``) stops the services from appending the static client
+# identifier ``cloud-solutions/cloudgauge-v<release>`` to the user agent of their Google Cloud API calls (app.services.user_agent).
+# Unset or ``false``: the identifier is sent. Nothing else about a scan changes either way, and nothing is ever sent anywhere
+# but the Google Cloud APIs the scan calls in any case.
 # /api/get-suggestions: at most this many findings per request (the report's script sends 5 at a time) and this
 # much text per finding (the script keeps a table's sample to 25 rows; a free-text finding to 4,000 characters).
 MAX_SUGGESTIONS_PER_REQUEST = 20
@@ -283,6 +289,8 @@ class Settings:
     worker_audience: str | None = None
     # Whether the worker routes verify the caller's ID token in-process (v18.6.1; WORKER_TOKEN_CHECK, default on).
     worker_token_check: bool = True
+    # Whether the client identifier goes on the Google Cloud API calls (v18.8.1; CLOUDGAUGE_DISABLE_ATTRIBUTION turns it off).
+    attribution: bool = True
     # Which half of the tool this service is (see ROLES). 'web' needs WORKER_URL.
     role: str = DEFAULT_ROLE
     # The project's number, which the IAP assertion's audience carries (app.identity). Unset: read from
@@ -352,6 +360,7 @@ class Settings:
             worker_url=env.get('WORKER_URL') or None,
             worker_audience=env.get('WORKER_AUDIENCE') or None,
             worker_token_check=_switch(env.get('WORKER_TOKEN_CHECK'), 'WORKER_TOKEN_CHECK'),
+            attribution=not _switch(env.get('CLOUDGAUGE_DISABLE_ATTRIBUTION'), 'CLOUDGAUGE_DISABLE_ATTRIBUTION', default=False),
             role=role,
             project_number=(env.get('PROJECT_NUMBER') or '').strip() or None,
             gemini_model=_gemini_model(env.get('GEMINI_MODEL')),

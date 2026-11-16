@@ -392,7 +392,7 @@ If you wish to control all SA creation, this needs to be enabled. However using 
 traceability so it is not recommended turning this policy on. This org policy can be enabled on folders or projects
 that absolutely don't need to access Google APIs and use service accounts.
 ",,iam.disableWorkloadIdentityClusterCreation,"
-More details on rationales behind this org policy here: go/gke-wi-org-policy
+See the GKE documentation on Workload Identity Federation for the rationale behind this constraint.
 "
 Allowed VPC Service Controls mode for Anthos Service Mesh Managed Control Planes,List,,2021-09,"This constraint determines what VPC Service Controls modes can be set when provisioning a new Anthos Service Mesh Managed Control Plane. Valid values are ""NONE"" and ""COMPATIBLE"".",Could have,,,,meshconfig.allowedVpcscModes,
 Load Balancing,,,,,,,,,,
