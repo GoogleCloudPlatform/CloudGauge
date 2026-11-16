@@ -8,7 +8,184 @@ the test suite running inside the image, a zero-traffic canary revision scanned
 against a real organization, promotion, and a production scan compared fact for
 fact with the previous version's report.
 
-Versions are the image tags (`v5` … `v18.8.1`); the commit is the one that shipped.
+Versions are the image tags (`v5` … `v18.9`); the commit is the one that shipped.
+
+## v18.9 — Logging pipeline and alerting hygiene
+
+The fourth themed release of the re-cut programme (theme C of the google/skills
+mining): where the logs go, whether they arrive, what is stored twice, and
+whether an alert reaches anybody. Until now the report said *an aggregated
+audit sink exists* (CIS 2.2) and *this project has an alert policy about its
+databases*; it said nothing about the sink exporting one audit type out of
+four to a topic nobody can verify, the policy that fires to nobody, the
+external load balancer nothing probes. Five records from reads the scanner's
+roles already allow — the Logging API's sinks, exclusions, buckets and views,
+the Monitoring API's policies, channels, uptime checks, services and SLOs, the
+inventory and the IAM-policy search for the destinations, the topics and the
+writers — fresh, so a fix shows on the next scan. No new API, no new
+organization-level role.
+
+What our own organization reads after it: the one aggregated sink exports
+`activity` alone, to a Pub/Sub topic outside the organization; no project
+keeps an audit trail beyond `_Required`'s 400 days; no alert policy, channel,
+uptime check or SLO exists anywhere, while an external load balancer and four
+public Cloud Run services run — nobody would be told.
+
+### Added
+
+- **Audit Log Pipeline** (Operational Excellence, every scope; scope-level):
+  the scanned resource's own customer sinks — the organization's in an
+  organization scan, a folder's or a project's otherwise; `_Required` and
+  `_Default` left out, as *Organization Log Sink* leaves them. That check
+  stays the CIS yes/no on whether an aggregated audit export exists; this one
+  asks whether it is complete and durable. Per sink: a filter that names audit
+  logs but admits only some of `activity`, `system_event`, `data_access`,
+  `policy` (log-ID and `logName` forms, `%2F` and `/`; a generic
+  `cloudaudit.googleapis.com` or `google.cloud.audit.AuditLog` match admits
+  all four; a filter whose every audit mention is negated — the `_Default`
+  shape — names none), or an enabled exclusion that drops audit entries, or a
+  folder sink without `includeChildren` (*Investigation*); a **log-bucket
+  destination** read from the API: not `ACTIVE` or gone (**Action Required**),
+  kept **under 365 days** (*Investigation*), **unlocked** (Informational — a
+  lock is irreversible, the row says so); a BigQuery dataset or Pub/Sub topic
+  **absent from the scope's inventory** (**Action Required** — every exported
+  entry is lost; a Cloud Storage bucket absent is Informational, its project
+  not being in its name); the sink's **writer identity without the destination
+  role** by the IAM-policy search — on the destination, its project by ID or
+  number, or a folder or organization above (**Action Required**; a project's
+  sink into a bucket of its own project needs no grant, and the pre-2019
+  shared identity is never judged); **export errors** over the last seven days
+  (`logging.googleapis.com/exports/error_count`, summed per sink — a project
+  sink's in the project's Monitoring, an organization's or folder's tried in
+  the project CloudGauge runs in and skipped quietly when the metric is not
+  there) (**Action Required**); a destination **in a project outside the
+  scanned scope** — our organization's own case — Informational, nothing else
+  judged. A scope without a customer sink writes one Informational note (a
+  folder or project: the organization's aggregated sink covers it, judged in an
+  organization scan). Rows `Resource, Sink, Destination, Issue, Detail, Fix`
+  (`gcloud logging sinks update … --log-filter=…`, `… buckets update …
+  --retention-days=365`, `… --locked`, the `add-iam-policy-binding` per
+  destination kind, `gcloud logging read` of the sink's error log).
+- **Duplicate Log Routing** (Cost Optimization, every scope; scope-level): an
+  **aggregated sink** of the organization or a folder in scope (`includeChildren`,
+  enabled) into a **log bucket** whose filter admits what `_Default` stores,
+  while projects below it keep their `_Default` sinks enabled (not disabled, no
+  catch-all exclusion) — every entry stored twice, ingestion billed twice:
+  *Investigation*, one row per aggregated sink counting the projects and naming
+  the first five (the projects' `_Default` sinks are read only when such a
+  sink exists; one that cannot be read counts as storing, and says so under
+  *Projects not checked*); a customer sink into a log bucket whose filter
+  admits the **`_Required` streams** (`activity`, `system_event`,
+  `access_transparency` — kept 400 days in `_Required` at no charge):
+  Informational, with the `AND NOT LOG_ID(…)` fix — a longer or locked
+  archive stores them again on purpose. Sinks into BigQuery, Cloud Storage or
+  Pub/Sub are not rows. Rows `Resource, Sink, Destination, Projects, Issue,
+  Detail, Fix`.
+- **Project Log Routing** (Operational Excellence, per project): the
+  `_Default` sink **disabled or excluding everything** with no other enabled
+  sink into a log bucket whose filter admits what `_Default` stores — an
+  audit-only sink keeps the audit trail, not the project's logs (the sandbox
+  probe: an activity-only sink beside a disabled `_Default`, and the logs were
+  discarded all the same) — the project's logs are discarded as they arrive,
+  the `_Required` streams excepted (**Action Required**, `--no-disabled` /
+  `--clear-exclusions`); **Data Access audit logs effective** for the project
+  (its own `auditConfigs` or the organization's — read once — for all services
+  or for named ones) while the `_Default` view of the `_Default` bucket no
+  longer excludes them, so every `roles/logging.viewer` reads who accessed
+  what (Informational, with the view's filter as Logging creates it); the
+  `_Default` bucket **without Log Analytics** (Informational — free and
+  irreversible). The IAM policy or the views unreadable leaves the view rule
+  out, noted. Rows `Project, Resource, Issue, Detail, Fix`.
+- **Alert Notification Channels** (Operational Excellence, per project):
+  *Monitoring Alert Coverage* says whether a project has alert policies; this
+  record judges the ones it has. An enabled policy with **no notification
+  channel** ("fires to nobody"), or whose channels are all **disabled**,
+  **unverified** (`verificationStatus` `UNVERIFIED` — the API's one word for a
+  channel that does not deliver; a channel of a type that needs no
+  verification reports neither) or **gone** (*Investigation*); a **Pub/Sub
+  channel** an enabled policy uses whose topic is **not in the inventory** of
+  its project (**Action Required**) or on which the project's Monitoring
+  notification agent (`service-<number>@gcp-sa-monitoring-notification.iam.gserviceaccount.com`)
+  holds **no publisher role** by the IAM-policy search in the topic's project
+  (*Investigation* — undeliverable); a policy with an **MQL condition**
+  (Informational — deprecated in favour of PromQL; it keeps working). Channels
+  are listed only in projects whose enabled policies name one; the topics and
+  the grants once per topic project; a topic project the scanner cannot read is
+  noted. Rows `Project, Policy, Channels, Issue, Detail, Fix`
+  (`gcloud alpha monitoring policies update … --add-notification-channels`,
+  `… channels update … --enabled`, `gcloud pubsub topics add-iam-policy-binding`
+  for the agent).
+- **Synthetic and SLO Coverage** (Reliability, every scope; scope-level with
+  per-project reads): one listing of the scope's forwarding rules (regional
+  and global), Cloud Run services and GKE clusters, then — in each project
+  that runs one of them — the Monitoring API's uptime checks, services and
+  their SLOs, and the alert policies where a check or an SLO needs them. An
+  **external load balancer** (external or external-managed scheme; no scheme
+  counts as external) with **no uptime check** targeting its address (a check
+  on a hostname, which the scanner does not resolve, is taken as covering) —
+  *Investigation*, with the `gcloud monitoring uptime create` line; an
+  **uptime check with no enabled alert policy** naming its check ID in a
+  `check_passed` condition, or watching every check (*Investigation*); an
+  **SLO with no burn-rate alert** (no enabled policy with `select_slo_*` on
+  its name) (*Investigation*); a project running any of the three with **no
+  SLO** (Informational). Uptime checks and SLOs kept in a metrics scoping
+  project are not seen (the *Monitoring Alert Coverage* caveat). Projects the
+  inventory names by number are renamed by the project search. Rows
+  `Project, Resource, Kind, Issue, Detail, Fix`.
+
+### Changed
+
+- The synthetic organization draws the observability facts (drawn last): a
+  customer sink in one of four shapes (activity alone into a 30-day unlocked
+  bucket; every audit log into the locked 400-day audit bucket; into a Pub/Sub
+  topic its writer cannot publish to; into a dataset that is gone), a
+  disabled `_Default` sink, Log Analytics, an open default view; channels of
+  every state and which policies reach them, an MQL condition; an uptime check
+  on the external load balancer and an SLO on the first Cloud Run service,
+  each with or without its policy; the first folder has an aggregated sink of
+  every log into a bucket of its first project. The provider fakes the folder
+  sinks, `buckets.get`, the views, the notification channels, uptime checks,
+  services and SLOs, the topics in the inventory and the IAM searches for the
+  sink writers and the notification agent; the external forwarding rule now
+  carries an address.
+- README: the five catalogue entries, the scope note, the project structure.
+  `VERSION = "18.9"`; the Terraform module name carries it.
+
+### Tests
+
+- `tests/test_log_pipeline.py`: the filter reading (log IDs, `logName` forms,
+  the generic and `AuditLog` matches, negations, the `_Default` shape), the
+  `_Required` and `_Default` stream rules, the exclusions; destination facts of
+  every kind, the in-scope test by ID, number, folder and scope, the writer's
+  grant per destination kind and by inherited folder, the export-error series;
+  the pipeline rows (filter, exclusions, children, bucket retention and lock,
+  errors; bucket gone, unreadable, inactive; outside the scope; dataset gone,
+  topic with the grant, Cloud Storage bucket not in scope, project destination;
+  the shared writer and the same-project bucket never judged); the duplicate
+  rows over an organization and a folder sink with `_Default` sinks on, off and
+  excluding everything; the `_Required` stream rows; the view filter; the
+  project rows; the three checks end to end — the organization with every
+  shape, a project scan, the no-sink notes, the listing failing, the search
+  failing, the Monitoring read failing, the folder listing and the project's
+  `_Default` failing, the IAM policy failing.
+- `tests/test_alerting.py`: channel states and labels; the channel rows
+  (nobody, dead ends, MQL, the topic gone and the agent without the grant,
+  unknown facts, policies off); the topic and grant matching; the workload
+  facts; uptime targets and matching by address, hostname and check ID; SLO
+  matching; the synthetic rows and their all-clear; both checks end to end with
+  the Monitoring, listing and search failures.
+- `tests/test_worker.py`, `tests/test_fanout.py`, `tests/test_synthetic.py`:
+  the plan (67 / 64), the scope-level list, the project shards (31), one more
+  organization listing.
+- 1,268 tests.
+
+### Upgrade notes
+
+- Nothing to do: redeploy as usual. The first scan after the upgrade shows the
+  five records as *new check* on the Changes card; *Organization Log Sink* and
+  *Monitoring Alert Coverage* are unchanged.
+
+---
 
 ## v18.8.1 — API attribution
 
@@ -3479,6 +3656,6 @@ performance; modernization; enablement; roadmap and roadblocks).
 | **v18.7** | Folders, keys and privileged grants | *Shipped.* **Folder Primitive Roles** (Owner, Editor and Project Creator on folders, with the projects below), **Privileged Grants** (domain-wide project creation and billing roles at the organization, Organization Administrator redundancy, no deny policy; Privileged Access Manager entitlements without approval and the standing grants that duplicate them), **Secret Access Scope** (secret roles granted resource-wide, with the secrets in reach), **Secret Manager Posture** (stale secrets without a rotation schedule, single-location replication, empty secrets), **Custom Roles With IAM Powers** (custom roles that grant, impersonate or write policies, with their holders; retired roles still bound), **User-Managed Keys** (every account with a live key, beside the rotation rows). The second release deduced from the google/skills mining and the Workload Manager catalogue diff. No new role, no new API. |
 | **v18.8** | Forecasts, budgets and spend | *Shipped.* **Spend Briefing** from the organization's **billing export to BigQuery** (`BILLING_EXPORT=<project>.<dataset>`, a dataset-level read, no billing-account IAM; *Informational — not configured* when unset): month to date against last month, a 7-day-mean forecast, projects and services with their change, credits with **committed-use coverage**, freshness, every line with its `bq` query; **Spend Anomalies** (week over week ≥ 1.5 × and above a floor, new spend); the Scorecard's Efficiency line grounded in real spend; **Log Cost Levers** (retention beyond 30 days, flow-log sampling above 0.5, DEBUG volume above the free tier without an exclusion); **Serverless Cost Hygiene** (connectors in use or idle, cross-region Cloud SQL); versioning without pruning in Cloud Storage Lifecycle. Not taken: the spend-based commitment recommendations from the Recommender export (that export still carries no billing-account rows — dropped by decision), budgets and Capacity Planner forecasts (billing-account IAM), the remaining config-level cost rows (BigQuery baseline slots, staging datasets without expiry, non-production Cloud SQL HA, backend buckets without CDN, resource labels, GKE cost allocation) — Later. |
 | **v18.8.1** | API attribution | *Shipped.* The static client identifier `cloud-solutions/cloudgauge-v<release>` on the user agent of every Google Cloud API call a scan makes (and the Terraform provider's module name at deploy time), so adoption can be measured from API usage alone — nothing added to what leaves a deployment; `CLOUDGAUGE_DISABLE_ATTRIBUTION=true` turns it off; the README's *Privacy & API Attribution*; a public-repository guardrail in the test suite. No check changed. |
-| **v18.9** | Logging pipeline and alerting hygiene | **Audit Log Pipeline** (sink filters missing audit log types, destination retention and lock, the writer's grant, export errors), **Duplicate Log Routing** (central sink plus untouched `_Default` sinks; free audit streams re-stored), **Project Log Routing** (`_Default` disabled, Data Access logs in the default view, Log Analytics), **Alert Notification Channels** (policies routed to nobody, unverified or disabled channels, undeliverable Pub/Sub channels), **Synthetic and SLO Coverage**. No new role, no new API. |
+| **v18.9** | Logging pipeline and alerting hygiene | *Shipped.* **Audit Log Pipeline** (sink filters missing audit log types, destination retention and lock, the writer's grant, export errors), **Duplicate Log Routing** (central sink plus untouched `_Default` sinks; free audit streams re-stored), **Project Log Routing** (`_Default` disabled, Data Access logs in the default view, Log Analytics), **Alert Notification Channels** (policies routed to nobody, unverified or disabled channels, undeliverable Pub/Sub channels), **Synthetic and SLO Coverage**. No new role, no new API. |
 | **v19** | Footprint and detection | A **Platform Footprint** page (what runs where: services, regions, versions); the detective half of the SSRF chain over Cloud Logging — **GKE control-plane activity** (exec, webhooks, RBAC and DaemonSet changes by service accounts or external IPs), **service-account activity signals**; **Findings and vulnerabilities** — Security Command Center active findings by category (the v2 API answers under the roles already held), detector services and modules off, findings export, VM Manager OS vulnerabilities with a fix available, exposed privileged VMs (the join of three existing checks); a **Support cases** briefing (its own API and role, its own decision); the deprecations recommender, once confirmed to exist. |
 | Later | | In this order: GKE health, backup and support (cluster conditions and CA expiry, Backup for GKE, end of support, workload disruption readiness); Compute reliability (disk backup coverage, VM availability policy, MIG and load-balancer resilience, reservations); managed databases and storage finished (Cloud SQL deletion protection, maintenance windows, password policy, CA expiry, IAM authentication; AlloyDB open networks; Public Access Prevention, versioning without cleanup; BigQuery unpartitioned tables); the data plane never read (Pub/Sub, Memorystore, Filestore, Spanner, Bigtable, Firestore, NetApp); org-policy depth and residency (exceptions below the root, domain-restriction values, location and service-usage drift); SLO coverage, PDF export. The Workload Manager results import does not ship (a new role, a per-project API, a dedupe layer). |

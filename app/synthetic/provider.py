@@ -622,28 +622,83 @@ class SyntheticGcp:
         return {"enableFlowLogs": on, "logConfig": config}
 
     def _h_logging_projects_locations_buckets_list(self, kw, project_id):
-        """The project's log buckets: ``_Required`` (400 days, locked), ``_Default`` at the drawn retention, an optional locked audit bucket."""
+        """The project's log buckets: ``_Required`` (400 days, locked), ``_Default`` at the drawn retention (v18.9: with Log Analytics where drawn),
+        an optional locked audit bucket, and (v18.9) the destinations of the project's customer sink and of the first folder's aggregated sink."""
         self.call("logging", "buckets.list", project_id=project_id, style="http")
-        profile = self.world.project(project_id)
-        levers = profile.cost_levers
-        prefix = f"projects/{project_id}/locations"
+        return {"buckets": self._log_buckets(self.world.project(project_id))}
+
+    def _log_buckets(self, profile):
+        levers, observability = profile.cost_levers, profile.observability
+        prefix = f"projects/{profile.project_id}/locations"
         buckets = [{"name": f"{prefix}/global/buckets/_Required", "retentionDays": 400, "locked": True, "lifecycleState": "ACTIVE"},
-                   {"name": f"{prefix}/global/buckets/_Default", "retentionDays": levers.log_retention if levers else 30, "lifecycleState": "ACTIVE"}]
-        if levers and levers.audit_bucket:
+                   {"name": f"{prefix}/global/buckets/_Default", "retentionDays": levers.log_retention if levers else 30, "lifecycleState": "ACTIVE",
+                    **({"analyticsEnabled": True} if observability and observability.analytics else {})}]
+        if (levers and levers.audit_bucket) or (observability and observability.sink == "complete"):
             buckets.append({"name": f"{prefix}/asia-south1/buckets/audit", "retentionDays": 400, "locked": True, "lifecycleState": "ACTIVE"})
-        return {"buckets": buckets}
+        if observability and observability.sink == "narrow":
+            buckets.append({"name": f"{prefix}/global/buckets/audit-short", "retentionDays": 30, "lifecycleState": "ACTIVE"})
+        if self._folder_sink_host(profile.folder_id) is profile:
+            buckets.append({"name": f"{prefix}/global/buckets/folder-archive", "retentionDays": 400, "lifecycleState": "ACTIVE"})
+        return buckets
+
+    def _h_logging_projects_locations_buckets_get(self, kw, project_id):
+        """v18.9: one bucket by name; 404 for a name the project's listing does not have."""
+        self.call("logging", "buckets.get", project_id=project_id, style="http")
+        name = str(kw.get("name") or "")
+        bucket = next((b for b in self._log_buckets(self.world.project(project_id)) if b["name"] == name), None)
+        if bucket is None:
+            raise _http_error(404, f"Bucket {name} not found")
+        return bucket
+
+    def _h_logging_projects_locations_buckets_views_list(self, kw, project_id):
+        """v18.9: a bucket's views — ``_AllLogs`` and ``_Default``, the latter excluding the Data Access logs unless the world opened it."""
+        self.call("logging", "views.list", project_id=project_id, style="http")
+        parent, observability = str(kw.get("parent") or ""), self.world.project(project_id).observability
+        default_filter = "" if observability and observability.open_view else 'NOT LOG_ID("cloudaudit.googleapis.com/data_access") AND NOT LOG_ID("externalaudit.googleapis.com/data_access")'
+        return {"views": [{"name": f"{parent}/views/_AllLogs"}, {"name": f"{parent}/views/_Default", "filter": default_filter}]}
+
+    def _folder_sink_host(self, folder_id):
+        """v18.9: the project whose bucket the first folder's aggregated sink writes into (its first project), or None."""
+        if folder_id != self.world.folder_ids[0]:
+            return None
+        profiles = self.world.projects(folder_id)
+        return profiles[0] if profiles else None
+
+    def _h_logging_folders_sinks_list(self, kw, project_id):
+        """v18.9: the first folder has an aggregated sink of every log into a bucket of its first project (the duplicate-routing case, and
+        the _Required streams stored again); the other folders have none."""
+        self.call("logging", "sinks.list", style="http")
+        folder_id = str(kw.get("parent") or "").split("/", 1)[-1]
+        host = self._folder_sink_host(folder_id)
+        if host is None:
+            return {}
+        return {"sinks": [{"name": "folder-archive", "destination": f"logging.googleapis.com/projects/{host.project_id}/locations/global/buckets/folder-archive", "filter": "",
+                           "includeChildren": True, "writerIdentity": f"serviceAccount:service-folder-{folder_id}@gcp-sa-logging.iam.gserviceaccount.com"}]}
 
     def _h_logging_projects_sinks_list(self, kw, project_id):
-        """The project's sinks: ``_Required``, ``_Default`` (with a DEBUG exclusion where drawn) and one per bucket the world marks as a sink destination."""
+        """The project's sinks: ``_Required``, ``_Default`` (with a DEBUG exclusion where drawn; v18.9: disabled where drawn), one per bucket the
+        world marks as a sink destination, and (v18.9) the project's customer sink in the drawn shape."""
         self.call("logging", "sinks.list", project_id=project_id, style="http")
         profile = self.world.project(project_id)
-        levers = profile.cost_levers
-        buckets = f"logging.googleapis.com/projects/{project_id}/locations/global/buckets"
-        default = {"name": "_Default", "destination": f"{buckets}/_Default", "filter": "NOT LOG_ID(\"cloudaudit.googleapis.com/activity\")"}
+        levers, observability = profile.cost_levers, profile.observability
+        buckets = f"logging.googleapis.com/projects/{project_id}/locations"
+        default = {"name": "_Default", "destination": f"{buckets}/global/buckets/_Default", "filter": "NOT LOG_ID(\"cloudaudit.googleapis.com/activity\")"}
         if levers and levers.debug_exclusion:
             default["exclusions"] = [{"name": "drop-debug", "filter": "severity=DEBUG"}]
-        sinks = [{"name": "_Required", "destination": f"{buckets}/_Required", "filter": "LOG_ID(\"cloudaudit.googleapis.com/activity\")"}, default]
+        if observability and observability.default_disabled:
+            default["disabled"] = True
+        sinks = [{"name": "_Required", "destination": f"{buckets}/global/buckets/_Required", "filter": "LOG_ID(\"cloudaudit.googleapis.com/activity\")"}, default]
         sinks += [{"name": f"sink-{i}", "destination": f"storage.googleapis.com/{bucket}", "filter": "severity>=ERROR"} for i, bucket in enumerate(profile.sink_buckets)]
+        writer = f"serviceAccount:service-{profile.project_number}@gcp-sa-logging.iam.gserviceaccount.com"
+        shape = observability.sink if observability else ""
+        if shape == "narrow":
+            sinks.append({"name": "audit-activity", "destination": f"{buckets}/global/buckets/audit-short", "filter": 'LOG_ID("cloudaudit.googleapis.com/activity")', "writerIdentity": writer})
+        elif shape == "complete":
+            sinks.append({"name": "audit-archive", "destination": f"{buckets}/asia-south1/buckets/audit", "filter": 'logName:"cloudaudit.googleapis.com"', "writerIdentity": writer})
+        elif shape == "topic":
+            sinks.append({"name": "audit-stream", "destination": f"pubsub.googleapis.com/projects/{project_id}/topics/audit-stream", "filter": 'logName:"cloudaudit.googleapis.com"', "writerIdentity": writer})
+        elif shape == "dataset-gone":
+            sinks.append({"name": "audit-bq", "destination": f"bigquery.googleapis.com/projects/{project_id}/datasets/audit_gone", "filter": 'logName:"cloudaudit.googleapis.com"', "writerIdentity": writer})
         return {"sinks": sinks}
 
     def _h_monitoring_projects_timeSeries_list(self, kw, project_id):
@@ -817,9 +872,100 @@ class SyntheticGcp:
         filters = {"serviceruntime.googleapis.com/quota": 'metric.type="serviceruntime.googleapis.com/quota/allocation/usage" AND resource.type="consumer_quota"',
                    "cloud_sql": 'metric.type="cloudsql.googleapis.com/database/cpu/utilization" AND resource.type="cloudsql_database"',
                    "gke_cluster": 'metric.type="kubernetes.io/container/restart_count" AND resource.type="k8s_container"'}
-        return {"alertPolicies": [{"displayName": f"alert-{i}", "enabled": True,
-                                   "conditions": [{"conditionThreshold": {"filter": filters.get(f, f'metric.type="{f}"')}}]}
-                                  for i, f in enumerate(profile.alert_filters)]}
+        o, prefix = profile.observability, f"projects/{project_id}"
+        channels = [f"{prefix}/notificationChannels/{j}" for j in range(len(o.channels))] if o else []
+        policies = []
+        for i, f in enumerate(profile.alert_filters):  # v18.9: the channels each policy notifies, an MQL condition on the first where drawn
+            text = filters.get(f, f'metric.type="{f}"')
+            condition = {"conditionMonitoringQueryLanguage": {"query": f"fetch global | {text} | condition val() > 0.9"}} if o and o.mql and i == 0 \
+                else {"conditionThreshold": {"filter": text}}
+            refs = [channels[j] for j in (o.policy_channels[i] if o and i < len(o.policy_channels) else ())]
+            policies.append({"name": f"{prefix}/alertPolicies/{i}", "displayName": f"alert-{i}", "enabled": True, "conditions": [condition], "notificationChannels": refs})
+        working = [channels[j] for j, kind in enumerate(o.channels if o else ()) if kind in ("email", "pubsub")][:1]
+        if o and o.uptime == "alerted":  # v18.9: the uptime check's policy
+            policies.append({"name": f"{prefix}/alertPolicies/uptime", "displayName": "edge uptime", "enabled": True, "notificationChannels": working,
+                             "conditions": [{"conditionThreshold": {"filter": 'metric.type="monitoring.googleapis.com/uptime_check/check_passed" AND metric.labels.check_id="edge-uptime" AND resource.type="uptime_url"'}}]})
+        if o and o.slo == "alerted":  # v18.9: the SLO's burn-rate policy
+            policies.append({"name": f"{prefix}/alertPolicies/burn", "displayName": "web availability burn rate", "enabled": True, "notificationChannels": working,
+                             "conditions": [{"conditionThreshold": {"filter": f'select_slo_burn_rate("{prefix}/services/svc-web/serviceLevelObjectives/availability", "60m")'}}]})
+        return {"alertPolicies": policies}
+
+    def _h_monitoring_projects_notificationChannels_list(self, kw, project_id):
+        """v18.9: the project's channels in the drawn states — verified and unverified email, a disabled Slack channel, Pub/Sub channels whose
+        topic exists with or without the notification agent's grant, or does not exist."""
+        self.call("monitoring", "notificationChannels.list", project_id=project_id, style="http")
+        profile = self.world.project(project_id)
+        o, prefix = profile.observability, f"projects/{project_id}"
+        channels = []
+        for j, kind in enumerate(o.channels if o else ()):
+            channel = {"name": f"{prefix}/notificationChannels/{j}", "enabled": True, "verificationStatus": "VERIFICATION_STATUS_UNSPECIFIED"}
+            if kind.startswith("email"):
+                channel.update(type="email", displayName="ops mail", labels={"email_address": "ops@example.com"}, verificationStatus="UNVERIFIED" if kind == "email-unverified" else "VERIFIED")
+            elif kind == "disabled":
+                channel.update(type="slack", displayName="ops slack", labels={"channel_name": "#ops"}, enabled=False)
+            else:
+                topic = {"pubsub": "alerts", "pubsub-ungranted": "alerts-ungranted", "pubsub-gone": "alerts-gone"}[kind]
+                channel.update(type="pubsub", displayName=f"topic {topic}", labels={"topic": f"projects/{project_id}/topics/{topic}"})
+            channels.append(channel)
+        return {"notificationChannels": channels}
+
+    @staticmethod
+    def _lb_address(profile):
+        return f"34.120.{profile.index % 256}.{(profile.index * 7 + 1) % 256}"
+
+    def _h_monitoring_projects_uptimeCheckConfigs_list(self, kw, project_id):
+        """v18.9: an uptime check on the external load balancer's address where drawn."""
+        self.call("monitoring", "uptimeCheckConfigs.list", project_id=project_id, style="http")
+        profile = self.world.project(project_id)
+        o = profile.observability
+        if not o or not o.uptime:
+            return {}
+        return {"uptimeCheckConfigs": [{"name": f"projects/{project_id}/uptimeCheckConfigs/edge-uptime", "displayName": "edge uptime",
+                                        "monitoredResource": {"type": "uptime_url", "labels": {"host": self._lb_address(profile), "project_id": project_id}},
+                                        "httpCheck": {"path": "/", "port": 443, "useSsl": True}, "period": "60s", "timeout": "10s"}]}
+
+    def _h_monitoring_services_list(self, kw, project_id):
+        """v18.9: a Cloud Run service entry in Monitoring where the world drew an SLO."""
+        self.call("monitoring", "services.list", project_id=project_id, style="http")
+        profile = self.world.project(project_id)
+        o = profile.observability
+        if not o or not o.slo:
+            return {}
+        return {"services": [{"name": f"projects/{project_id}/services/svc-web", "displayName": "web",
+                              "cloudRun": {"serviceName": "web", "location": self._serverless_region(profile)}}]}
+
+    def _h_monitoring_services_serviceLevelObjectives_list(self, kw, project_id):
+        self.call("monitoring", "serviceLevelObjectives.list", project_id=project_id, style="http")
+        parent = str(kw.get("parent") or "")
+        return {"serviceLevelObjectives": [{"name": f"{parent}/serviceLevelObjectives/availability", "displayName": "availability", "goal": 0.995, "rollingPeriod": "2592000s"}]}
+
+    def _observability_assets(self, profile, asset_types):
+        """v18.9: the project's Pub/Sub topics as the inventory lists them — the alert channels' topics that exist, the audit sink's."""
+        if "pubsub.googleapis.com/Topic" not in asset_types or profile.observability is None:
+            return []
+        o = profile.observability
+        topics = sorted({{"pubsub": "alerts", "pubsub-ungranted": "alerts-ungranted"}[kind] for kind in o.channels if kind in ("pubsub", "pubsub-ungranted")})
+        if o.sink == "topic":
+            topics.append("audit-stream")
+        return [SimpleNamespace(name=f"//pubsub.googleapis.com/projects/{profile.project_id}/topics/{topic}", asset_type="pubsub.googleapis.com/Topic",
+                                resource=SimpleNamespace(data={"name": f"projects/{profile.project_id}/topics/{topic}"}, parent=f"//cloudresourcemanager.googleapis.com/projects/{profile.project_number}"))
+                for topic in topics]
+
+    def _agent_policy_results(self, profiles, email):
+        """v18.9: the IAM-policy search results for a Google-managed agent — the Monitoring notification agent's publisher role on the ``alerts``
+        topic of its project, the first folder's sink writer's bucketWriter role on the project that hosts its bucket; nothing for the projects'
+        own sink writers (the topic shape has no grant)."""
+        results = []
+        for profile in profiles:
+            common = {"project": f"projects/{profile.project_number}", "organization": f"organizations/{self.world.org_id}", "folders": [f"folders/{profile.folder_id}"]}
+            o = profile.observability
+            if email == f"service-{profile.project_number}@gcp-sa-monitoring-notification.iam.gserviceaccount.com" and o and "pubsub" in o.channels:
+                results.append(SimpleNamespace(asset_type="pubsub.googleapis.com/Topic", resource=f"//pubsub.googleapis.com/projects/{profile.project_id}/topics/alerts",
+                                               policy=SimpleNamespace(bindings=[SimpleNamespace(role="roles/pubsub.publisher", members=[f"serviceAccount:{email}"])]), **common))
+            if email == f"service-folder-{profile.folder_id}@gcp-sa-logging.iam.gserviceaccount.com" and self._folder_sink_host(profile.folder_id) is profile:
+                results.append(SimpleNamespace(asset_type="cloudresourcemanager.googleapis.com/Project", resource=f"//cloudresourcemanager.googleapis.com/projects/{profile.project_id}",
+                                               policy=SimpleNamespace(bindings=[SimpleNamespace(role="roles/logging.bucketWriter", members=[f"serviceAccount:{email}"])]), **common))
+        return results
 
     def _h_logging_organizations_sinks_list(self, kw, project_id):
         self.call("logging", "sinks.list", style="http")
@@ -1075,6 +1221,7 @@ class SyntheticGcp:
             found += self._governance_assets(profile, asset_types)
             found += self._posture_assets(profile, asset_types)
             found += self._serverless_assets(profile, asset_types)
+            found += self._observability_assets(profile, asset_types)
             return found
         # Folder- or organization-wide listing: one pass over the projects in scope.
         folder_id = parent.split("/", 1)[1] if parent.startswith("folders/") else None
@@ -1091,6 +1238,7 @@ class SyntheticGcp:
             found += self._governance_assets(profile, asset_types)
             found += self._posture_assets(profile, asset_types)
             found += self._serverless_assets(profile, asset_types)
+            found += self._observability_assets(profile, asset_types)
         self.call("asset", "listAssets(folder)" if folder_id else "listAssets(org)", pages=max(1, math.ceil(len(found) / PAGE_SIZE)))
         return found
 
@@ -1413,7 +1561,7 @@ class SyntheticGcp:
         if edge.lb != "none" and "compute.googleapis.com/GlobalForwardingRule" in asset_types:
             proxy_kind = "targetHttpProxies" if edge.lb == "http" else "targetHttpsProxies"
             asset("compute", "global/forwardingRules/edge-fr", {"name": "edge-fr", "loadBalancingScheme": "EXTERNAL", "portRange": "80-80" if edge.lb == "http" else "443-443",
-                                                               "IPProtocol": "TCP", "target": f"{compute}/global/{proxy_kind}/edge-proxy"})
+                                                               "IPProtocol": "TCP", "IPAddress": self._lb_address(profile), "target": f"{compute}/global/{proxy_kind}/edge-proxy"})
         if edge.lb == "http" and "compute.googleapis.com/TargetHttpProxy" in asset_types:
             asset("compute", "global/targetHttpProxies/edge-proxy", {"name": "edge-proxy", "selfLink": f"{compute}/global/targetHttpProxies/edge-proxy", "urlMap": f"{compute}/global/urlMaps/edge-map"})
         if edge.lb.startswith("https") and "compute.googleapis.com/TargetHttpsProxy" in asset_types:
@@ -1597,6 +1745,10 @@ class SyntheticGcp:
         profiles = [self.world.project(scope.split("/", 1)[1])] if scope.startswith("projects/") else self.world.projects(folder_id)
         email = query.split('"')[1] if query.startswith('policy:"') else None
         results = []
+        if email and (email.endswith("@gcp-sa-monitoring-notification.iam.gserviceaccount.com") or email.endswith("@gcp-sa-logging.iam.gserviceaccount.com")):  # v18.9
+            results = self._agent_policy_results(profiles, email)
+            self.call("asset", "searchAllIamPolicies", pages=max(1, math.ceil(len(results) / PAGE_SIZE)))
+            return results
         if not query and any(t.startswith("cloudresourcemanager.googleapis.com/") for t in request.get("asset_types") or []):  # v18.5: every policy under the scope
             results = self._policy_results(scope, set(request.get("asset_types") or []))
             self.call("asset", "searchAllIamPolicies", pages=max(1, math.ceil(len(results) / PAGE_SIZE)))

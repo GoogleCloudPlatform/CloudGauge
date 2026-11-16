@@ -18,6 +18,6 @@ terraform {
   # deploying, the way the services append cloud-solutions/cloudgauge-v<release> to theirs (README › Privacy & API Attribution).
   # It names the solution and the release, nothing else; the release here is kept equal to app.config.VERSION by the test suite.
   provider_meta "google" {
-    module_name = "cloud-solutions/cloudgauge-deploy-v18.8.1"
+    module_name = "cloud-solutions/cloudgauge-deploy-v18.9"
   }
 }

@@ -248,8 +248,10 @@ def test_scan_completes_against_the_synthetic_organization(gcp, scope):
     # v18.3: the five network-edge listings (and Open Firewall Rules' firewall-policy listing).
     # v18.6: two more (the serverless workloads; the edge policies and certificates) — Container Scanning Enabled searches instead.
     # v18.8: one more (Serverless Cost Hygiene's workloads and connectors; the connectors come from the search, the workloads from the listing).
-    assert by_method.get('asset.listAssets(org)', 0) == (25 if scope == 'organization' else 0)  # v18.5: the identity checks search instead
-    assert by_method.get('asset.listAssets(folder)', 0) == (25 if scope == 'folder' else 0)
+    # v18.9: one more (Synthetic and SLO Coverage's load balancers, services and clusters); Audit Log Pipeline lists destinations only for a
+    # sink into a dataset, bucket or topic in scope, and the synthetic organization's own sink writes outside it.
+    assert by_method.get('asset.listAssets(org)', 0) == (26 if scope == 'organization' else 0)  # v18.5: the identity checks search instead
+    assert by_method.get('asset.listAssets(folder)', 0) == (26 if scope == 'folder' else 0)
     assert by_method.get('accesscontextmanager.servicePerimeters.list', 0) == 1
     metrics = provider.metrics.snapshot()
     assert metrics['total_calls'] > 50 and metrics['errors'] == {}

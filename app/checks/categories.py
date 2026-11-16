@@ -50,6 +50,7 @@ CATEGORY_MAP = {
     "Commitments Expiring": "Cost Optimization",
     # v18.8: forecasts, budgets and spend — the spend briefing (Informational) and its scored companion, the log and serverless cost levers.
     "Spend Briefing": "Cost Optimization", "Spend Anomalies": "Cost Optimization", "Log Cost Levers": "Cost Optimization", "Serverless Cost Hygiene": "Cost Optimization",
+    "Duplicate Log Routing": "Cost Optimization",  # v18.9: an aggregated bucket sink and the projects' _Default sinks storing the same entries
 
     # Reliability & Resilience
     "Cloud Storage Versioning": "Reliability & Resilience", "GKE Hygiene": "Reliability & Resilience",
@@ -96,6 +97,9 @@ CATEGORY_MAP = {
     "Folder Primitive Roles": "Security & Identity", "Privileged Grants": "Security & Identity", "Secret Access Scope": "Security & Identity",
     "Secret Manager Posture": "Security & Identity", "Custom Roles With IAM Powers": "Security & Identity", "User-Managed Keys": "Security & Identity",
     "Service Account Impersonation": "Security & Identity", "VPC Service Controls Coverage": "Security & Identity",
+    # v18.9: logging pipeline and alerting hygiene
+    "Audit Log Pipeline": "Operational Excellence & Observability", "Project Log Routing": "Operational Excellence & Observability",
+    "Alert Notification Channels": "Operational Excellence & Observability", "Synthetic and SLO Coverage": "Reliability & Resilience",
 
     # B2: error results. These names are only written when a check fails; the
     # legacy map left them out, so failures silently disappeared from the report.

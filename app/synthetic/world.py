@@ -323,6 +323,22 @@ class CostLevers:
 
 
 @dataclass(frozen=True)
+class Observability:
+    """v18.9: what the log-pipeline and alerting rules read (the Logging sinks, buckets and views handlers; the Monitoring channels, uptime
+    checks, services and SLOs; the topic listing and the IAM searches for the sink writers and the notification agent)."""
+    sink: str  # "" | "narrow" | "complete" | "topic" | "dataset-gone": the project's customer sink — activity alone into a 30-day unlocked bucket;
+    #            every audit log into the locked 400-day audit bucket; into a Pub/Sub topic its writer cannot publish to; into a dataset that is gone
+    default_disabled: bool  # the _Default sink is disabled (the project's logs are discarded)
+    analytics: bool  # the _Default bucket is upgraded to Log Analytics
+    open_view: bool  # the _Default view's filter no longer excludes the Data Access logs
+    channels: tuple  # the project's notification channels: "email" | "email-unverified" | "disabled" | "pubsub" | "pubsub-ungranted" | "pubsub-gone"
+    policy_channels: tuple  # per alert policy (alert_filters' order): the indexes into `channels` it notifies — () fires to nobody
+    mql: bool  # the first alert policy's condition is written in MQL
+    uptime: str  # "" | "silent" | "alerted": an uptime check on the external load balancer's address, without or with an alert policy
+    slo: str  # "" | "silent" | "alerted": an SLO on the first Cloud Run service, without or with a burn-rate policy
+
+
+@dataclass(frozen=True)
 class ProjectProfile:
     index: int
     project_id: str
@@ -392,6 +408,7 @@ class ProjectProfile:
     serverless: Serverless = None  # v18.6
     privileges: Privileges = None  # v18.7
     cost_levers: CostLevers = None  # v18.8
+    observability: Observability = None  # v18.9
 
     @property
     def project_number(self):
@@ -786,6 +803,20 @@ class SyntheticOrg:
             pruned_buckets=tuple(bucket.name for bucket in buckets if bucket.versioning and bucket.lifecycle and _chance(rng, 0.6)),
             spend_scale=rng.choice([0.5, 1.0, 1.0, 2.0, 5.0]))
 
+        # v18.9 (drawn last again): the logging pipeline and the alerting — a customer sink in one of four shapes, a disabled _Default sink,
+        # Log Analytics, an open default view; channels of every state and which policies reach them, an MQL condition; an uptime check on the
+        # external load balancer and an SLO on the first Cloud Run service, each with or without its alert policy.
+        channels = tuple(rng.choice(["email", "email", "email-unverified", "disabled", "pubsub", "pubsub-ungranted", "pubsub-gone"]) for _ in range(rng.choice([0, 1, 1, 2, 3])))
+        policy_channels = []
+        for _ in alert_filters:
+            count = min(len(channels), rng.choice([0, 1, 1, 2]))
+            policy_channels.append(tuple(sorted(rng.sample(range(len(channels)), count))) if count else ())
+        observability = Observability(
+            sink=rng.choice(["", "", "", "narrow", "complete", "topic", "dataset-gone"]), default_disabled=_chance(rng, 0.05), analytics=_chance(rng, 0.3), open_view=_chance(rng, 0.1),
+            channels=channels, policy_channels=tuple(policy_channels), mql=bool(alert_filters) and _chance(rng, 0.1),
+            uptime=rng.choice(["", "silent", "alerted"]) if network_edge.lb != "none" else "",
+            slo=rng.choice(["", "", "silent", "alerted"]) if serverless.services else "")
+
         return ProjectProfile(
             index=index, project_id=project_id, display_name=f"Synthetic Project {index}",
             folder_id=self.folder_of(index), denied=denied, osconfig_disabled=osconfig_disabled,
@@ -809,7 +840,7 @@ class SyntheticOrg:
             unprotected_buckets=unprotected_buckets, sink_buckets=sink_buckets, retention_buckets=retention_buckets, proxy_subnet=proxy_subnet,
             gke_auto_repair=gke_auto_repair, project_audit_configs=project_audit_configs, project_contact=project_contact,
             gke_operations=gke_operations, network_edge=network_edge, data_governance=data_governance, posture=posture, serverless=serverless, privileges=privileges,
-            cost_levers=cost_levers,
+            cost_levers=cost_levers, observability=observability,
         )
 
     # --- the synthetic billing export (v18.8) ---

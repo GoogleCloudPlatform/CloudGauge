@@ -41,6 +41,8 @@ from app.checks.serverless import EXPOSURE_CHECK, SCANNING_CHECK, check_containe
 from app.checks.spend import BRIEFING as SPEND_BRIEFING
 from app.checks.spend import check_spend
 from app.checks.log_cost import LOG_COST_CHECK, check_log_cost
+from app.checks.log_pipeline import AUDIT_PIPELINE_CHECK, DUPLICATE_ROUTING_CHECK, PROJECT_ROUTING_CHECK, check_audit_pipeline, check_duplicate_routing, check_project_routing
+from app.checks.alerting import CHANNELS_CHECK, SYNTHETIC_CHECK, check_alert_channels, check_synthetic_coverage
 from app.checks.edge_security import ARMOR_CHECK, check_edge_security
 from app.checks.privileges import CUSTOM_ROLES_CHECK, FOLDER_ROLES_CHECK, PRIVILEGED_GRANTS_CHECK, check_custom_roles, check_folder_roles, check_privileged_grants
 from app.checks.secrets import SECRET_SCOPE_CHECK, check_secret_posture
@@ -245,6 +247,16 @@ def build_check_plan(scope, scope_id, job_id, all_projects, active_zones, active
         CheckSpec("Cost Optimization", SPEND_BRIEFING, check_spend, (scope, scope_id, job_id)),
         CheckSpec("Cost Optimization", LOG_COST_CHECK, check_log_cost, (scope_id, all_projects, job_id)),
         CheckSpec("Cost Optimization", SERVERLESS_COST_CHECK, check_serverless_cost, (scope, scope_id, job_id)),
+        # v18.9: logging pipeline and alerting hygiene — Audit Log Pipeline (the scope's own customer sinks, their destinations and writers),
+        # Duplicate Log Routing (the aggregated bucket sinks of the organization and the folders in scope against the projects' _Default sinks),
+        # Project Log Routing per project (the _Default sink, bucket and view), Alert Notification Channels per project (policies, channels,
+        # Pub/Sub topics from the inventory), Synthetic and SLO Coverage from one listing of the scope's load balancers, services and clusters
+        # (+ the Monitoring API in the projects that run them).
+        CheckSpec("Operational Excellence & Observability", AUDIT_PIPELINE_CHECK, check_audit_pipeline, (scope, scope_id, job_id)),
+        CheckSpec("Cost Optimization", DUPLICATE_ROUTING_CHECK, check_duplicate_routing, (scope, scope_id, job_id)),
+        CheckSpec("Operational Excellence & Observability", PROJECT_ROUTING_CHECK, check_project_routing, (scope_id, all_projects, job_id)),
+        CheckSpec("Operational Excellence & Observability", CHANNELS_CHECK, check_alert_channels, (scope_id, all_projects, job_id)),
+        CheckSpec("Reliability & Resilience", SYNTHETIC_CHECK, check_synthetic_coverage, (scope, scope_id, job_id)),
     ]
 
     if scope == 'organization':
@@ -280,6 +292,7 @@ SCOPE_LEVEL_CHECKS = frozenset({
     EXPOSURE_CHECK, ARMOR_CHECK, SCANNING_CHECK,  # v18.6: one listing each (two records each for the first two: Serverless Service Accounts, SSL Certificate Health)
     FOLDER_ROLES_CHECK, SECRET_SCOPE_CHECK,  # v18.7: the folders under the scope; one IAM search + one resource search (two records: Secret Manager Posture)
     SPEND_BRIEFING, SERVERLESS_COST_CHECK,  # v18.8: two BigQuery queries under the scope's ancestry (two records: Spend Anomalies); one listing of the scope's workloads and connectors
+    AUDIT_PIPELINE_CHECK, DUPLICATE_ROUTING_CHECK, SYNTHETIC_CHECK,  # v18.9: the scope's sinks; the aggregated sinks under it; one listing of its load balancers, services and clusters
 })
 # The checks that do both: scope-wide work plus per-project work. Shards split them
 # with keyword flags: the scope shard runs the first set, the project shards the second
