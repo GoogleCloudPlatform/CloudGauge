@@ -38,6 +38,8 @@ from app.checks.cost import (
 from app.checks.vm_hardening import VM_SA_CHECK, check_vm_posture
 from app.checks.serverless import EXPOSURE_CHECK, SCANNING_CHECK, check_container_scanning, check_serverless_posture
 from app.checks.edge_security import ARMOR_CHECK, check_edge_security
+from app.checks.privileges import CUSTOM_ROLES_CHECK, FOLDER_ROLES_CHECK, PRIVILEGED_GRANTS_CHECK, check_custom_roles, check_folder_roles, check_privileged_grants
+from app.checks.secrets import SECRET_SCOPE_CHECK, check_secret_posture
 from app.checks.data_governance import (
     ALLOYDB_CHECK,
     API_KEYS_CHECK,
@@ -223,6 +225,15 @@ def build_check_plan(scope, scope_id, job_id, all_projects, active_zones, active
         CheckSpec("Security & Identity", EXPOSURE_CHECK, check_serverless_posture, (scope, scope_id, job_id)),
         CheckSpec("Security & Identity", ARMOR_CHECK, check_edge_security, (scope, scope_id, job_id)),
         CheckSpec("Security & Identity", SCANNING_CHECK, check_container_scanning, (scope, scope_id, job_id)),
+        # v18.7: folders, keys and privileged grants — Folder Primitive Roles from the folders under the scope (fresh policies), Privileged Grants
+        # (split: the organization's grants, redundancy, deny policies and the organization's and folders' PAM entitlements in the scope shard; the
+        # projects' entitlements per shard), Secret Access Scope + Secret Manager Posture from one IAM search and one resource search, Custom Roles
+        # With IAM Powers (split: the organization's roles in the scope shard, the projects' per shard; holders from the IAM search).
+        # User-Managed Keys is the second record of Service Account Key Rotation (same listing).
+        CheckSpec("Security & Identity", FOLDER_ROLES_CHECK, check_folder_roles, (scope, scope_id, job_id)),
+        CheckSpec("Security & Identity", PRIVILEGED_GRANTS_CHECK, check_privileged_grants, (scope, scope_id, all_projects, job_id)),
+        CheckSpec("Security & Identity", SECRET_SCOPE_CHECK, check_secret_posture, (scope, scope_id, job_id)),
+        CheckSpec("Security & Identity", CUSTOM_ROLES_CHECK, check_custom_roles, (scope, scope_id, all_projects, job_id)),
     ]
 
     if scope == 'organization':
@@ -256,6 +267,7 @@ SCOPE_LEVEL_CHECKS = frozenset({
     BIGQUERY_CHECK, SQL_FLAGS_CHECK, ALLOYDB_CHECK, KMS_CHECK, API_KEYS_CHECK,  # v18.4: one listing each
     VM_SA_CHECK, SA_PRIVILEGES_CHECK,  # v18.5: one listing each (two records each: VM Hardening, External Principals)
     EXPOSURE_CHECK, ARMOR_CHECK, SCANNING_CHECK,  # v18.6: one listing each (two records each for the first two: Serverless Service Accounts, SSL Certificate Health)
+    FOLDER_ROLES_CHECK, SECRET_SCOPE_CHECK,  # v18.7: the folders under the scope; one IAM search + one resource search (two records: Secret Manager Posture)
 })
 # The checks that do both: scope-wide work plus per-project work. Shards split them
 # with keyword flags: the scope shard runs the first set, the project shards the second
@@ -268,6 +280,10 @@ SPLIT_CHECKS = {  # in plan order
     "Open Firewall Rules": (("organization", "folder", "project"), {"project_rules": False}, {"policies": False}),
     MISCELLANEOUS_CHECK: (("organization",), {"project_checks": False}, {"org_insights": False}),
     IAM_CHECK: (("organization", "folder"), {"project_level": False}, {"scope_level": False}),
+    # v18.7: the organization's grants, deny policies and the organization's and folders' PAM entitlements in the scope shard, the projects'
+    # entitlements per project shard; the organization's custom roles in the scope shard, the projects' per shard.
+    PRIVILEGED_GRANTS_CHECK: (("organization", "folder", "project"), {"project_level": False}, {"scope_level": False}),
+    CUSTOM_ROLES_CHECK: (("organization", "folder", "project"), {"project_level": False}, {"scope_level": False}),
 }
 
 

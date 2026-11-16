@@ -90,6 +90,9 @@ CATEGORY_MAP = {
     # v18.6: serverless and edge exposure
     "Serverless Exposure": "Security & Identity", "Serverless Service Accounts": "Security & Identity", "Cloud Armor Policy Content": "Security & Identity",
     "SSL Certificate Health": "Reliability & Resilience", "Container Scanning Enabled": "Security & Identity",
+    # v18.7: folders, keys and privileged grants
+    "Folder Primitive Roles": "Security & Identity", "Privileged Grants": "Security & Identity", "Secret Access Scope": "Security & Identity",
+    "Secret Manager Posture": "Security & Identity", "Custom Roles With IAM Powers": "Security & Identity", "User-Managed Keys": "Security & Identity",
     "Service Account Impersonation": "Security & Identity", "VPC Service Controls Coverage": "Security & Identity",
 
     # B2: error results. These names are only written when a check fails; the

@@ -111,6 +111,8 @@ def test_hybrid_rows_of_the_production_gateway_and_of_a_redundant_one():
     # Two established tunnels on one BGP peer: the second link carries no routes.
     one_peer = edge.hybrid_rows(edge.by_kind(redundant[:3] + [router(peers=1)]))
     assert [(r['Resource'], r['Issue'], r['_status']) for r in one_peer] == [('Cloud Router vpn', 'One BGP session for two links.', IR)]
+    # v18.7 (a WLM-diff verification item): a NAT-only router — no tunnel, no attachment — is never a redundancy row, whatever its peers.
+    assert edge.hybrid_rows(edge.by_kind([router('nat-only', peers=1, nats=[PROD_NAT]), router('bare', peers=0)])) == []
     # A gateway without any tunnel; a Classic gateway.
     bare = edge.hybrid_rows(edge.by_kind([gateway('idle'), asset('regions/asia-south1/targetVpnGateways/old', {'name': 'old', 'network': f'{P}/global/networks/n'})]))
     assert [(r['Issue'], r['_status']) for r in bare] == [('HA VPN gateway without a tunnel.', AR), ('Classic VPN gateway.', IR)]

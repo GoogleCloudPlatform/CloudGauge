@@ -68,6 +68,7 @@ API_LATENCY_SCALE = {
 LATENCY_SIGMA = 0.45  # log-normal spread: p95 is about 2x the median
 PASSTHROUGH_SERVICES = (("run", "v1"),)  # infrastructure APIs the synthetic provider never fakes (v18.6: Cloud Run v2 is faked for the serverless checks)
 PAGE_SIZE = 100
+SYNTHETIC_CUSTOM_ROLE = "deployer"  # v18.7: the project-level custom role the world draws (with or without IAM powers, retired or not)
 COST_RECOMMENDER_IDS = {rec_id: check for check, (rec_id, _) in COST_RECOMMENDERS.items()}
 NETWORK_INSIGHT_IDS = {insight_id: check for check, insight_id in NETWORK_INSIGHT_TYPES.items()}
 UNATTENDED_RECOMMENDER = "google.resourcemanager.projectUtilization.Recommender"
@@ -345,7 +346,23 @@ class SyntheticGcp:
         for role, member in profile.primitive_bindings:
             by_role.setdefault(role, []).append(member)
         bindings += [{"role": role, "members": members} for role, members in by_role.items()]
-        return bindings + self._project_level_impersonation(profile) + self._posture_bindings(profile)
+        return bindings + self._project_level_impersonation(profile) + self._posture_bindings(profile) + self._privilege_bindings(profile)
+
+    @staticmethod
+    def _privilege_bindings(profile):
+        """v18.7: the bindings the folder, grant, secret and custom-role rules read — resource-wide secret roles, the holder of the project's
+        custom role (``powers-held`` / ``retired-bound``), and the standing grant that duplicates the project's entitlement."""
+        privileges = profile.privileges
+        if privileges is None:
+            return []
+        by_role = {}
+        for role, member in privileges.secret_roles:
+            by_role.setdefault(role, []).append(member)
+        if privileges.custom_role in ("powers-held", "retired-bound"):
+            by_role.setdefault(f"projects/{profile.project_id}/roles/{SYNTHETIC_CUSTOM_ROLE}", []).append(f"serviceAccount:ci@{profile.project_id}.iam.gserviceaccount.com")
+        if privileges.pam == "unapproved-standing":
+            by_role.setdefault("roles/compute.admin", []).append("user:oncall@example.com")
+        return [{"role": role, "members": members} for role, members in by_role.items()]
 
     @staticmethod
     def _posture_bindings(profile):
@@ -401,7 +418,10 @@ class SyntheticGcp:
 
     def _h_cloudresourcemanager_folders_get(self, kw, project_id):
         self.call("cloudresourcemanager", "folders.get", style="http")
-        return {"name": kw["name"], "parent": f"organizations/{self.world.org_id}", "displayName": "Synthetic folder"}
+        return {"name": kw["name"], "parent": f"organizations/{self.world.org_id}", "displayName": self._folder_display(kw["name"].rsplit("/", 1)[-1])}
+
+    def _folder_display(self, folder_id):
+        return f"Synthetic folder {self.world.folder_ids.index(folder_id)}" if folder_id in self.world.folder_ids else "Synthetic folder"
 
     def _h_cloudresourcemanager_projects_list(self, kw, project_id):
         """v3 ``projects.list``: a folder's direct children (the world has one level of folders). The folder
@@ -729,9 +749,61 @@ class SyntheticGcp:
         return {"contacts": list(self.ORG_CONTACTS)}
 
     def _h_cloudresourcemanager_folders_getIamPolicy(self, kw, project_id):
-        """A folder's IAM policy (v3; v18.1): no bindings of note, no audit configuration."""
+        """A folder's IAM policy (v3; v18.1): no audit configuration; v18.7: the folder's own bindings (``world.folder_iam_bindings``)."""
         self.call("cloudresourcemanager", "folders.getIamPolicy", style="http")
-        return {"bindings": [], "etag": "synthetic"}
+        return {"bindings": self.world.folder_iam_bindings(str(kw.get("resource", "")).rsplit("/", 1)[-1]), "etag": "synthetic"}
+
+    # --- v18.7: custom roles, Privileged Access Manager, deny policies ---
+
+    def _h_iam_organizations_roles_list(self, kw, project_id):
+        self.call("iam", "organizations.roles.list", style="http")
+        return {"roles": self.world.org_custom_roles()}
+
+    def _h_iam_projects_roles_list(self, kw, project_id):
+        """The project's custom roles (``view=FULL``): the v17.1 token-minting role when the impersonation table binds it, and the v18.7 role."""
+        self.call("iam", "projects.roles.list", project_id=project_id, style="http")
+        profile, roles = self.world.project(project_id), []
+        if profile.custom_role_bindings:
+            roles.append({"name": f"projects/{project_id}/roles/tokenMinter", "title": "token minter", "stage": "GA", "includedPermissions": ["iam.serviceAccounts.getAccessToken", "iam.serviceAccounts.get"]})
+        kind = profile.privileges.custom_role if profile.privileges else ""
+        if kind in ("powers-held", "powers-dormant"):
+            roles.append({"name": f"projects/{project_id}/roles/{SYNTHETIC_CUSTOM_ROLE}", "title": "deployer", "stage": "GA", "includedPermissions": ["resourcemanager.projects.setIamPolicy", "run.services.update"]})
+        elif kind == "retired-bound":
+            roles.append({"name": f"projects/{project_id}/roles/{SYNTHETIC_CUSTOM_ROLE}", "title": "deployer", "stage": "DISABLED", "includedPermissions": ["run.services.update"]})
+        return {"roles": roles}
+
+    def _entitlement(self, profile):
+        kind = profile.privileges.pam if profile.privileges else ""
+        if not kind:
+            return None
+        body = {"name": f"projects/{profile.project_id}/locations/global/entitlements/jit-compute-admin", "state": "AVAILABLE", "maxRequestDuration": "3600s",
+                "eligibleUsers": [{"principals": ["user:oncall@example.com"]}], "requesterJustificationConfig": {"unstructured": {}},
+                "privilegedAccess": {"gcpIamAccess": {"resource": f"//cloudresourcemanager.googleapis.com/projects/{profile.project_id}", "resourceType": "cloudresourcemanager.googleapis.com/Project",
+                                                      "roleBindings": [{"role": "roles/compute.admin"}]}}}
+        if kind == "approved":
+            body["approvalWorkflow"] = {"manualApprovals": {"requireApproverJustification": True, "steps": [{"approvers": [{"principals": ["group:cloud-admins@example.com"]}], "approvalsNeeded": 1}]}}
+        return body
+
+    def _h_privilegedaccessmanager_projects_locations_entitlements_list(self, kw, project_id):
+        """A project's entitlements; where the world draws none, the API is not enabled (the real API's SERVICE_DISABLED answer)."""
+        self.call("privilegedaccessmanager", "projects.locations.entitlements.list", project_id=project_id, style="http")
+        entitlement = self._entitlement(self.world.project(project_id))
+        if entitlement is None:
+            raise _http_error(403, f"Privileged Access Manager API has not been used in project {project_id} before or it is disabled. SERVICE_DISABLED")
+        return {"entitlements": [entitlement]}
+
+    def _h_privilegedaccessmanager_organizations_locations_entitlements_list(self, kw, project_id):
+        self.call("privilegedaccessmanager", "organizations.locations.entitlements.list", style="http")
+        return {}
+
+    def _h_privilegedaccessmanager_folders_locations_entitlements_list(self, kw, project_id):
+        self.call("privilegedaccessmanager", "folders.locations.entitlements.list", style="http")
+        return {}
+
+    def _h_iam_policies_listPolicies(self, kw, project_id):
+        """No IAM deny policy is attached to the synthetic organization (the Informational row)."""
+        self.call("iam", "policies.listPolicies", style="http")
+        return {}
 
     # --- Advisory Notifications ---
 
@@ -776,11 +848,12 @@ class SyntheticGcp:
         scope, asset_types = request["scope"], request.get("asset_types", [])
         folder_id = scope.split("/")[1] if scope.startswith("folders/") else None
         results = []
-        if "cloudresourcemanager.googleapis.com/Folder" in asset_types and folder_id is None:
-            results += [SimpleNamespace(name=f"//cloudresourcemanager.googleapis.com/folders/{fid}", display_name=f"Synthetic folder {i}",
-                                        asset_type="cloudresourcemanager.googleapis.com/Folder", project="",
+        if "cloudresourcemanager.googleapis.com/Folder" in asset_types:
+            folder_ids = [folder_id] if folder_id else ([] if scope.startswith("projects/") else list(self.world.folder_ids))  # v18.7: a folder scope includes itself
+            results += [SimpleNamespace(name=f"//cloudresourcemanager.googleapis.com/folders/{fid}", display_name=self._folder_display(fid),
+                                        asset_type="cloudresourcemanager.googleapis.com/Folder", project="", state="ACTIVE",
                                         parent_full_resource_name=f"//cloudresourcemanager.googleapis.com/organizations/{self.world.org_id}")
-                        for i, fid in enumerate(self.world.folder_ids)]
+                        for fid in folder_ids]
         if "cloudresourcemanager.googleapis.com/Project" in asset_types:
             results += [SimpleNamespace(name=f"//cloudresourcemanager.googleapis.com/projects/{p.project_id}", display_name=p.display_name,
                                         asset_type="cloudresourcemanager.googleapis.com/Project", project=f"projects/{p.project_number}",
@@ -802,7 +875,31 @@ class SyntheticGcp:
                 results += self._repository_results(profiles)
             if "serviceusage.googleapis.com/Service" in asset_types:
                 results += self._enabled_service_results(profiles, str(request.get("query") or ""))
+        if "secretmanager.googleapis.com/Secret" in asset_types:  # v18.7: the secrets and their versions
+            project_id = scope.split("/", 1)[1] if scope.startswith("projects/") else None
+            results += self._secret_results([self.world.project(project_id)] if project_id else self.world.projects(folder_id))
         self.call("asset", "searchAllResources", pages=max(1, math.ceil(len(results) / PAGE_SIZE)))
+        return results
+
+    def _secret_results(self, profiles):
+        """``secretmanager.googleapis.com/Secret`` and ``SecretVersion`` search results, named by project number, with the folder and the
+        resource content the index carries: replication, rotation; a version's state and creation time."""
+        results, now = [], datetime.now(timezone.utc)
+        for p in profiles:
+            privileges = p.privileges
+            for name, kind in (privileges.secrets if privileges else ()):
+                secret_name = f"projects/{p.project_number}/secrets/{name}"
+                common = {"project": f"projects/{p.project_number}", "folders": [f"folders/{p.folder_id}"], "organization": f"organizations/{self.world.org_id}"}
+                data = {"name": secret_name, "replication": {"userManaged": {"replicas": [{"location": "us-central1"}]}} if kind == "regional" else {"automatic": {}},
+                        "createTime": _iso(400), "etag": "s"}
+                if kind == "rotated":
+                    data["rotation"] = {"nextRotationTime": (now + timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%SZ"), "rotationPeriod": "7776000s"}
+                results.append(SimpleNamespace(name=f"//secretmanager.googleapis.com/{secret_name}", asset_type="secretmanager.googleapis.com/Secret", create_time=now - timedelta(days=400),
+                                               versioned_resources=[{"version": "v1", "resource": data}], **common))
+                age, state = {"fresh": 20, "stale": 200, "rotated": 300, "regional": 200, "empty": 10}[kind], "DESTROYED" if kind == "empty" else "ENABLED"
+                version = {"name": f"{secret_name}/versions/1", "state": state, "createTime": _iso(age)}
+                results.append(SimpleNamespace(name=f"//secretmanager.googleapis.com/{secret_name}/versions/1", asset_type="secretmanager.googleapis.com/SecretVersion", create_time=now - timedelta(days=age),
+                                               versioned_resources=[{"version": "v1", "resource": version}], **common))
         return results
 
     def list_assets(self, request):
@@ -862,7 +959,7 @@ class SyntheticGcp:
         if with_org and "cloudresourcemanager.googleapis.com/Organization" in asset_types:
             found.append(result(org, "Organization", self.world.org_iam_bindings()))
         if "cloudresourcemanager.googleapis.com/Folder" in asset_types:
-            found += [result(f"folders/{fid}", "Folder", [], folders=[f"folders/{fid}"]) for fid in folders]
+            found += [result(f"folders/{fid}", "Folder", self.world.folder_iam_bindings(fid), folders=[f"folders/{fid}"]) for fid in folders]  # v18.7: the folders' own bindings
         if "cloudresourcemanager.googleapis.com/Project" in asset_types:
             found += [result(f"projects/{p.project_id}", "Project", self._project_policy_bindings(p), project=f"projects/{p.project_number}", folders=[f"folders/{p.folder_id}"])
                       for p in profiles]
@@ -1327,6 +1424,15 @@ class SyntheticGcp:
         results = []
         if not query and any(t.startswith("cloudresourcemanager.googleapis.com/") for t in request.get("asset_types") or []):  # v18.5: every policy under the scope
             results = self._policy_results(scope, set(request.get("asset_types") or []))
+            self.call("asset", "searchAllIamPolicies", pages=max(1, math.ceil(len(results) / PAGE_SIZE)))
+            return results
+        if query.startswith("roles:(roles/secretmanager") or query.startswith('roles:("'):  # v18.7: the secret roles; the holders of named custom roles
+            wanted = set(re.findall(r'"([^"]+)"', query)) if query.startswith('roles:("') else None
+            results = []
+            for fact in self._policy_results(scope, {"cloudresourcemanager.googleapis.com/Organization", "cloudresourcemanager.googleapis.com/Folder", "cloudresourcemanager.googleapis.com/Project"}):
+                kept = [b for b in fact.policy.bindings if (b.role in wanted if wanted is not None else b.role.startswith("roles/secretmanager."))]
+                if kept:
+                    results.append(SimpleNamespace(**{**vars(fact), "policy": SimpleNamespace(bindings=kept)}))
             self.call("asset", "searchAllIamPolicies", pages=max(1, math.ceil(len(results) / PAGE_SIZE)))
             return results
         if query.startswith("memberTypes:") or query.startswith("roles:(roles/cloudkms"):  # v18.4: public access; KMS separation of duties

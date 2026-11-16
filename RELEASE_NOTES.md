@@ -8,7 +8,191 @@ the test suite running inside the image, a zero-traffic canary revision scanned
 against a real organization, promotion, and a production scan compared fact for
 fact with the previous version's report.
 
-Versions are the image tags (`v5` … `v18.6.1`); the commit is the one that shipped.
+Versions are the image tags (`v5` … `v18.7`); the commit is the one that shipped.
+
+## v18.7 — Folders, keys and privileged grants
+
+The seventh themed release, the second deduced from the google/skills mining
+and the Workload Manager catalogue diff: the IAM the report never read.
+Nothing judged folder-level Owner and Editor; nothing read who may create
+projects or reach billing at the organization, who can read every secret
+under a resource, which custom roles re-acquire the power to grant, or
+whether a just-in-time elevation path exists and is respected; and the key
+check saw only keys older than 90 days. Everything comes from reads the
+scanner's roles already allow — **fresh** where a fix should show on the next
+scan (folder and organization policies from Resource Manager, custom roles
+from the IAM API, entitlements from Privileged Access Manager, deny policies
+from IAM v2, keys from the IAM API), the inventory search for the folders,
+projects, secrets and versions, the IAM-policy search for the secret roles
+and the holders of custom roles. No new API, no new role.
+
+### Added
+
+- **Folder Primitive Roles** (Security & Identity, every scope): Owner or
+  Editor on a **folder**, by kind of holder — the project table of Primitive
+  Roles: a user-managed service account, a consumer account or a whole domain
+  **Action Required**; a person, a group, a default service account or a
+  deleted principal *Investigation* — and **Project Creator on a folder** (a
+  whole domain **Action Required**, a person *Investigation*, a group or a
+  service account the project-factory practice, listed). Every project below
+  the folder inherits the grant: the row counts them (`Projects below`). A
+  folder scan includes the scope folder itself; a project scan has none and
+  says so. Fresh `folders.getIamPolicy` (policy version 3) per folder; when a
+  read is refused the IAM-policy search's copy stands in and a line under
+  *Projects not checked* says so. Google-managed agents are never rows; a
+  public principal on a folder stays External Principals' Action Required
+  row. Rows `Folder, Principal, Type, Role, Projects below, Condition, Fix`
+  (`gcloud resource-manager folders remove-iam-policy-binding`).
+- **Privileged Grants** (Security & Identity, a split check): in an
+  organization scan, from the organization's policy — **Project Creator**
+  held by a whole domain or the public (**Action Required**: every account can
+  create projects), by a person (*Investigation*), by a group or an automation
+  account (the project-factory practice, listed); the **billing roles**
+  `billing.creator`, `billing.user`, `billing.viewer`, `billing.costsManager`
+  granted at the organization (they belong on the billing account:
+  *Investigation*; a domain or the public **Action Required**; `billing.admin`
+  stays Critical Org-Level Roles' row); **Organization Administrator
+  redundancy** — fewer than two principals holding the role without a
+  condition: **Action Required** (lockout), Informational when the one holder
+  is a group (its membership is not visible to the scanner); and one
+  Informational row when **no IAM deny policy** is attached to the
+  organization (metadata only — the rules would need `iam.denypolicies.get`).
+  Under every scope, the **Privileged Access Manager** entitlements of the
+  organization, its folders (scope shard) and its projects (project shards): an
+  entitlement that hands out an administrative role — the organization's
+  critical roles, the escalation roles, any `*.admin` — with **no approval
+  workflow** (*Investigation*, "self-approved elevation"), one that lasts over
+  24 hours or needs no justification (Informational), and a **standing grant
+  that duplicates an entitlement** — the same principal and role bound
+  unconditionally on the organization or the project where PAM would grant
+  them on request (**Action Required**; PAM's own grants are conditional and
+  never standing). A project without the PAM API is not a row and not a line.
+  Rows `Resource, Principal, Type, Role, Condition, Issue, Detail, Fix`
+  (`remove-iam-policy-binding` with the billing-account alternative;
+  `add-iam-policy-binding` for a second administrator; `gcloud pam
+  entitlements export … update`; `gcloud iam policies create … --kind=denypolicies`).
+- **Secret Access Scope** (Security & Identity, every scope):
+  `secretmanager.admin`, `secretmanager.secretAccessor` or
+  `secretmanager.secretVersionManager` granted **resource-wide** — on a
+  project, a folder or the organization — rather than on a secret: to the
+  public or a whole domain **Action Required**; to a service account
+  *Investigation* (every workload and key of the account can read every secret
+  under the resource); to a person or a group *Investigation* with at least one
+  secret in reach, Informational with none. One IAM-policy search for the
+  three roles on organizations, folders and projects; the secrets in reach
+  counted from the inventory (a project's by number, a folder's descendants',
+  the organization's all). `secretmanager.viewer` (metadata only) is not
+  judged; Owner is Primitive Roles' row. Rows `Resource, Principal, Type,
+  Role, Secrets in reach, Condition, Fix` — the removal plus the per-secret
+  `gcloud secrets add-iam-policy-binding`.
+- **Secret Manager Posture** (Security & Identity, every scope, the same
+  function): from the inventory's copy of the secrets and their versions (the
+  Secret Manager API itself would need `roles/secretmanager.viewer`, which the
+  account does not hold; the inventory never carries payloads, and the rows say
+  *from the inventory*): a secret whose **newest enabled version is older than
+  90 days with no rotation schedule** (*Investigation* — a static credential
+  whose exposure nobody would notice; the version's age is the fact, not the
+  secret's, so adding a version is the fix); **user-managed replication in one
+  location** (Informational — often a residency choice, immutable in place) and
+  a secret with **no enabled version** (Informational, housekeeping). Rows
+  `Project, Secret, Issue, Detail, Fix` (`gcloud secrets versions add … &&
+  versions disable OLD`, or `gcloud secrets update --rotation-period`).
+- **Custom Roles With IAM Powers** (Security & Identity, a split check): the
+  organization's custom roles (organization scans) and every project's, read
+  fresh with `view=FULL`, deleted ones included; a role carrying a permission
+  that changes who may do what — any `*.setIamPolicy`,
+  `iam.serviceAccountKeys.create`, `iam.serviceAccounts.actAs` /
+  `getAccessToken` / `signBlob` / `signJwt` / `implicitDelegation`,
+  `iam.roles.create` / `update`, `orgpolicy.policy.set` — is *Investigation*
+  when a principal that is not a Google-managed agent holds it on an
+  organization, folder or project under the scope (one IAM-policy search per
+  twenty roles names the holders), Informational when dormant; a **retired**
+  role (disabled, deprecated or soft-deleted) still bound, Informational. An
+  unset stage reads as ALPHA, as the API documents. Rows `Role, Defined at,
+  Stage, Powers, Holders, Issue, Detail, Fix` (`gcloud iam roles update
+  --remove-permissions`, `roles delete`, the removal per holder). Predefined
+  roles are Service Account Privileges' and Critical Org-Level Roles' ground.
+- **User-Managed Keys** (Security & Identity, per project): the second record
+  of the key listing Service Account Key Rotation already pages — one row per
+  service account with **any user-managed key that can still authenticate**
+  (not disabled, not expired, the account enabled): `Keys`, `Oldest (days)`,
+  `Expiry` (`never` ×N and the earliest dated one), `Origin` (created in
+  Google Cloud / uploaded) — *Investigation* (CIS 1.4; Security Health
+  Analytics' `USER_MANAGED_SERVICE_ACCOUNT_KEY`): a long-lived credential that
+  works from anywhere for whoever holds the file. The Fix disables the oldest
+  key once the caller uses an attached service account, impersonation or
+  Workload Identity Federation, then names `iam.disableServiceAccountKeyCreation`
+  and `iam.serviceAccountKeyExpiryHours` so none come back. The rotation rows
+  (keys older than 90 days, **Action Required**) are unchanged.
+
+### Changed
+
+- **Service Account Key Rotation** writes two records from one listing (its
+  own rows unchanged); its all-clear text is unchanged.
+- The synthetic organization draws folder bindings (a person as Owner and a
+  project-factory group on the first folder, an Editor service account on the
+  second), domain-wide project creation, a billing role and an organization
+  custom role with IAM powers at the organization, and per project
+  resource-wide secret roles, secrets in five shapes, a custom role held,
+  dormant or retired, and a PAM entitlement approved, unapproved or duplicated
+  by a standing grant (drawn last, so earlier releases' worlds are unchanged);
+  the provider fakes the folder policies, the IAM roles listings, Privileged
+  Access Manager (the API disabled where the world draws no entitlement, as the
+  real API answers), the IAM v2 deny-policy listing, the secret and version
+  searches, the two IAM-policy queries.
+- README: the six catalogue entries and the SA Key Rotation line, the
+  scope-shard list, the scope note, the fixes paragraph, the project
+  structure, the roadmap row. `VERSION = "18.7"`.
+
+### Tests
+
+- `tests/test_privileges.py`: policy bindings and the folder label; the
+  folder and project searches from the index; folder rows by kind and role
+  (incl. an unknown organization domain); the folder check end to end — fresh
+  policies, the inventory's copy for a refused read with its line, a folder
+  scan, a project scan, a listing that fails; project creation, billing and
+  the redundancy row by kind (two administrators, one group, one person with
+  PAM's conditional grant excluded, none); the deny row; entitlement facts and
+  rows (approval, duration, justification, state, the admin tier, organization
+  and project fixes); standing grants against conditional and unrelated
+  bindings; Privileged Grants end to end — organization, folder and project
+  entitlements, the disabled API, a failing project, the project policy read
+  only where entitlements exist — and its two halves, a folder scan, the
+  organization read refused, the deny listing failing; role facts and powers
+  (`setIamPolicy` suffixes, the unset stage); custom-role rows by holder and
+  stage; Custom Roles end to end — the quoted holders query, the halves, a
+  folder scan, nothing flagged, the holders search failing, the organization's
+  roles refused; the split checks' halves in the scope and project plans.
+- `tests/test_secrets.py`: secrets and versions from the search; reach per
+  level; scope rows by kind, reach and condition with the per-secret fix;
+  posture rows (the newest *enabled* version, a schedule, single-location
+  replication, no enabled version, the 90-day edge, numbers without project
+  names); the check end to end with the side reads failing, nothing in scope,
+  a search that fails.
+- `tests/test_revalidated_checks.py`: the User-Managed Keys roll-up (count,
+  oldest, expiry, origin, the disabled/expired/account-disabled exclusions)
+  and the two records from one listing; `tests/test_worker.py`,
+  `tests/test_fanout.py`, `tests/test_synthetic.py`,
+  `tests/test_category_consistency.py`: the plan, the scope shard, the split
+  halves, the names.
+- 1,186 tests.
+
+### Upgrade notes
+
+- No new role and no new API: `resourcemanager.folders.getIamPolicy`,
+  `iam.roles.list`, `privilegedaccessmanager.entitlements.list`,
+  `iam.denypolicies.list` and the key listing are in
+  `roles/iam.securityReviewer`, the searches under `roles/cloudasset.viewer` —
+  verified by impersonating the service account before the release. The
+  Privileged Access Manager client library has no bundled discovery document:
+  the client fetches it at first use (`static_discovery=False`); a project
+  without the PAM API answers `SERVICE_DISABLED`, which the check reads as
+  "not used there". Redeploy with `tools/deploy.sh` or `terraform apply` as
+  usual.
+- The first scan after the upgrade shows the five new checks and the new
+  record as *new check* on the Changes card; nothing is *rule changed*.
+
+---
 
 ## v18.6.1 — Request hardening
 
@@ -3022,7 +3206,7 @@ performance; modernization; enablement; roadmap and roadblocks).
 | **v18.4** | Data governance | *Shipped.* **BigQuery Governance** (public datasets and tables, the time-travel window), **Cloud SQL Flags** (the CIS flag pack of each engine, unset flags read as their defaults, the patch line keeping the flags already set), **AlloyDB Posture** (backups, zonal primaries, public IP, TLS, log flags), **KMS Keys** (90-day rotation of symmetric keys, public rings and keys, separation of duties), **API Keys** (application and API restrictions, age). No new role, no new API. |
 | **v18.5** | VM hardening & identities | *Shipped.* **VM Service Accounts** (the default account, by its roles and scopes), **VM Hardening** (OS Login and project-wide keys per project; serial console, IP forwarding, Shielded VM and Secure Boot per instance), **Service Account Privileges** (administrative roles on service accounts, separation of duties), **External Principals** (users, groups and domains outside the organization and `TRUSTED_DOMAINS`, consumer accounts, deleted principals, public folders and images), **Unused Service Accounts** (the IAM recommender's 90-day insights). No new role, no new API. |
 | **v18.6** | Serverless and edge exposure | *Shipped.* **Serverless Exposure** (public Cloud Run services and functions — by binding or by the disabled invoker check — and services reachable around their load balancer), **Serverless Service Accounts** (the default account on Cloud Run and Cloud Functions, by its roles), **Cloud Armor Policy Content** (legacy rulesets, policies that protect nothing, preview-only WAFs, the rule quota), **SSL Certificate Health** (expiring self-managed and failed Google-managed certificates), **Container Scanning Enabled** (Artifact Analysis off beside Docker repositories); IAP over HTTP in Load Balancer Edge; the time-travel row graded by billing model, a Note on the contested Cloud SQL flags, zonal buckets out of Cloud Storage Versioning. The first release deduced from the google/skills mining and the Workload Manager catalogue diff. No new role, no new API. |
-| **v18.7** | Folders, keys and privileged grants | **Folder Primitive Roles** (Owner/Editor on folders — nothing reads them today), **Privileged Grant Inventory** (project creators and billing roles at the organization, `domain:` grants, fewer than two Organization Admins), **Secret Access Scope** (secret-accessor and admin roles granted resource-wide, with the secrets in reach; Secret Manager replication and rotation), **Service Account Key Lifecycle** (any active user-managed key, never-expiring keys, validity above 90 days), **Custom Roles With IAM Powers**, **Data Admin Role Sprawl**. No new role, no new API. |
+| **v18.7** | Folders, keys and privileged grants | *Shipped.* **Folder Primitive Roles** (Owner, Editor and Project Creator on folders, with the projects below), **Privileged Grants** (domain-wide project creation and billing roles at the organization, Organization Administrator redundancy, no deny policy; Privileged Access Manager entitlements without approval and the standing grants that duplicate them), **Secret Access Scope** (secret roles granted resource-wide, with the secrets in reach), **Secret Manager Posture** (stale secrets without a rotation schedule, single-location replication, empty secrets), **Custom Roles With IAM Powers** (custom roles that grant, impersonate or write policies, with their holders; retired roles still bound), **User-Managed Keys** (every account with a live key, beside the rotation rows). The second release deduced from the google/skills mining and the Workload Manager catalogue diff. No new role, no new API. |
 | **v18.8** | Forecasts, budgets and spend | A **spend briefing** from the organization's **billing export to BigQuery** (`BILLING_EXPORT=<project>.<dataset>`, a dataset-level read, no billing-account IAM; *Informational — not configured* when unset): spend by project and service, month-to-date against last month, a trend forecast, week-over-week anomaly flags, the Scorecard's Efficiency line grounded in real spend; **commitment coverage** from the export's credits; the spend-based commitment recommendations from the Recommender export once that export carries billing-account rows; plus the config-level cost rows the skills mining found — log retention, DEBUG volume and flow-log sampling, serverless VPC connectors, versioning without pruning, uncovered BigQuery baseline slots, staging datasets without expiry, non-production Cloud SQL HA, backend buckets without CDN, resource labels beyond projects, GKE cost allocation. Budget coverage (billing-account IAM) and Capacity Planner forecasts stay optional-later. |
 | **v18.9** | Logging pipeline and alerting hygiene | **Audit Log Pipeline** (sink filters missing audit log types, destination retention and lock, the writer's grant, export errors), **Duplicate Log Routing** (central sink plus untouched `_Default` sinks; free audit streams re-stored), **Project Log Routing** (`_Default` disabled, Data Access logs in the default view, Log Analytics), **Alert Notification Channels** (policies routed to nobody, unverified or disabled channels, undeliverable Pub/Sub channels), **Synthetic and SLO Coverage**. No new role, no new API. |
 | **v19** | Footprint and detection | A **Platform Footprint** page (what runs where: services, regions, versions); the detective half of the SSRF chain over Cloud Logging — **GKE control-plane activity** (exec, webhooks, RBAC and DaemonSet changes by service accounts or external IPs), **service-account activity signals**; **Findings and vulnerabilities** — Security Command Center active findings by category (the v2 API answers under the roles already held), detector services and modules off, findings export, VM Manager OS vulnerabilities with a fix available, exposed privileged VMs (the join of three existing checks); a **Support cases** briefing (its own API and role, its own decision); the deprecations recommender, once confirmed to exist. |

@@ -396,6 +396,45 @@ def stale_key_row(project_id, account, key, now=None):
             "_status": ACTION_REQUIRED}
 
 
+# User-Managed Keys (v18.7): the accounts that have any key that can still authenticate — the keyless practice, beside the rotation rows.
+USER_KEYS_CHECK = "User-Managed Keys"
+USER_KEYS_ALL_CLEAR = "No service account has a user-managed key that can still authenticate."
+
+
+def active_keys_row(project_id, account, keys, now=None):
+    """The roll-up row of one account's user-managed keys that can still authenticate (not disabled, not expired, account enabled), or ``None``.
+
+    Keys (count), Oldest (days), Expiry (``never`` ×N and the earliest dated expiry) and Origin (created in Google Cloud / uploaded):
+    the facts the rotation rows do not carry. Investigation Recommended: a long-lived credential anyone holding the file can use
+    from anywhere (CIS 1.4; Security Health Analytics' ``USER_MANAGED_SERVICE_ACCOUNT_KEY``); the fix is the keyless path.
+    """
+    now = now or datetime.now(timezone.utc)
+    if account.get('disabled'):
+        return None
+    live = []
+    for key in keys:
+        created, expires = _parse_time(key.get('validAfterTime')), _parse_time(key.get('validBeforeTime'))
+        if created is None or key.get('disabled') or (expires is not None and expires <= now):
+            continue
+        live.append((created, expires, key.get('keyOrigin') == 'USER_PROVIDED', str(key.get('name', '')).rsplit('/', 1)[-1]))
+    if not live:
+        return None
+    live.sort(key=lambda item: item[0])
+    email = account.get('email') or str(account.get('name', '')).rsplit('/', 1)[-1]
+    never = sum(1 for _, expires, _, _ in live if expires is None or expires.strftime('%Y-%m-%d') >= KEY_NEVER_EXPIRES)
+    dated = sorted(expires for _, expires, _, _ in live if expires is not None and expires.strftime('%Y-%m-%d') < KEY_NEVER_EXPIRES)
+    uploaded = sum(1 for _, _, up, _ in live if up)
+    expiry = (("never" if never == len(live) else f"{never} never") + (f", earliest {dated[0].strftime('%Y-%m-%d')}" if dated and never else "")) if never else f"earliest {dated[0].strftime('%Y-%m-%d')}"
+    origin = "uploaded" if uploaded == len(live) else "created in Google Cloud" if not uploaded else f"{len(live) - uploaded} created in Google Cloud, {uploaded} uploaded"
+    return {"Project": project_id, "Service Account": email, "Keys": len(live), "Oldest (days)": (now - live[0][0]).days, "Expiry": expiry, "Origin": origin,
+            "Issue": "User-managed keys exist.",
+            "Detail": ("A key is a long-lived credential that works from anywhere for whoever holds the file; an attached service account, impersonation or "
+                       "Workload Identity Federation needs none (CIS 1.4)." + (" A key that never expires outlives every rotation policy." if never else "")),
+            "Fix": (f"gcloud iam service-accounts keys disable {live[0][3]} --iam-account={email} --project={project_id}  # once the caller uses an attached service account, "
+                    "impersonation or Workload Identity Federation; then delete; enforce iam.disableServiceAccountKeyCreation and iam.serviceAccountKeyExpiryHours so none come back"),
+            "_status": INVESTIGATION}
+
+
 def check_sa_key_rotation(scope_id, all_projects, job_id, *, sink):
     """
     Scans every project's user-managed service account keys for keys older than 90 days.
@@ -404,10 +443,13 @@ def check_sa_key_rotation(scope_id, all_projects, job_id, *, sink):
     cannot authenticate); each row names the key, its age, expiry and origin, and carries the
     ``gcloud`` line that disables it; a project whose keys could not be listed is under
     *Projects not checked* instead of turning the check Action Required with an error row.
+
+    v18.7: the same listing writes a second record, *User-Managed Keys* — one row per account
+    that has any key that can still authenticate (``active_keys_row``): the keyless practice.
     """
-    print(f"🔑 [{job_id}] Checking for {SA_KEYS_CHECK}...")
+    print(f"🔑 [{job_id}] Checking for {SA_KEYS_CHECK} and {USER_KEYS_CHECK}...")
     skipped = NotChecked(SA_KEYS_CHECK)
-    all_findings = []
+    all_findings, account_rows = [], []
     for project in all_projects:
         project_id = project['projectId']
         try:
@@ -421,9 +463,11 @@ def check_sa_key_rotation(scope_id, all_projects, job_id, *, sink):
             for account in accounts:
                 keys = iam_service.projects().serviceAccounts().keys().list(name=account['name'], keyTypes=['USER_MANAGED']).execute().get('keys', [])
                 all_findings.extend(row for row in (stale_key_row(project_id, account, key) for key in keys) if row)
+                account_rows.extend(row for row in [active_keys_row(project_id, account, keys)] if row)
         except Exception as e:
             skipped.add(project_id, e)
     sink.write_finding(job_id, SA_KEYS_CHECK.replace(" ", "_"), result_record(SA_KEYS_CHECK, all_findings, SA_KEYS_ALL_CLEAR))
+    sink.write_finding(job_id, USER_KEYS_CHECK.replace(" ", "_"), result_record(USER_KEYS_CHECK, account_rows, USER_KEYS_ALL_CLEAR))
     skipped.write(sink, job_id)
 
 
@@ -618,16 +662,21 @@ def open_firewall_rows(project_id, rules):
     """The rows of a project's VPC firewall rules that are enabled, ingress, *allow*, and open to the internet.
 
     A deny rule from ``0.0.0.0/0`` is the hardening pattern, not a finding; an egress rule's source ranges mean nothing.
+    v18.7: an ingress rule with **no** source ranges, source tags or source service accounts applies to every source — the
+    API's default, which the console and ``gcloud`` spell out as ``0.0.0.0/0`` but the API and Terraform may leave empty — and
+    is a row like one that says so (its ``Source Ranges`` reads ``any (none specified)``).
     """
     rows = []
     for rule in rules:
         if rule.get("disabled") or str(rule.get("direction", "INGRESS")).upper() != "INGRESS" or not rule.get("allowed"):
             continue
-        open_ranges = [r for r in rule.get("sourceRanges", []) if r in INTERNET_RANGES]
-        if not open_ranges:
+        sources = rule.get("sourceRanges", []) or []
+        open_ranges = [r for r in sources if r in INTERNET_RANGES]
+        implicit = not sources and not rule.get("sourceTags") and not rule.get("sourceServiceAccounts")
+        if not open_ranges and not implicit:
             continue
         rows.append({"Project": project_id, "Rule": rule.get("name"), "VPC": str(rule.get("network", "")).split("/")[-1],
-                     "Protocols/Ports": rule_protocols(rule), "Source Ranges": ", ".join(rule.get("sourceRanges", [])),
+                     "Protocols/Ports": rule_protocols(rule), "Source Ranges": ", ".join(sources) if sources else "any (none specified)",
                      "Targets": firewall_targets(rule), "Priority": rule.get("priority", 1000),
                      "Fix": firewall_fix(project_id, rule), "_status": open_rule_status(rule)})
     return rows
@@ -643,6 +692,9 @@ def policy_rule_as_vpc_rule(policy, rule):
             "direction": rule.get("direction", "INGRESS"), "disabled": rule.get("disabled", False),
             "allowed": [{"IPProtocol": c.get("ipProtocol"), "ports": c.get("ports") or []} for c in (match.get("layer4Configs") or [])] if str(rule.get("action") or "").lower() == "allow" else [],
             "sourceRanges": match.get("srcIpRanges") or [], "priority": rule.get("priority"),
+            # v18.7: the other source matchers (secure tags, FQDNs, region codes, threat intelligence, address groups) stand in for source
+            # tags, so a rule that matches by one of them is not read as "every source" when its IP ranges are empty.
+            "sourceTags": [t.get("name", "") for t in (match.get("srcSecureTags") or [])] + [str(v) for key in ("srcFqdns", "srcRegionCodes", "srcThreatIntelligences", "srcAddressGroups") for v in (match.get(key) or [])],
             "targetServiceAccounts": rule.get("targetServiceAccounts") or [], "targetTags": [t.get("name", "") for t in (rule.get("targetSecureTags") or [])]}
 
 
@@ -1168,4 +1220,5 @@ def check_iam_recommendations(scope, scope_id, all_projects, job_id, *, sink, sc
 # The legacy checks of this module that write through ``result_record`` (v18); each name is a key of CATEGORY_MAP
 # (tests/test_category_consistency.py resolves the ``Check`` values of the shared writer from this table).
 REVALIDATED_CHECKS = (CRITICAL_ROLES_CHECK, PUBLIC_ORG_CHECK, PRIMITIVE_ROLES_CHECK, SA_KEYS_CHECK, PUBLIC_BUCKETS_CHECK,
-                      FIREWALL_CHECK, SQL_CHECK, EXTERNAL_IPS_CHECK, VPC_CHECK)
+                      FIREWALL_CHECK, SQL_CHECK, EXTERNAL_IPS_CHECK, VPC_CHECK,
+                      USER_KEYS_CHECK)  # v18.7: the second record of the key listing shares the writer

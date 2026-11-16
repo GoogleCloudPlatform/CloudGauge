@@ -296,6 +296,16 @@ class Serverless:
 
 
 @dataclass(frozen=True)
+class Privileges:
+    """v18.7: what the folder, grant, secret and custom-role rules read (``provider._secret_results``, the IAM-policy searches, the IAM roles,
+    PAM and deny-policy handlers)."""
+    secret_roles: tuple  # (role, member): resource-wide secret roles in the project's IAM policy
+    secrets: tuple  # (name, kind): kind "fresh" | "stale" | "rotated" | "regional" | "empty"
+    custom_role: str  # "" | "powers-held" | "powers-dormant" | "retired-bound": a custom role defined on the project
+    pam: str  # "" (PAM not enabled) | "approved" | "unapproved" | "unapproved-standing": an entitlement on the project
+
+
+@dataclass(frozen=True)
 class ProjectProfile:
     index: int
     project_id: str
@@ -363,6 +373,7 @@ class ProjectProfile:
     data_governance: DataGovernance = None  # v18.4
     posture: Posture = None  # v18.5
     serverless: Serverless = None  # v18.6
+    privileges: Privileges = None  # v18.7
 
     @property
     def project_number(self):
@@ -732,6 +743,20 @@ class SyntheticOrg:
             armor=rng.choice(["legacy", "empty", "preview", "modern", "modern"]), certificate=rng.choice(["none", "fine", "fine", "expiring", "expired", "managed-failed"]),
             repositories=rng.choice([0, 0, 1, 2]), scanning=_chance(rng, 0.3))
 
+        # v18.7 (drawn last again): folders, keys and privileged grants — the project's share (the folders' and the organization's are fixed).
+        secret_roles = []
+        if _chance(rng, 0.12):
+            secret_roles.append(("roles/secretmanager.secretAccessor", f"serviceAccount:app@{project_id}.iam.gserviceaccount.com"))
+        if _chance(rng, 0.08):
+            secret_roles.append(("roles/secretmanager.admin", "group:platform@example.com"))
+        if _chance(rng, 0.03):
+            secret_roles.append(("roles/secretmanager.secretAccessor", "allAuthenticatedUsers"))
+        privileges = Privileges(
+            secret_roles=tuple(secret_roles),
+            secrets=tuple((name, rng.choice(["fresh", "fresh", "stale", "rotated", "regional", "empty"])) for name in ("db-password", "api-key", "signing-key")[:rng.choice([0, 0, 1, 2, 3])]),
+            custom_role=rng.choice(["", "", "", "powers-held", "powers-dormant", "retired-bound"]),
+            pam=rng.choice(["", "", "", "approved", "unapproved", "unapproved-standing"]))
+
         return ProjectProfile(
             index=index, project_id=project_id, display_name=f"Synthetic Project {index}",
             folder_id=self.folder_of(index), denied=denied, osconfig_disabled=osconfig_disabled,
@@ -754,7 +779,7 @@ class SyntheticOrg:
             pap_enforced_buckets=pap_enforced_buckets,
             unprotected_buckets=unprotected_buckets, sink_buckets=sink_buckets, retention_buckets=retention_buckets, proxy_subnet=proxy_subnet,
             gke_auto_repair=gke_auto_repair, project_audit_configs=project_audit_configs, project_contact=project_contact,
-            gke_operations=gke_operations, network_edge=network_edge, data_governance=data_governance, posture=posture, serverless=serverless,
+            gke_operations=gke_operations, network_edge=network_edge, data_governance=data_governance, posture=posture, serverless=serverless, privileges=privileges,
         )
 
     # --- organization-level data ---
@@ -765,7 +790,28 @@ class SyntheticOrg:
             {"role": "roles/resourcemanager.organizationAdmin", "members": ["group:cloud-admins@example.com",
                                                                              "serviceAccount:org-automation@system.gserviceaccount.com"]},  # v18: a Google-managed agent, not a row
             {"role": "roles/viewer", "members": ["domain:example.com"]},
+            # v18.7: the whole domain creates projects (Action Required), a finance group holds a billing role at the organization (Investigation),
+            # an operations group holds the custom role that writes IAM policies (Custom Roles With IAM Powers).
+            {"role": "roles/resourcemanager.projectCreator", "members": ["domain:example.com", "serviceAccount:project-factory@tooling.iam.gserviceaccount.com"]},
+            {"role": "roles/billing.user", "members": ["group:finance@example.com"]},
+            {"role": f"organizations/{self.org_id}/roles/policy_automation", "members": ["group:ops-robots@example.com"]},
         ]
+
+    def org_custom_roles(self):
+        """v18.7: the organization's custom roles (``roles.list`` with ``view=FULL``): one with IAM powers, one plain, one deprecated and unbound."""
+        prefix = f"organizations/{self.org_id}/roles"
+        return [{"name": f"{prefix}/policy_automation", "title": "policy automation", "stage": "GA", "includedPermissions": ["resourcemanager.projects.setIamPolicy", "resourcemanager.projects.get"], "etag": "s"},
+                {"name": f"{prefix}/minimal_viewer", "title": "minimal viewer", "stage": "GA", "includedPermissions": ["compute.instances.get"], "etag": "s"},
+                {"name": f"{prefix}/old_auditor", "title": "old auditor", "stage": "DEPRECATED", "includedPermissions": ["logging.logEntries.list"], "etag": "s"}]
+
+    def folder_iam_bindings(self, folder_id):
+        """v18.7: a folder's own bindings — the first folder has a person as Owner and a project-factory group, the second an Editor service account."""
+        index = self.folder_ids.index(folder_id) if folder_id in self.folder_ids else -1
+        if index == 0:
+            return [{"role": "roles/owner", "members": ["user:platform-lead@example.com"]}, {"role": "roles/resourcemanager.projectCreator", "members": ["group:project-factory@example.com"]}]
+        if index == 1:
+            return [{"role": "roles/editor", "members": ["serviceAccount:deployer@tooling.iam.gserviceaccount.com"]}]
+        return []
 
     def org_policies(self, resource):
         """``listOrgPolicies`` for ``organizations/...``, ``folders/...`` or ``projects/...``."""

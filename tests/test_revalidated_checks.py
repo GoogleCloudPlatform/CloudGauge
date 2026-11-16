@@ -250,6 +250,25 @@ def test_stale_key_rows_count_keys_that_can_still_authenticate():
     assert expiring['Expires'] == '2027-01-01'
 
 
+def test_active_keys_row_rolls_up_the_keys_that_can_still_authenticate():
+    """v18.7: one User-Managed Keys row per account with a live key — count, oldest, expiry, origin — beside the rotation rows."""
+    row = security.active_keys_row('web-prod', ACCOUNT, [key(100), key(10), key(200, disabled=True), key(50, keyOrigin='USER_PROVIDED', validBeforeTime='2027-01-01T00:00:00Z')], now=NOW)
+    assert (row['Keys'], row['Oldest (days)'], row['Expiry'], row['Origin'], row['_status']) == (3, 100, '2 never, earliest 2027-01-01', '2 created in Google Cloud, 1 uploaded', IR)
+    assert row['Issue'] == 'User-managed keys exist.' and 'never expires' in row['Detail']
+    assert row['Fix'].startswith('gcloud iam service-accounts keys disable k100 --iam-account=ci@web-prod.iam.gserviceaccount.com --project=web-prod  # once the caller uses an attached service account')
+    assert row['Fix'].endswith('enforce iam.disableServiceAccountKeyCreation and iam.serviceAccountKeyExpiryHours so none come back')
+    dated = security.active_keys_row('web-prod', ACCOUNT, [key(10, validBeforeTime='2027-01-01T00:00:00Z')], now=NOW)
+    assert (dated['Expiry'], dated['Origin']) == ('earliest 2027-01-01', 'created in Google Cloud') and 'never expires' not in dated['Detail']
+    assert security.active_keys_row('web-prod', ACCOUNT, [key(100)], now=NOW)['Expiry'] == 'never'
+    assert security.active_keys_row('web-prod', ACCOUNT, [key(100, keyOrigin='USER_PROVIDED')], now=NOW)['Origin'] == 'uploaded'
+    # Nothing that can authenticate: no row.
+    assert security.active_keys_row('web-prod', ACCOUNT, [], now=NOW) is None
+    assert security.active_keys_row('web-prod', ACCOUNT, [key(100, disabled=True)], now=NOW) is None
+    assert security.active_keys_row('web-prod', ACCOUNT, [key(100, validBeforeTime=(NOW - timedelta(days=1)).strftime('%Y-%m-%dT%H:%M:%SZ'))], now=NOW) is None
+    assert security.active_keys_row('web-prod', {**ACCOUNT, 'disabled': True}, [key(100)], now=NOW) is None
+    assert set(row) == {'Project', 'Service Account', 'Keys', 'Oldest (days)', 'Expiry', 'Origin', 'Issue', 'Detail', 'Fix', '_status'}
+
+
 def test_sa_key_check_puts_a_denied_project_under_projects_not_checked(gcp):
     class Iam:
         def projects(self):
@@ -265,6 +284,24 @@ def test_sa_key_check_puts_a_denied_project_under_projects_not_checked(gcp):
     record = sink.by_check()['Service Account Key Rotation']
     assert record['Status'] == AR and [r['Key ID'] for r in record['Finding']] == ['k100']
     assert [r['Project'] for r in sink.not_checked()] == ['locked']
+    # v18.7: the same listing writes User-Managed Keys — the account's one live key (the disabled one does not count).
+    keys = sink.by_check()['User-Managed Keys']
+    assert keys['Status'] == IR and [(r['Project'], r['Service Account'], r['Keys'], r['Expiry']) for r in keys['Finding']] == [('web-prod', ACCOUNT['email'], 1, 'never')]
+    assert [name for name, _ in sink.records if name in ('Service_Account_Key_Rotation', 'User-Managed_Keys')] == ['Service_Account_Key_Rotation', 'User-Managed_Keys']
+
+
+def test_sa_key_check_all_clear_in_both_records(gcp):
+    class Iam:
+        def projects(self):
+            accounts = SimpleNamespace(list=lambda name: _execute({'accounts': [ACCOUNT]}), list_next=lambda previous_request, previous_response: None,
+                                       keys=lambda: SimpleNamespace(list=lambda name, keyTypes: _execute({'keys': [key(200, disabled=True)]})))
+            return SimpleNamespace(serviceAccounts=lambda: accounts)
+
+    gcp.discovery.apis['iam'] = Iam()
+    sink = Sink()
+    security.check_sa_key_rotation('1', [{'projectId': 'web-prod'}], JOB, sink=sink)
+    assert sink.by_check()['Service Account Key Rotation']['Finding'] == [{'Status': security.SA_KEYS_ALL_CLEAR}]
+    assert sink.by_check()['User-Managed Keys'] == {'Check': 'User-Managed Keys', 'Finding': [{'Status': security.USER_KEYS_ALL_CLEAR}], 'Status': 'Compliant'}
 
 
 # --- Public GCS Buckets -------------------------------------------------------------------------------------------
@@ -364,6 +401,25 @@ def test_open_firewall_rows_flag_allow_rules_from_the_internet_by_what_they_open
     assert by_name['web']['Fix'].startswith('gcloud compute firewall-rules update web --project=web-prod --source-ranges=<your CIDRs>  # or front the tier with a load balancer')
     assert by_name['allow-all']['Fix'].endswith('# or: gcloud compute firewall-rules delete allow-all --project=web-prod')
     assert by_name['ssh-v6']['Source Ranges'] == '::/0' and by_name['allow-all']['VPC'] == 'prod-vpc' and by_name['allow-all']['Priority'] == 1000
+
+
+def test_open_firewall_rows_verification_items_from_the_workload_manager_diff():
+    """v18.7 (the WLM diff's verification-only items): an ingress allow rule with no source ranges, tags or service accounts applies to
+    every source and is a row; one that matches by tag or service account is not; a protocol other than TCP/UDP/ICMP is Action Required."""
+    implicit = rule('implicit', [{'IPProtocol': 'tcp', 'ports': ['8080']}], ranges=())
+    assert 'sourceRanges' not in implicit or implicit['sourceRanges'] == []
+    by_tag = {**rule('by-tag', [{'IPProtocol': 'tcp', 'ports': ['8080']}], ranges=()), 'sourceTags': ['frontend']}
+    by_account = {**rule('by-sa', [{'IPProtocol': 'tcp', 'ports': ['8080']}], ranges=()), 'sourceServiceAccounts': ['lb@web-prod.iam.gserviceaccount.com']}
+    rows = security.open_firewall_rows('web-prod', [implicit, by_tag, by_account])
+    assert [(r['Rule'], r['Source Ranges'], r['_status']) for r in rows] == [('implicit', 'any (none specified)', IR)]
+    assert security.open_rule_status(rule('sctp', [{'IPProtocol': 'sctp'}])) == AR and security.open_rule_status(rule('esp', [{'IPProtocol': 'esp'}])) == AR
+    assert security.open_rule_status(rule('num', [{'IPProtocol': '47'}])) == AR
+    # A firewall-policy rule that matches by secure tag or FQDN with no IP range is not "every source".
+    policy = {'displayName': 'hier', 'rules': []}
+    shaped = security.policy_rule_as_vpc_rule(policy, {'priority': 10, 'action': 'allow', 'direction': 'INGRESS', 'match': {'srcSecureTags': [{'name': 'tagValues/1'}], 'layer4Configs': [{'ipProtocol': 'tcp', 'ports': ['22']}]}})
+    assert shaped['sourceTags'] == ['tagValues/1'] and security.open_firewall_rows('web-prod', [shaped]) == []
+    bare = security.policy_rule_as_vpc_rule(policy, {'priority': 11, 'action': 'allow', 'direction': 'INGRESS', 'match': {'layer4Configs': [{'ipProtocol': 'all'}]}})
+    assert [(r['Source Ranges'], r['_status']) for r in security.open_firewall_rows('web-prod', [bare])] == [('any (none specified)', AR)]
 
 
 def test_firewall_check_reads_every_page_and_writes_the_all_clear_row(gcp):
