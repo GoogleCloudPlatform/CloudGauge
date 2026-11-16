@@ -61,6 +61,10 @@ EXPOSURE_CHECK = "Incident Exposure"
 # The Efficiency line adds the cost rows' estimated monthly savings (v17), summed per currency from this column.
 SAVING_COLUMN = "Est. Monthly Saving"
 SAVING_VALUE = re.compile(r"^\s*(-?[\d,]*\.?\d+)\s*([A-Z]{3})\s*$")
+# v18.8: the Efficiency line starts with what the organization spends, from the Spend Briefing's three headline lines (the briefing is
+# Informational: the sentence is evidence, the score is unchanged); nothing when the briefing is not configured or could not be read.
+SPEND_BRIEFING = "Spend Briefing"
+SPEND_LINES = ("Month to date", "Forecast", "Last month")
 # The action-plan CSV: the ranked actions, then two blank columns for the owner to fill in.
 ACTION_PLAN_COLUMNS = ("Priority", "Check", "Category", "Status", "Projects affected", "Findings", "Fix in report", "Owner", "Target date")
 FIX_IN_REPORT = "yes"
@@ -194,6 +198,19 @@ def savings_text(section):
     return " + ".join(f"{amount:,.2f} {currency}" for currency, amount in sorted(totals.items())) + "/month in identified savings"
 
 
+def spend_text(section):
+    """The Efficiency line's spend sentence, from the Spend Briefing's rows: ``"month to date 975.81 USD, forecast ≈ 1,938.43 USD, last month
+    1,927.37 USD"``; None when the briefing is absent, not configured (a note row) or in Error."""
+    item = next((check for check in section.checks if check.check_name == SPEND_BRIEFING), None)
+    details = item.details if item is not None else None
+    if details is None or details.kind != "table" or "Line" not in details.headers or "Value" not in details.headers:
+        return None
+    line_column, value_column = list(details.headers).index("Line"), list(details.headers).index("Value")
+    values = {row[line_column]: row[value_column] for row in details.rows if len(row) > max(line_column, value_column)}
+    parts = [f"{label.lower()} {values[label]}" for label in SPEND_LINES if values.get(label) and values[label] != DASH]
+    return ", ".join(parts) if parts else None
+
+
 def build_stoplights(context):
     sections = {section.title: section for section in context.sections}
     score_rows = {row.category_name: row for row in context.score_summary}
@@ -210,6 +227,9 @@ def build_stoplights(context):
         if exposure:
             evidence.append(exposure)
         savings = savings_text(section) if category == "Cost Optimization" else None
+        spend = spend_text(section) if category == "Cost Optimization" else None
+        if spend:
+            evidence.append(spend)
         if savings:
             evidence.append(savings)
         change = category_changes.get(category)

@@ -93,6 +93,28 @@ variable "bigquery_dataset" {
   }
 }
 
+variable "billing_export" {
+  description = "The BigQuery dataset the billing account exports to, <project>.<dataset> (v18.8): Spend Briefing and Spend Anomalies read its standard export tables. Empty: both stay Informational."
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = var.billing_export == "" || can(regex("^[a-z][a-z0-9-]{4,28}[a-z0-9][.:][A-Za-z0-9_]+$", var.billing_export))
+    error_message = "billing_export must be <project>.<dataset>: the BigQuery dataset the billing account exports to."
+  }
+}
+
+variable "spend_anomaly_floor" {
+  description = "The least a project's week on a service must cost, in the export's currency, to be a spend anomaly (v18.8). Empty: 50."
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = var.spend_anomaly_floor == "" || can(regex("^[0-9]+([.][0-9]+)?$", var.spend_anomaly_floor))
+    error_message = "spend_anomaly_floor must be a number."
+  }
+}
+
 variable "schedules" {
   description = "Scheduled scans, by job name: { weekly-org = { scope = \"organization\", scope_id = \"123456789012\", cron = \"30 0 * * 1\" } }. Cron in UTC."
   type = map(object({

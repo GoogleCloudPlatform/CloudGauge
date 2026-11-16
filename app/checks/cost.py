@@ -31,6 +31,7 @@ their objects (``check_storage_lifecycle``) and snapshot sprawl
 all-clear row; the label check is *Informational* until ``COST_ALLOCATION_LABELS``
 names the keys, so an unconfigured check never moves the Efficiency score.
 """
+import json
 import logging
 import re
 
@@ -434,14 +435,53 @@ def bucket_tiers_or_expires(bucket):
         return False
 
 
+# v18.8: the rule that keeps a versioned bucket's history bounded — the three newest noncurrent versions of every object.
+NONCURRENT_RULE = {"action": {"type": "Delete"}, "condition": {"numNewerVersions": 3}}
+
+
+def lifecycle_rules(bucket):
+    """A bucket's lifecycle rules as plain dicts (``[]`` when it has none or they cannot be read)."""
+    try:
+        return [json.loads(json.dumps(rule, default=str)) for rule in (getattr(bucket, "lifecycle_rules", None) or [])]
+    except Exception:
+        return []
+
+
+def prunes_noncurrent(rules):
+    """Whether a lifecycle rule deletes noncurrent versions: ``Delete`` on ``numNewerVersions``, ``daysSinceNoncurrentTime`` or ``isLive: false``."""
+    for rule in rules or []:
+        action, condition = rule.get("action") or {}, rule.get("condition") or {}
+        if str(action.get("type") or "").lower() != "delete":
+            continue
+        if condition.get("numNewerVersions") is not None or condition.get("daysSinceNoncurrentTime") is not None or condition.get("isLive") is False:
+            return True
+    return False
+
+
+def noncurrent_fix(bucket_name, rules):
+    """The one line that adds ``NONCURRENT_RULE`` to the bucket's existing rules: the merged configuration written to a file, then applied
+    (the lifecycle file replaces the whole configuration; ``gcloud`` cannot read it from ``/dev/stdin`` — the v18.8 closed loop found the
+    here-string form fails with "Unable to read file [/proc/…/fd/pipe]")."""
+    merged = json.dumps({"rule": [*rules, NONCURRENT_RULE]}, separators=(",", ":"))
+    path = f"/tmp/{bucket_name}-lifecycle.json"
+    return f"printf '%s' '{merged}' > {path} && gcloud storage buckets update gs://{bucket_name} --lifecycle-file={path}"
+
+
 def check_storage_lifecycle(scope_id, all_projects, job_id, *, sink):
-    """Buckets with neither lifecycle rules nor Autoclass (v17).
+    """Buckets with neither lifecycle rules nor Autoclass (v17), and versioned buckets that never prune (v18.8).
 
     Such a bucket keeps every object in its default class for ever: nothing is tiered to
     Nearline, Coldline or Archive and nothing expires, which is where storage bills grow
     unnoticed. One row per bucket with the ``gcloud storage buckets update --enable-autoclass``
     line (a lifecycle rule is the alternative when the access pattern is known).
     *Investigation Recommended*: a bucket may need to stay as it is.
+
+    v18.8: a bucket with **versioning on and no lifecycle rule that deletes noncurrent
+    versions** keeps every overwritten and deleted object for ever, billed; the row's fix
+    writes the bucket's rules plus one that keeps the three newest noncurrent versions
+    (to a file, then ``--lifecycle-file``).
+    Log-sink destinations and retention-locked buckets get the same row: pruning old
+    versions keeps the protection *GCS Bucket Versioning* asks for.
     """
     print(f"🗄️  [{job_id}] Checking {LIFECYCLE_CHECK}...")
     skipped = NotChecked(LIFECYCLE_CHECK)
@@ -450,13 +490,19 @@ def check_storage_lifecycle(scope_id, all_projects, job_id, *, sink):
         project_id = project['projectId']
         try:
             for bucket in gcp.project_storage_client(project_id).list_buckets():
+                storage_class = getattr(bucket, "storage_class", "") or ""
                 if not bucket_tiers_or_expires(bucket):
-                    rows.append({"Project": project_id, "Bucket": bucket.name, "Storage Class": getattr(bucket, "storage_class", "") or "",
+                    rows.append({"Project": project_id, "Bucket": bucket.name, "Storage Class": storage_class,
                                  "Issue": "No lifecycle rules and Autoclass off: objects never move to a colder storage class or expire.",
                                  "Fix": f"gcloud storage buckets update gs://{bucket.name} --enable-autoclass"})
+                rules = lifecycle_rules(bucket)
+                if getattr(bucket, "versioning_enabled", False) and not prunes_noncurrent(rules):
+                    rows.append({"Project": project_id, "Bucket": bucket.name, "Storage Class": storage_class,
+                                 "Issue": "Versioning on without pruning: every overwritten or deleted object keeps a billed noncurrent copy for ever.",
+                                 "Fix": noncurrent_fix(bucket.name, rules)})
         except Exception as e:
             skipped.add(project_id, e)
-    _write(sink, job_id, LIFECYCLE_CHECK, rows, "Investigation Recommended", "Every bucket has lifecycle rules or Autoclass.")
+    _write(sink, job_id, LIFECYCLE_CHECK, rows, "Investigation Recommended", "Every bucket has lifecycle rules or Autoclass, and every versioned bucket prunes its noncurrent versions.")
     skipped.write(sink, job_id)
 
 

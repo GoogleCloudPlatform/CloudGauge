@@ -110,7 +110,7 @@ def test_the_advisory_role_is_the_readmes(tf, readme):
 def test_the_project_roles_are_the_scripts(tf, script):
     loop = re.search(r'for role in ((?:roles/\S+ ?)+); do', script).group(1).split()
     concat = tf['main.tf'].split('project_roles = concat(')[1].split('\n  )')[0]
-    always, with_export = concat.split('local.export ?')
+    always, with_export = concat.split('local.export || local.spend ?')  # v18.8: the spend queries need the same Job User role
     assert ROLE.findall(always) == loop
     assert ROLE.findall(with_export) == ['roles/bigquery.jobUser']
     assert '--role=roles/bigquery.jobUser' in script

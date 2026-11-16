@@ -36,6 +36,9 @@ from app.checks.cost import (
     missing_labels,
     recommender_locations,
     snapshot_issues,
+    lifecycle_rules,
+    noncurrent_fix,
+    prunes_noncurrent,
 )
 from app.checks.not_checked import NOT_CHECKED
 from app.reporting.html_report import generate_html_report
@@ -148,8 +151,8 @@ def test_labels_check_lists_projects_missing_a_key(gcp, monkeypatch):
 
 # --- Cloud Storage Lifecycle ---
 
-def bucket(name, rules=(), autoclass=False, storage_class='STANDARD'):
-    return SimpleNamespace(name=name, lifecycle_rules=list(rules), autoclass_enabled=autoclass, storage_class=storage_class)
+def bucket(name, rules=(), autoclass=False, storage_class='STANDARD', versioning=False):
+    return SimpleNamespace(name=name, lifecycle_rules=list(rules), autoclass_enabled=autoclass, storage_class=storage_class, versioning_enabled=versioning)
 
 
 def test_a_bucket_tiers_or_expires_with_a_rule_or_autoclass():
@@ -180,7 +183,48 @@ def test_lifecycle_check_lists_buckets_that_never_tier_or_expire(gcp):
     sink = Sink()
     check_storage_lifecycle('123', [{'projectId': 'web-prod'}], JOB, sink=sink)
     assert sink.by_name()['Cloud_Storage_Lifecycle'] == {'Check': LIFECYCLE_CHECK, 'Status': 'Compliant',
-                                                         'Finding': [{'Status': 'Every bucket has lifecycle rules or Autoclass.'}]}
+                                                         'Finding': [{'Status': 'Every bucket has lifecycle rules or Autoclass, and every versioned bucket prunes its noncurrent versions.'}]}
+
+
+# v18.8: versioned buckets that never prune their noncurrent versions.
+
+NEWER = {'action': {'type': 'Delete'}, 'condition': {'numNewerVersions': 5}}
+NONCURRENT_AGE = {'action': {'type': 'Delete'}, 'condition': {'daysSinceNoncurrentTime': 30}}
+NOT_LIVE = {'action': {'type': 'Delete'}, 'condition': {'isLive': False, 'age': 7}}
+TIERING = {'action': {'type': 'SetStorageClass', 'storageClass': 'NEARLINE'}, 'condition': {'age': 30}}
+
+
+def test_a_lifecycle_prunes_noncurrent_versions_with_a_delete_rule_on_them():
+    assert prunes_noncurrent([NEWER]) and prunes_noncurrent([TIERING, NONCURRENT_AGE]) and prunes_noncurrent([NOT_LIVE])
+    assert not prunes_noncurrent([TIERING]) and not prunes_noncurrent([]) and not prunes_noncurrent(None)
+    assert not prunes_noncurrent([{'action': {'type': 'Delete'}, 'condition': {'age': 30}}])  # deletes live objects by age, keeps every noncurrent copy
+    assert not prunes_noncurrent([{'action': {'type': 'SetStorageClass', 'storageClass': 'ARCHIVE'}, 'condition': {'numNewerVersions': 2}}])  # tiers them, keeps them
+    assert noncurrent_fix('b', [TIERING]) == ("printf '%s' '{\"rule\":[{\"action\":{\"type\":\"SetStorageClass\",\"storageClass\":\"NEARLINE\"},\"condition\":{\"age\":30}},"
+                                              "{\"action\":{\"type\":\"Delete\"},\"condition\":{\"numNewerVersions\":3}}]}' > /tmp/b-lifecycle.json "
+                                              "&& gcloud storage buckets update gs://b --lifecycle-file=/tmp/b-lifecycle.json")  # not /dev/stdin: gcloud cannot read it
+    # google-cloud-storage's rule objects are dict subclasses; the fix carries them as plain JSON
+    class Rule(dict):
+        pass
+    assert lifecycle_rules(SimpleNamespace(lifecycle_rules=[Rule(TIERING)])) == [TIERING] and lifecycle_rules(SimpleNamespace()) == []
+
+
+def test_lifecycle_check_lists_versioned_buckets_that_never_prune(gcp):
+    gcp.storage.listings.update({'web-prod': [
+        bucket('kept-for-ever', versioning=True),  # no rules at all: both rows
+        bucket('tiered-only', rules=[TIERING], versioning=True),  # tiers, never deletes a noncurrent version
+        bucket('pruned', rules=[TIERING, NEWER], versioning=True),  # fine
+        bucket('unversioned-no-rules')]})  # the v17 row alone
+    sink = Sink()
+    check_storage_lifecycle('123', [{'projectId': 'web-prod'}], JOB, sink=sink)
+    record = sink.by_name()['Cloud_Storage_Lifecycle']
+    assert record['Status'] == 'Investigation Recommended'
+    rows = [(r['Bucket'], r['Issue'].split(':')[0], r['Fix']) for r in record['Finding']]
+    assert rows == [
+        ('kept-for-ever', 'No lifecycle rules and Autoclass off', 'gcloud storage buckets update gs://kept-for-ever --enable-autoclass'),
+        ('kept-for-ever', 'Versioning on without pruning', noncurrent_fix('kept-for-ever', [])),
+        ('tiered-only', 'Versioning on without pruning', noncurrent_fix('tiered-only', [TIERING])),
+        ('unversioned-no-rules', 'No lifecycle rules and Autoclass off', 'gcloud storage buckets update gs://unversioned-no-rules --enable-autoclass')]
+    assert record['Finding'][1]['Issue'] == 'Versioning on without pruning: every overwritten or deleted object keeps a billed noncurrent copy for ever.'
 
 
 # --- Snapshot Sprawl ---

@@ -33,12 +33,13 @@ terraform {
 | | |
 |---|---|
 | APIs | the 25 APIs `tools/deploy.sh` enables (never disabled on destroy) |
-| Service account | `cloudgauge-sa` with `roles/aiplatform.user`, `roles/cloudtasks.admin`, `roles/cloudbuild.builds.builder` (and `roles/bigquery.jobUser` with the export) on the project, Service Account User on itself |
+| Service account | `cloudgauge-sa` with `roles/aiplatform.user`, `roles/cloudtasks.admin`, `roles/cloudbuild.builds.builder` (and `roles/bigquery.jobUser` with the export or the billing export) on the project, Service Account User on itself |
 | Bucket | `cloudgauge-reports-<project>` in the region, uniform access, public access prevented; the account is Object Admin |
 | Queue | the Cloud Tasks queue, with the limits the services expect (`scan_max_concurrent_shards`, `task_max_attempts`, 30 s–10 min back-off) |
 | Worker | `cloudgauge-worker`: internal ingress, 3600 s, concurrency 4, 2 GiB; invoked by the account only |
 | Web | `cloudgauge`: IAP enabled, 600 s, concurrency 80, 1 GiB; IAP's service agent is its invoker; each `operators` entry gets `roles/iap.httpsResourceAccessor` |
 | Export | with `bigquery_dataset`: the dataset in the region, the account WRITER on it |
+| Spend | with `billing_export` (v18.8): the account READER on the billing export dataset when it is in the project (its owner grants it otherwise) and `roles/bigquery.jobUser`; the services get `BILLING_EXPORT` |
 | Schedules | with `schedules`: one Cloud Scheduler job each, posting to the worker's `/scheduled-scan` with the account's OIDC token |
 | Organization | with `organization_id`: the twelve read-only scan roles and the `CloudGaugeAdvisoryViewer` custom role, bound to the account |
 

@@ -247,8 +247,9 @@ def test_scan_completes_against_the_synthetic_organization(gcp, scope):
     # their PodDisruptionBudgets (GKE Upgrade Readiness).
     # v18.3: the five network-edge listings (and Open Firewall Rules' firewall-policy listing).
     # v18.6: two more (the serverless workloads; the edge policies and certificates) — Container Scanning Enabled searches instead.
-    assert by_method.get('asset.listAssets(org)', 0) == (24 if scope == 'organization' else 0)  # v18.5: the identity checks search instead
-    assert by_method.get('asset.listAssets(folder)', 0) == (24 if scope == 'folder' else 0)
+    # v18.8: one more (Serverless Cost Hygiene's workloads and connectors; the connectors come from the search, the workloads from the listing).
+    assert by_method.get('asset.listAssets(org)', 0) == (25 if scope == 'organization' else 0)  # v18.5: the identity checks search instead
+    assert by_method.get('asset.listAssets(folder)', 0) == (25 if scope == 'folder' else 0)
     assert by_method.get('accesscontextmanager.servicePerimeters.list', 0) == 1
     metrics = provider.metrics.snapshot()
     assert metrics['total_calls'] > 50 and metrics['errors'] == {}
@@ -315,8 +316,9 @@ def test_organization_scan_covers_every_section_and_org_check(gcp):
     assert 'Accelerator' in html and 'Headroom' in html
     # Every cell is text (v17.2.1): a list left in a row reaches the page and the CSV as Python's repr — "['a', 'b']"
     # in the chips, "[]" for an empty one. The CSV is the raw cells, so it is where such a slip shows first.
-    csv = store.read_report('syn-job', scope_id, 'csv')
-    reprs = [cell for line in csv.splitlines() for cell in line.split(',') if cell.strip().startswith(("['", '["', '[]', "('", '{"', "{'"))]
+    # v18.8: whole cells (a lifecycle fix carries JSON with commas inside one quoted cell).
+    cells = [cell for row in csv.reader(io.StringIO(store.read_report('syn-job', scope_id, 'csv'))) for cell in row]
+    reprs = [cell for cell in cells if cell.strip().startswith(("['", '["', '[]', "('", '{"', "{'"))]
     assert reprs == [], reprs[:5]
 
 
@@ -333,8 +335,9 @@ def test_denied_projects_and_quota_errors_do_not_break_the_scan(gcp):
     assert 'Not assessed — no' not in html  # the item above makes each page a listed page, not an empty one
     rows = [row for row in csv.reader(io.StringIO(store.read_report('syn-job', scope_id, 'csv'))) if row[:2] == ['Projects not checked', 'Error']]
     # Every project, by ID. A v18.4 check whose scope-level policy or resource search drew a 429 records the scanned scope itself
-    # (it has no project list), so the scope's own name may appear beside the projects.
-    assert {row[2] for row in rows} - {f'organizations/{scope_id}'} == {p.project_id for p in provider.world.projects()}
+    # (it has no project list), so the scope's own name may appear beside the projects; v18.7's Folder Primitive Roles names a folder
+    # whose policy read drew one.
+    assert {row[2] for row in rows if not row[2].startswith(('organizations/', 'folders/'))} == {p.project_id for p in provider.world.projects()}
     # Location discovery fails for every project too, so no zone or region is found and the cost
     # recommenders are never queried: the project is reported with the discovery error rather
     # than passing as compliant. Network Insights always queries 'global', so its queries fail.

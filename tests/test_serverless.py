@@ -510,3 +510,183 @@ def test_the_three_names_are_catalogued_scope_level_and_new():
     assert sl.EXPOSURE_CHECK in registry.SCOPE_LEVEL_CHECKS and sl.SCANNING_CHECK in registry.SCOPE_LEVEL_CHECKS
     names = [spec.name for spec in registry.build_check_plan('folder', '42', JOB, [], [], [])]
     assert sl.EXPOSURE_CHECK in names and sl.SCANNING_CHECK in names and sl.SERVERLESS_SA_CHECK not in names  # the second record shares the first's spec
+
+
+# --- v18.8: Serverless Cost Hygiene ------------------------------------------------------------------------------------------
+
+CONNECTOR_NAME = f'projects/{PROJECT}/locations/{REGION}/connectors/conn-main'
+
+
+def connector_asset(name='conn-main', project=PROJECT, region=REGION, network='vpc-main', subnet='', min_instances=2, max_instances=3, machine_type='e2-micro'):
+    data = {'name': f'projects/{project}/locations/{region}/connectors/{name}', 'network': network, 'ipCidrRange': '10.8.0.0/28', 'state': 'READY',
+            'minInstances': min_instances, 'maxInstances': max_instances, 'machineType': machine_type}
+    if subnet:
+        data['subnet'] = {'name': subnet, 'projectId': project}
+    return SimpleNamespace(name=f'//vpcaccess.googleapis.com/projects/{project}/locations/{region}/connectors/{name}', resource=SimpleNamespace(data=data))
+
+
+CONNECTOR_KEY, SQL_KEY, INTERFACES_KEY = 'run.googleapis.com/vpc-access-connector', 'run.googleapis.com/cloudsql-instances', 'run.googleapis.com/network-interfaces'
+
+
+def with_template_annotations(asset, annotations):
+    asset.resource.data['spec']['template']['metadata'] = {'annotations': dict(annotations)}
+    return asset
+
+
+def test_cost_facts_from_every_shape():
+    # The inventory's Knative copy: the connector and the Cloud SQL instances live on the revision template's annotations.
+    asset = with_template_annotations(service('api'), {CONNECTOR_KEY: 'conn-main', SQL_KEY: f'{PROJECT}:us-central1:db-0, {PROJECT}:{REGION}:db-1'})
+    fact = sl.cost_facts(PROJECT, asset.resource.data, asset.name)
+    assert fact == {'kind': sl.SERVICE, 'project_id': PROJECT, 'name': 'api', 'location': REGION, 'connector': CONNECTOR_NAME, 'direct_vpc': False,
+                    'sql_instances': [f'{PROJECT}:us-central1:db-0', f'{PROJECT}:{REGION}:db-1']}
+    direct = with_template_annotations(service('edge'), {INTERFACES_KEY: '[{"network":"vpc-main","subnetwork":"run-subnet"}]'})
+    assert sl.cost_facts(PROJECT, direct.resource.data, direct.name)['direct_vpc'] is True and sl.cost_facts(PROJECT, direct.resource.data, direct.name)['connector'] == ''
+    # The v2 API: template.vpcAccess and the Cloud SQL volumes; a job's template is one level down.
+    data = {**v2_service('api'), 'template': {'serviceAccount': DEFAULT, 'vpcAccess': {'connector': CONNECTOR_NAME, 'egress': 'ALL_TRAFFIC'},
+                                              'volumes': [{'name': 'cloudsql', 'cloudSqlInstance': {'instances': [f'{PROJECT}:us-central1:db-0']}}]}}
+    fact = sl.cost_facts(PROJECT, data, data['name'])
+    assert (fact['name'], fact['connector'], fact['sql_instances']) == ('api', CONNECTOR_NAME, [f'{PROJECT}:us-central1:db-0'])
+    job = {'name': f'projects/{PROJECT}/locations/{REGION}/jobs/nightly', 'template': {'template': {'serviceAccount': DEFAULT, 'vpcAccess': {'networkInterfaces': [{'network': 'vpc-main'}]}}}}
+    assert sl.cost_facts(PROJECT, job, job['name'], sl.JOB) == {'kind': sl.JOB, 'project_id': PROJECT, 'name': 'nightly', 'location': REGION, 'connector': '', 'direct_vpc': True, 'sql_instances': []}
+    # A gen-2 function from the inventory names its service and its connector.
+    function = function_gen2('hook2', 'hook2')
+    function.resource.data['serviceConfig']['vpcConnector'] = CONNECTOR_NAME
+    fact = sl.cost_facts(PROJECT, function.resource.data, function.name, sl.FUNCTION_2)
+    assert (fact['kind'], fact['name'], fact['connector']) == (sl.FUNCTION_2, 'hook2', CONNECTOR_NAME)
+    assert sl.connector_key(PROJECT, REGION, 'conn-main') == CONNECTOR_NAME and sl.connector_key(PROJECT, REGION, f'//vpcaccess.googleapis.com/{CONNECTOR_NAME}') == CONNECTOR_NAME
+    assert sl.sql_region(f'{PROJECT}:us-central1:db-0') == 'us-central1' and sl.sql_region('db-0') == ''
+
+
+def test_cost_workloads_merge_gen2_functions_into_their_services():
+    function = function_gen2('hook2', 'hook2')
+    function.resource.data['serviceConfig']['vpcConnector'] = CONNECTOR_NAME
+    grouped = grouped_of(service('hook2', labels={'goog-managed-by': 'cloudfunctions'}), service('web'), run_job('nightly'), function, connector_asset())
+    workloads = sl.cost_workloads(grouped)
+    assert sorted(workloads) == [(PROJECT, REGION, 'hook2'), (PROJECT, REGION, 'job:nightly'), (PROJECT, REGION, 'web')]
+    assert workloads[(PROJECT, REGION, 'hook2')]['kind'] == sl.FUNCTION_2 and workloads[(PROJECT, REGION, 'hook2')]['connector'] == CONNECTOR_NAME
+    connector = sl.connector_facts(grouped['connectors'][0])
+    assert connector == {'key': CONNECTOR_NAME, 'project_id': PROJECT, 'name': 'conn-main', 'region': REGION, 'network': 'vpc-main', 'subnet': '', 'min_instances': 2, 'max_instances': 3,
+                         'machine_type': 'e2-micro'}
+
+
+def test_serverless_cost_rows_connector_idle_connector_and_cross_region_sql():
+    api = with_template_annotations(service('api', account=DEDICATED), {CONNECTOR_KEY: 'conn-main', SQL_KEY: f'{PROJECT}:us-central1:db-0'})
+    local = with_template_annotations(service('local'), {SQL_KEY: f'{PROJECT}:{REGION}:db-1'})  # same region: fine
+    direct = with_template_annotations(service('direct'), {INTERFACES_KEY: '[{"network":"vpc-main"}]'})  # Direct VPC: fine
+    job = run_job('nightly')
+    job.resource.data['spec']['template']['spec']['template']['metadata'] = {'annotations': {'run.googleapis.com/vpc-access-connector': 'other-conn'}}  # a connector the inventory lacks
+    workloads = sl.cost_workloads(grouped_of(api, local, direct, job))
+    connectors = [sl.connector_facts(sl.by_kind([connector_asset(subnet='run-subnet')])['connectors'][0]), sl.connector_facts(sl.by_kind([connector_asset('idle-conn', region='us-central1', min_instances=3, max_instances=10, machine_type='e2-standard-4')])['connectors'][0])]
+    rows = sl.serverless_cost_rows(workloads, connectors)
+    assert [(r['Workload'], r['Kind'], r['Issue'], r['_status']) for r in rows] == [
+        ('nightly', sl.JOB, 'Serverless VPC Access connector.', IR), ('api', sl.SERVICE, 'Serverless VPC Access connector.', IR), ('api', sl.SERVICE, 'Cloud SQL in another region.', IR),
+        ('idle-conn', 'connector', 'Idle connector.', IR)]
+    assert rows[1]['Detail'] == ('Egress goes through connector conn-main in asia-south1 keeps 2–3 e2-micro instances billed around the clock; Direct VPC egress sends it from the subnet '
+                                 'itself and scales to zero with the workload.')
+    assert rows[1]['Fix'] == f'gcloud run services update api --region={REGION} --project={PROJECT} --network=vpc-main --subnet=run-subnet --clear-vpc-connector  # the subnet needs free addresses for the instances'
+    assert rows[0]['Fix'].startswith(f'gcloud run jobs update nightly --region={REGION} --project={PROJECT} --network=<network> --subnet=<subnet with free addresses> --clear-vpc-connector')
+    assert rows[0]['Detail'].startswith('Egress goes through connector other-conn (its instances are billed around the clock)')
+    assert rows[2]['Detail'] == f'Connects to {PROJECT}:us-central1:db-0 in us-central1 from {REGION}: every query crosses regions (egress billed, latency on each round trip).'
+    assert rows[2]['Fix'] == f'gcloud run deploy api --region=us-central1 --project={PROJECT} --image=<the image>  # redeploy beside the instance, or add a read replica in {REGION}'
+    assert rows[3]['Detail'] == 'No service, job or function routes through it, and its 3–10 e2-standard-4 instances bill around the clock.'
+    assert rows[3]['Fix'] == f'gcloud compute networks vpc-access connectors delete idle-conn --region=us-central1 --project={PROJECT}'
+    assert sl.serverless_cost_rows({}, []) == []
+
+
+class VpcAccessApi:
+    def __init__(self, connectors=(), error=None):
+        self.connectors_, self.error, self.parents = list(connectors), error, []
+
+    def projects(self):
+        return self
+
+    def locations(self):
+        return self
+
+    def connectors(self):
+        return self
+
+    def list(self, parent):
+        self.parents.append(parent)
+        return _Call(self, 'connectors', parent=parent)
+
+    def list_next(self, previous_request, previous_response):
+        return None
+
+    def answer(self, path, kwargs):
+        if self.error:
+            raise self.error
+        return {'connectors': [c for c in self.connectors_ if c['name'].startswith(kwargs['parent'] + '/')]}
+
+
+def test_check_serverless_cost_end_to_end(gcp, monkeypatch):
+    api = with_template_annotations(service('api', account=DEDICATED), {CONNECTOR_KEY: 'conn-main'})
+    inventory = Inventory([api, service('web'), run_job('nightly'), connector_asset(), connector_asset('old-conn')])
+    fresh_api = {**v2_service('api', account=DEDICATED), 'template': {'serviceAccount': DEDICATED, 'vpcAccess': {'connector': CONNECTOR_NAME}}}
+    apis = {'run': RunApi(services=[fresh_api, v2_service('web')], jobs=[{'name': f'projects/{PROJECT}/locations/{REGION}/jobs/nightly', 'template': {'template': {'serviceAccount': DEDICATED}}}]),
+            'vpcaccess': VpcAccessApi(connectors=[connector_asset().resource.data, connector_asset('old-conn').resource.data])}
+    monkeypatch.setattr(sl.gcp, 'asset_client', lambda credentials=None: inventory)
+    monkeypatch.setattr(sl.gcp, 'api_build', lambda name, version, **kwargs: apis[name])
+    sink = Sink()
+    sl.check_serverless_cost('organization', '987654321', JOB, sink=sink)
+    record = sink.by_check()[sl.COST_CHECK]
+    assert record['Status'] == IR and [(r['Workload'], r['Issue']) for r in record['Finding']] == [('api', 'Serverless VPC Access connector.'), ('old-conn', 'Idle connector.')]
+    assert inventory.requests[0]['asset_types'] == sl.COST_TYPES and sink.not_checked() == []
+    assert [c[0] for c in apis['run'].calls] == ['services', 'jobs'] and apis['vpcaccess'].parents == [f'projects/{PROJECT}/locations/{REGION}']
+    # The APIs are the copy of record: api moved to Direct VPC egress and old-conn was deleted — the inventory still shows both.
+    apis['run'] = RunApi(services=[{**v2_service('api', account=DEDICATED), 'template': {'serviceAccount': DEDICATED, 'vpcAccess': {'networkInterfaces': [{'network': 'vpc-main', 'subnetwork': 'run-subnet'}]}}}, v2_service('web')],
+                         jobs=[{'name': f'projects/{PROJECT}/locations/{REGION}/jobs/nightly', 'template': {'template': {'serviceAccount': DEDICATED}}}])
+    apis['vpcaccess'] = VpcAccessApi(connectors=[connector_asset().resource.data])
+    sink = Sink()
+    sl.check_serverless_cost('organization', '987654321', JOB, sink=sink)
+    record = sink.by_check()[sl.COST_CHECK]
+    assert [(r['Workload'], r['Issue']) for r in record['Finding']] == [('conn-main', 'Idle connector.')]  # nothing routes through it any more
+    # Refused reads: the inventory's copy stands, said under Projects not checked.
+    apis['run'] = RunApi(error=RuntimeError('run down'))
+    apis['vpcaccess'] = VpcAccessApi(error=RuntimeError('vpcaccess down'))
+    sink = Sink()
+    sl.check_serverless_cost('folder', '42', JOB, sink=sink)
+    assert [(r['Workload'], r['Issue']) for r in sink.by_check()[sl.COST_CHECK]['Finding']] == [('api', 'Serverless VPC Access connector.'), ('old-conn', 'Idle connector.')]
+    assert [(r['Project'], r['Reason']) for r in sink.not_checked()] == [(PROJECT, 'run down'), (PROJECT, 'vpcaccess down')]
+    assert sink.not_checked()[0]['Skipped check'].startswith(f'{sl.COST_CHECK} (Cloud Run services and jobs: the API read failed')
+    # Nothing serverless at all: the all-clear row, no API call.
+    monkeypatch.setattr(sl.gcp, 'asset_client', lambda credentials=None: Inventory([]))
+    sink = Sink()
+    sl.check_serverless_cost('project', PROJECT, JOB, sink=sink)
+    assert sink.by_check()[sl.COST_CHECK] == {'Check': sl.COST_CHECK, 'Status': C, 'Finding': [{'Status': sl.COST_ALL_CLEAR}]}
+    # The listing failing: an Error record.
+    monkeypatch.setattr(sl.gcp, 'asset_client', lambda credentials=None: Inventory(error=RuntimeError('inventory down')))
+    sink = Sink()
+    sl.check_serverless_cost('project', PROJECT, JOB, sink=sink)
+    assert sink.by_check()[sl.COST_CHECK] == {'Check': sl.COST_CHECK, 'Status': 'Error', 'Finding': [{'Error': 'inventory down'}]}
+
+
+def test_serverless_cost_is_catalogued_scope_level_and_new():
+    assert CATEGORY_MAP[sl.COST_CHECK] == 'Cost Optimization' and sl.COST_CHECK not in RESHAPED_CHECKS and sl.COST_CHECK in registry.SCOPE_LEVEL_CHECKS
+    assert sl.COST_CHECK in [spec.name for spec in registry.build_check_plan('project', PROJECT, JOB, [], [], [])]
+
+
+def test_check_serverless_cost_names_projects_by_id_when_the_inventory_names_them_by_number(gcp, monkeypatch):
+    """The first canary read the connector as ``projects/385964405060/…`` (the index names connectors by project number, as it does API keys and
+    secrets): the row named the number, and a workload's short reference could not meet the connector's key."""
+    api = with_template_annotations(service('api', account=DEDICATED), {CONNECTOR_KEY: 'conn-main'})
+    numbered = connector_asset(project=NUMBER)
+    projects = {('cloudresourcemanager.googleapis.com/Project',): [SimpleNamespace(name=f'//cloudresourcemanager.googleapis.com/projects/{PROJECT}', project=f'projects/{NUMBER}')]}
+    inventory = Inventory([api, numbered, connector_asset('old-conn', project=NUMBER)], resources=projects)
+    apis = {'run': RunApi(error=RuntimeError('run down')), 'vpcaccess': VpcAccessApi(error=RuntimeError('vpcaccess down'))}  # the inventory's copy stands
+    monkeypatch.setattr(sl.gcp, 'asset_client', lambda credentials=None: inventory)
+    monkeypatch.setattr(sl.gcp, 'api_build', lambda name, version, **kwargs: apis[name])
+    sink = Sink()
+    sl.check_serverless_cost('project', PROJECT, JOB, sink=sink)
+    rows = sink.by_check()[sl.COST_CHECK]['Finding']
+    assert [(r['Project'], r['Workload'], r['Issue']) for r in rows] == [(PROJECT, 'api', 'Serverless VPC Access connector.'), (PROJECT, 'old-conn', 'Idle connector.')]
+    assert rows[1]['Fix'] == f'gcloud compute networks vpc-access connectors delete old-conn --region={REGION} --project={PROJECT}'
+    assert [r['project_id'] for r in (sl.connector_facts(sl.by_kind([numbered])['connectors'][0]),)] == [NUMBER]  # before the renaming
+    assert inventory.searches[-1]['asset_types'] == ['cloudresourcemanager.googleapis.com/Project']
+    # The project search failing: the numbers stay, said under Projects not checked.
+    inventory = Inventory([api, numbered], resource_error=RuntimeError('search down'))
+    monkeypatch.setattr(sl.gcp, 'asset_client', lambda credentials=None: inventory)
+    sink = Sink()
+    sl.check_serverless_cost('project', PROJECT, JOB, sink=sink)
+    assert [(r['Project'], r['Workload']) for r in sink.by_check()[sl.COST_CHECK]['Finding']] == [(PROJECT, 'api'), (NUMBER, 'conn-main')]
+    assert sink.not_checked()[0]['Skipped check'].startswith(f'{sl.COST_CHECK} (project names: the project search failed')

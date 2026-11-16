@@ -365,8 +365,10 @@ V18_5_CHECKS = ['check_vm_posture', 'check_identity_hygiene', 'check_unused_serv
 V18_6_CHECKS = ['check_serverless_posture', 'check_edge_security', 'check_container_scanning']
 # v18.7: folders, keys and privileged grants — two scope-level functions (the second with two records) and two split checks.
 V18_7_CHECKS = ['check_folder_roles', 'check_privileged_grants', 'check_secret_posture', 'check_custom_roles']
+# v18.8: forecasts, budgets and spend — the spend check (scope-level, two records), the per-project log cost levers, the scope-level serverless cost check.
+V18_8_CHECKS = ['check_spend', 'check_log_cost', 'check_serverless_cost']
 LATER_CHECKS = (V14_CHECKS | V15_CHECKS | V15_6_CHECKS | V17_CHECKS | set(V18_1_CHECKS) | set(V18_2_CHECKS) | set(V18_3_CHECKS) | set(V18_4_CHECKS)
-                | set(V18_5_CHECKS) | set(V18_6_CHECKS) | set(V18_7_CHECKS))
+                | set(V18_5_CHECKS) | set(V18_6_CHECKS) | set(V18_7_CHECKS) | set(V18_8_CHECKS))
 
 
 def finished_checks(progress_updates):
@@ -384,7 +386,7 @@ def test_runner_runs_the_beta_v1_check_plan(scope, scope_id, beta, monkeypatch):
     specs = registry.build_check_plan(scope, scope_id, JOB_ID, PROJECTS, zones, regions)
     names = [spec.func.__name__ for spec in specs]
     v17_names = {spec.name for spec in specs if spec.func.__name__ in V17_CHECKS}
-    assert len(names) == (59 if scope == 'organization' else 56)
+    assert len(names) == (62 if scope == 'organization' else 59)
     # Same order as beta v1's plan lists, which append the four checks after "Service Quota Limits".
     beta_plan = ast.parse(textwrap.dedent(inspect.getsource(beta.run_all_checks)))
     beta_lists = [[entry.elts[2].id for entry in node.elts if isinstance(entry, ast.Tuple)]
@@ -404,7 +406,8 @@ def test_runner_runs_the_beta_v1_check_plan(scope, scope_id, beta, monkeypatch):
     assert names[45:48] == V18_5_CHECKS
     assert names[48:51] == V18_6_CHECKS
     assert names[51:55] == V18_7_CHECKS
-    assert names[-2:] == (['check_audit_logging', 'check_org_advisories'] if scope == 'organization' else ['check_custom_roles', 'check_project_advisories'])
+    assert names[55:58] == V18_8_CHECKS
+    assert names[-2:] == (['check_audit_logging', 'check_org_advisories'] if scope == 'organization' else ['check_serverless_cost', 'check_project_advisories'])
     calls = {'beta': {}, 'new': {}}
     sink = RecordingSink()
 
@@ -451,7 +454,8 @@ def test_runner_runs_the_beta_v1_check_plan(scope, scope_id, beta, monkeypatch):
               registry.BIGQUERY_CHECK, registry.SQL_FLAGS_CHECK, registry.ALLOYDB_CHECK, registry.KMS_CHECK, registry.API_KEYS_CHECK,  # v18.4
               registry.VM_SA_CHECK, registry.SA_PRIVILEGES_CHECK, registry.UNUSED_SA_CHECK,  # v18.5
               registry.EXPOSURE_CHECK, registry.ARMOR_CHECK, registry.SCANNING_CHECK,  # v18.6
-              registry.FOLDER_ROLES_CHECK, registry.PRIVILEGED_GRANTS_CHECK, registry.SECRET_SCOPE_CHECK, registry.CUSTOM_ROLES_CHECK}  # v18.7
+              registry.FOLDER_ROLES_CHECK, registry.PRIVILEGED_GRANTS_CHECK, registry.SECRET_SCOPE_CHECK, registry.CUSTOM_ROLES_CHECK,  # v18.7
+              registry.SPEND_BRIEFING, registry.LOG_COST_CHECK, registry.SERVERLESS_COST_CHECK}  # v18.8
     assert finished_checks(progress) - later == finished_checks(beta_progress) - {'Personalized Service Health', registry.RESILIENCE_CHECK, 'Essential Contacts'}
     assert sink.findings == []
 
@@ -464,7 +468,7 @@ def test_check_plan_is_the_legacy_plan_plus_the_beta_v1_checks(scope, legacy):
     legacy_names = set(legacy.run_all_checks.__code__.co_names)
     advisories = 'check_org_advisories' if scope == 'organization' else 'check_project_advisories'
     assert [name for name in names if name not in legacy_names] == \
-           BETA_V1_CHECKS + ['check_service_health_incidents', 'check_gke_supported_versions'] + V17_COMMON_CHECKS + V17_1_CHECKS + ['check_data_access_audit_logs', 'check_gke_operations'] + V18_3_CHECKS + V18_4_CHECKS + V18_5_CHECKS + V18_6_CHECKS + V18_7_CHECKS + [advisories]
+           BETA_V1_CHECKS + ['check_service_health_incidents', 'check_gke_supported_versions'] + V17_COMMON_CHECKS + V17_1_CHECKS + ['check_data_access_audit_logs', 'check_gke_operations'] + V18_3_CHECKS + V18_4_CHECKS + V18_5_CHECKS + V18_6_CHECKS + V18_7_CHECKS + V18_8_CHECKS + [advisories]
     if scope == 'organization':  # the one legacy check the plan no longer runs
         assert {name for name in legacy_names if name.startswith('check_')} - set(names) == RETIRED_CHECKS
 
@@ -505,10 +509,11 @@ def test_runner_runs_the_scope_level_checks_when_there_is_no_project(scope, scop
                    'BigQuery Governance', 'Cloud SQL Flags', 'AlloyDB Posture', 'KMS Keys', 'API Keys',  # v18.4: data governance
                    'VM Service Accounts', 'Service Account Privileges',  # v18.5: VM posture and identity hygiene (two records each)
                    'Serverless Exposure', 'Cloud Armor Policy Content', 'Container Scanning Enabled',  # v18.6: serverless and edge exposure (two records each for the first two)
-                   'Folder Primitive Roles', 'Secret Access Scope']  # v18.7: the folders under the scope; the secrets (two records)
+                   'Folder Primitive Roles', 'Secret Access Scope',  # v18.7: the folders under the scope; the secrets (two records)
+                   'Spend Briefing', 'Serverless Cost Hygiene']  # v18.8: the billing export under the scope's ancestry (two records); the workloads and connectors
     split_halves = ['Privileged Grants', 'Custom Roles With IAM Powers']  # v18.7: the scope halves of the two split checks, in every scope
     if scope == 'organization':
-        assert ran[:28] == scope_level + ['Organization IAM Policy'] and registry.MISCELLANEOUS_CHECK in ran and 'IAM Least Privilege' in ran and ran[-2:] == split_halves
+        assert ran[:30] == scope_level + ['Organization IAM Policy'] and registry.MISCELLANEOUS_CHECK in ran and 'IAM Least Privilege' in ran and ran[-2:] == split_halves
     elif scope == 'folder':
         assert ran == scope_level + ['Open Firewall Rules', 'IAM Least Privilege'] + split_halves  # the split halves: firewall policies (v18.3), the folder's IAM recommendations
     else:

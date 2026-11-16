@@ -11,7 +11,12 @@ locals {
   image               = var.image != "" ? var.image : "gcr.io/${var.project_id}/${var.service_name}"
   deploy_services     = var.image_tag != ""
   export              = var.bigquery_dataset != ""
+  spend               = var.billing_export != ""
   on_organization     = var.organization_id != ""
+  # The billing export dataset (v18.8) as <project>.<dataset> or <project>:<dataset>, split for the READER grant below.
+  billing_export_parts   = local.spend ? split(".", replace(var.billing_export, ":", ".")) : ["", ""]
+  billing_export_project = local.billing_export_parts[0]
+  billing_export_dataset = local.billing_export_parts[length(local.billing_export_parts) - 1]
 
   project_number        = data.google_project.this.number
   service_account_email = google_service_account.cloudgauge.email
@@ -35,10 +40,11 @@ locals {
 
   # Project roles: Gemini calls, the Cloud Tasks queue, and Cloud Build — the image is built as this account
   # (it reads the uploaded source, pushes the image, writes the build log) rather than as the Compute Engine
-  # default account, which organizations commonly leave without roles. With the export: load jobs in the project.
+  # default account, which organizations commonly leave without roles. With the export (load jobs) or the billing
+  # export (the spend queries, v18.8): BigQuery jobs in the project.
   project_roles = concat(
     ["roles/aiplatform.user", "roles/cloudtasks.admin", "roles/cloudbuild.builds.builder"],
-    local.export ? ["roles/bigquery.jobUser"] : [],
+    local.export || local.spend ? ["roles/bigquery.jobUser"] : [],
   )
 
   # Organization roles: README › Common Prerequisites, step 2 (1), all read-only. The Advisory Notifications
@@ -74,6 +80,8 @@ locals {
     local.export ? { BIGQUERY_DATASET = var.bigquery_dataset } : {},
     length(var.cost_allocation_labels) > 0 ? { COST_ALLOCATION_LABELS = join(",", var.cost_allocation_labels) } : {},
     length(var.trusted_domains) > 0 ? { TRUSTED_DOMAINS = join(",", var.trusted_domains) } : {},
+    local.spend ? { BILLING_EXPORT = var.billing_export } : {},
+    var.spend_anomaly_floor != "" ? { SPEND_ANOMALY_FLOOR = var.spend_anomaly_floor } : {},
   )
 }
 
@@ -179,6 +187,19 @@ resource "google_bigquery_dataset_access" "writer" {
   project       = var.project_id
   dataset_id    = google_bigquery_dataset.export[0].dataset_id
   role          = "WRITER"
+  user_by_email = google_service_account.cloudgauge.email
+}
+
+# --- 6b. The billing export (v18.8) -------------------------------------------------------------
+# READER on the billing export dataset alone (what roles/bigquery.dataViewer would grant project-wide), when the
+# dataset is in this project; a dataset in another project needs the same entry from its owner (README › Spend).
+# The export is read, never written, and nothing is read from the billing account.
+resource "google_bigquery_dataset_access" "billing_reader" {
+  count = local.spend && local.billing_export_project == var.project_id ? 1 : 0
+
+  project       = var.project_id
+  dataset_id    = local.billing_export_dataset
+  role          = "READER"
   user_by_email = google_service_account.cloudgauge.email
 }
 

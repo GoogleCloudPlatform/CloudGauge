@@ -48,6 +48,8 @@ CATEGORY_MAP = {
     "Cost Allocation Labels": "Cost Optimization",
     "Cloud Storage Lifecycle": "Cost Optimization", "Snapshot Sprawl": "Cost Optimization",
     "Commitments Expiring": "Cost Optimization",
+    # v18.8: forecasts, budgets and spend — the spend briefing (Informational) and its scored companion, the log and serverless cost levers.
+    "Spend Briefing": "Cost Optimization", "Spend Anomalies": "Cost Optimization", "Log Cost Levers": "Cost Optimization", "Serverless Cost Hygiene": "Cost Optimization",
 
     # Reliability & Resilience
     "Cloud Storage Versioning": "Reliability & Resilience", "GKE Hygiene": "Reliability & Resilience",
@@ -159,8 +161,10 @@ def categorize_findings(findings):
     return categorized_results
 
 
-# The verdict statuses, worst first: shards' records of one check under either are joined into one (v18).
-VERDICT_STATUSES = ("Action Required", "Investigation Recommended")
+# The verdict statuses, worst first: shards' records of one check under any of them are joined into one (v18). v18.8: Informational
+# joins them too — a per-project check whose rows are Informational in one shard and a verdict in another (Log Cost Levers' retention
+# rows beside a sampling row) writes one record under the worst in a single scan, so the merge does the same.
+VERDICT_STATUSES = ("Action Required", "Investigation Recommended", "Informational")
 VERDICT_KEY = "verdict"
 
 

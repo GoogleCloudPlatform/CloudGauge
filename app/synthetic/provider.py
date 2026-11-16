@@ -63,12 +63,13 @@ API_LATENCY_SCALE = {
     "cloudresourcemanager": 0.8, "compute": 1.0, "iam": 1.0, "sqladmin": 1.2, "container": 1.5,
     "recommender": 1.6, "monitoring": 1.2, "logging": 1.0, "securitycenter": 1.0, "essentialcontacts": 1.0,
     "asset": 2.0, "osconfig": 0.8, "storage": 0.8, "http": 1.0, "servicehealth": 1.2, "advisorynotifications": 1.0,
-    "accesscontextmanager": 1.0,
+    "accesscontextmanager": 1.0, "bigquery": 2.5, "vpcaccess": 1.0,  # v18.8
 }
 LATENCY_SIGMA = 0.45  # log-normal spread: p95 is about 2x the median
 PASSTHROUGH_SERVICES = (("run", "v1"),)  # infrastructure APIs the synthetic provider never fakes (v18.6: Cloud Run v2 is faked for the serverless checks)
 PAGE_SIZE = 100
 SYNTHETIC_CUSTOM_ROLE = "deployer"  # v18.7: the project-level custom role the world draws (with or without IAM powers, retired or not)
+SYNTHETIC_EXPORT_TABLE = "gcp_billing_export_v1_SYNTH00_000000_000000"  # v18.8: the one standard export table of the synthetic billing dataset
 COST_RECOMMENDER_IDS = {rec_id: check for check, (rec_id, _) in COST_RECOMMENDERS.items()}
 NETWORK_INSIGHT_IDS = {insight_id: check for check, insight_id in NETWORK_INSIGHT_TYPES.items()}
 UNATTENDED_RECOMMENDER = "google.resourcemanager.projectUtilization.Recommender"
@@ -565,13 +566,15 @@ class SyntheticGcp:
                           for name, region, pga in profile.subnets if region == kw["region"]]}
 
     def _h_compute_subnetworks_aggregatedList(self, kw, project_id):
-        """Every subnet of the project in one call (v18.1), with ``purpose`` and ``network``; a proxy-only subnet for some projects."""
+        """Every subnet of the project in one call (v18.1), with ``purpose`` and ``network``; a proxy-only subnet for some projects; v18.8: the
+        flow-log configuration (sampling, metadata, interval) the log-cost rules read."""
         self.call("compute", "subnetworks.aggregatedList", project_id=project_id, style="http")
         profile, items = self.world.project(project_id), {}
-        for name, region, pga in profile.subnets:
+        for position, (name, region, pga) in enumerate(profile.subnets):
             items.setdefault(f"regions/{region}", {"subnetworks": []})["subnetworks"].append(
                 {"name": name, "region": f"https://www.googleapis.com/compute/v1/projects/{project_id}/regions/{region}", "privateIpGoogleAccess": pga,
-                 "purpose": "PRIVATE", "network": f"https://www.googleapis.com/compute/v1/projects/{project_id}/global/networks/vpc-main"})
+                 "purpose": "PRIVATE", "network": f"https://www.googleapis.com/compute/v1/projects/{project_id}/global/networks/vpc-main",
+                 **self._subnet_log_config(profile, position)})
         if profile.proxy_subnet and profile.subnets:
             region = profile.subnets[0][1]
             items.setdefault(f"regions/{region}", {"subnetworks": []})["subnetworks"].append(
@@ -604,6 +607,149 @@ class SyntheticGcp:
         if posture.project_ssh_keys:
             items.append({"key": "ssh-keys", "value": "ops:ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFakeKeyForTheSyntheticWorld ops@example.com"})
         return items
+
+    # --- v18.8: the cost levers ---
+
+    @staticmethod
+    def _subnet_log_config(profile, position):
+        """``enableFlowLogs`` and ``logConfig`` of the subnet at ``position`` (flow logs from the network edge, sampling from the cost levers)."""
+        edge, levers = profile.network_edge, profile.cost_levers
+        on = bool(edge and position < len(edge.flow_logs) and edge.flow_logs[position])
+        sampling = levers.flow_sampling[position] if levers and position < len(levers.flow_sampling) else 0.5
+        verbose = bool(levers and levers.flow_verbose and sampling >= 1.0)
+        config = {"enable": on, "flowSampling": sampling, "metadata": "INCLUDE_ALL_METADATA" if verbose else "EXCLUDE_ALL_METADATA",
+                  "aggregationInterval": "INTERVAL_5_SEC" if verbose else "INTERVAL_5_MIN"} if on else {"enable": False}
+        return {"enableFlowLogs": on, "logConfig": config}
+
+    def _h_logging_projects_locations_buckets_list(self, kw, project_id):
+        """The project's log buckets: ``_Required`` (400 days, locked), ``_Default`` at the drawn retention, an optional locked audit bucket."""
+        self.call("logging", "buckets.list", project_id=project_id, style="http")
+        profile = self.world.project(project_id)
+        levers = profile.cost_levers
+        prefix = f"projects/{project_id}/locations"
+        buckets = [{"name": f"{prefix}/global/buckets/_Required", "retentionDays": 400, "locked": True, "lifecycleState": "ACTIVE"},
+                   {"name": f"{prefix}/global/buckets/_Default", "retentionDays": levers.log_retention if levers else 30, "lifecycleState": "ACTIVE"}]
+        if levers and levers.audit_bucket:
+            buckets.append({"name": f"{prefix}/asia-south1/buckets/audit", "retentionDays": 400, "locked": True, "lifecycleState": "ACTIVE"})
+        return {"buckets": buckets}
+
+    def _h_logging_projects_sinks_list(self, kw, project_id):
+        """The project's sinks: ``_Required``, ``_Default`` (with a DEBUG exclusion where drawn) and one per bucket the world marks as a sink destination."""
+        self.call("logging", "sinks.list", project_id=project_id, style="http")
+        profile = self.world.project(project_id)
+        levers = profile.cost_levers
+        buckets = f"logging.googleapis.com/projects/{project_id}/locations/global/buckets"
+        default = {"name": "_Default", "destination": f"{buckets}/_Default", "filter": "NOT LOG_ID(\"cloudaudit.googleapis.com/activity\")"}
+        if levers and levers.debug_exclusion:
+            default["exclusions"] = [{"name": "drop-debug", "filter": "severity=DEBUG"}]
+        sinks = [{"name": "_Required", "destination": f"{buckets}/_Required", "filter": "LOG_ID(\"cloudaudit.googleapis.com/activity\")"}, default]
+        sinks += [{"name": f"sink-{i}", "destination": f"storage.googleapis.com/{bucket}", "filter": "severity>=ERROR"} for i, bucket in enumerate(profile.sink_buckets)]
+        return {"sinks": sinks}
+
+    def _h_monitoring_projects_timeSeries_list(self, kw, project_id):
+        """``byte_count`` summed by severity over the window: the drawn 30-day volume split DEBUG / INFO / ERROR."""
+        self.call("monitoring", "timeSeries.list", project_id=project_id, style="http")
+        if "logging.googleapis.com/byte_count" not in str(kw.get("filter") or ""):
+            return {}
+        levers = self.world.project(project_id).cost_levers
+        if levers is None:
+            return {}
+        total = int(levers.log_volume_gib * 1024 ** 3)
+        debug = int(total * levers.debug_share)
+        info = int((total - debug) * 0.6)
+        series = []
+        for severity, value in (("DEBUG", debug), ("INFO", info), ("ERROR", total - debug - info)):
+            series.append({"metric": {"type": "logging.googleapis.com/byte_count", "labels": {"severity": severity}}, "resource": {"type": "global"},
+                           "points": [{"interval": {"startTime": kw.get("interval_startTime"), "endTime": kw.get("interval_endTime")}, "value": {"int64Value": str(value)}}]})
+        return {"timeSeries": series}
+
+    def _connector_record(self, profile, by_number=False):
+        """The project's Serverless VPC Access connector (``conn-main`` in the serverless region) as the API shows it — or, ``by_number``, as the
+        inventory does (named by project number, like API keys and secrets) — or None."""
+        levers = profile.cost_levers
+        if levers is None or not levers.connector:
+            return None
+        project_id, number, region = profile.project_id, profile.project_number, self._serverless_region(profile)
+        return {"name": f"projects/{number if by_number else project_id}/locations/{region}/connectors/conn-main", "network": "vpc-main", "ipCidrRange": "10.8.0.0/28", "state": "READY",
+                "minInstances": 2, "maxInstances": 3, "machineType": "e2-micro", "connectedProjects": [project_id]}
+
+    def _h_vpcaccess_projects_locations_connectors_list(self, kw, project_id):
+        parent = str(kw.get("parent") or "")
+        self.call("vpcaccess", "connectors.list", project_id=project_id, style="http")
+        profile = self.world.project(project_id)
+        connector = self._connector_record(profile)
+        return {"connectors": [connector]} if connector and parent.endswith(f"/locations/{self._serverless_region(profile)}") else {}
+
+    def _h_bigquery_tables_list(self, kw, project_id):
+        """The billing export dataset's tables: one standard export table, ingestion-time partitioned."""
+        self.call("bigquery", "tables.list", style="http")
+        reference = {"projectId": kw.get("projectId"), "datasetId": kw.get("datasetId"), "tableId": SYNTHETIC_EXPORT_TABLE}
+        return {"tables": [{"tableReference": reference, "type": "TABLE", "timePartitioning": {"type": "DAY"}}]}
+
+    def _spend_scope(self, scope_id):
+        """The profiles the spend queries cover: the organization's, a folder's or one project's."""
+        if scope_id == self.world.org_id:
+            return self.world.projects()
+        if scope_id in self.world.folder_ids:
+            return self.world.projects(scope_id)
+        profile = self.world.project(scope_id)
+        return [profile] if profile else []
+
+    def _h_bigquery_jobs_query(self, kw, project_id):
+        """The two spend queries (``app.checks.spend``) answered from ``SyntheticOrg.daily_spend`` the way BigQuery would: the briefing's
+        ``(kind, item, value, value2)`` rows, or the anomaly rows the rule leaves — as a finished ``jobs.query`` response."""
+        self.call("bigquery", "jobs.query", style="http")
+        body = kw.get("body") or {}
+        params = {p["name"]: p.get("parameterValue") or {} for p in body.get("queryParameters") or []}
+        scalar = {name: value.get("value") for name, value in params.items() if "value" in value}
+        today = datetime.strptime(scalar.get("today") or datetime.now(timezone.utc).strftime("%Y-%m-%d"), "%Y-%m-%d").date()
+        profiles = self._spend_scope(str(scalar.get("scope_id") or ""))
+        query = str(body.get("query") or "")
+
+        def response(fields, rows):
+            return {"jobComplete": True, "schema": {"fields": [{"name": f} for f in fields]}, "rows": [{"f": [{"v": None if v is None else str(v)} for v in row]} for row in rows],
+                    "totalRows": str(len(rows)), "jobReference": {"projectId": kw.get("projectId"), "jobId": "synthetic", "location": "US"}}
+
+        if '"day" AS kind' in query:
+            days, projects, services, credits = {}, {}, {}, {}
+            eligible_cost = eligible_cud = 0.0
+            eligible = {v["value"] for v in (params.get("eligible") or {}).get("arrayValues") or []}
+            for profile in profiles:
+                for offset in range(1, 96):
+                    day = (today - timedelta(days=offset)).isoformat()
+                    for service, cost, credit, cud in self.world.daily_spend(profile, offset):
+                        net = cost + credit
+                        days[day] = days.get(day, 0.0) + net
+                        bucket = 0 if offset <= 30 else (1 if offset <= 60 else None)
+                        if bucket is not None:
+                            for table, key in ((projects, profile.project_id), (services, service)):
+                                now, before = table.get(key, (0.0, 0.0))
+                                table[key] = (now + net, before) if bucket == 0 else (now, before + net)
+                        if offset <= 30:
+                            if credit:
+                                kind = "COMMITTED_USAGE_DISCOUNT" if cud else "SUSTAINED_USAGE_DISCOUNT"
+                                credits[kind] = credits.get(kind, 0.0) + credit
+                            if service in eligible:
+                                eligible_cost += cost
+                                eligible_cud += cud
+            rows = [("day", day, net, 0.0) for day, net in sorted(days.items())]
+            rows += [("project", name, now, before) for name, (now, before) in sorted(projects.items())]
+            rows += [("service", name, now, before) for name, (now, before) in sorted(services.items())]
+            rows += [("credit", kind, amount, 0.0) for kind, amount in sorted(credits.items())]
+            rows += [("eligible", "commitment-eligible", eligible_cost, eligible_cud), ("currency", "USD", sum(len(p.vms) + 1 for p in profiles), 0.0),
+                     ("freshness", (datetime.now(timezone.utc) - timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%SZ"), 0.0, 0.0), ("unattributed", "", 0.0, 0.0)]
+            return response(("kind", "item", "value", "value2"), rows)
+        floor, ratio = float(scalar.get("floor") or 0), float(scalar.get("ratio") or 1.5)
+        weekly = {}
+        for profile in profiles:
+            for offset in range(1, 29):
+                for service, cost, credit, _ in self.world.daily_spend(profile, offset):
+                    this_week, before = weekly.get((profile.project_id, service), (0.0, 0.0))
+                    weekly[(profile.project_id, service)] = (this_week + cost + credit, before) if offset <= 7 else (this_week, before + cost + credit)
+        flagged = [(pid, service, this_week, before / 3) for (pid, service), (this_week, before) in weekly.items()
+                   if this_week >= floor and (before <= 0 or this_week >= ratio * before / 3)]
+        flagged.sort(key=lambda row: (-row[2], row[0], row[1]))
+        return response(("project_id", "service", "this_week", "weekly_mean_before"), flagged[:200])
 
     def _h_iam_projects_serviceAccounts_list(self, kw, project_id):
         self.call("iam", "serviceAccounts.list", project_id=project_id, style="http")
@@ -878,6 +1024,15 @@ class SyntheticGcp:
         if "secretmanager.googleapis.com/Secret" in asset_types:  # v18.7: the secrets and their versions
             project_id = scope.split("/", 1)[1] if scope.startswith("projects/") else None
             results += self._secret_results([self.world.project(project_id)] if project_id else self.world.projects(folder_id))
+        if "vpcaccess.googleapis.com/Connector" in asset_types:  # v18.8: the connectors, with their content
+            project_id = scope.split("/", 1)[1] if scope.startswith("projects/") else None
+            for p in ([self.world.project(project_id)] if project_id else self.world.projects(folder_id)):
+                connector = self._connector_record(p, by_number=True)
+                if connector:
+                    results.append(SimpleNamespace(name=f"//vpcaccess.googleapis.com/{connector['name']}", asset_type="vpcaccess.googleapis.com/Connector",
+                                                   project=f"projects/{p.project_number}", folders=[f"folders/{p.folder_id}"], organization=f"organizations/{self.world.org_id}",
+                                                   parent_full_resource_name=f"//cloudresourcemanager.googleapis.com/projects/{p.project_number}",
+                                                   versioned_resources=[{"version": "v1", "resource": connector}]))
         self.call("asset", "searchAllResources", pages=max(1, math.ceil(len(results) / PAGE_SIZE)))
         return results
 
@@ -1014,6 +1169,11 @@ class SyntheticGcp:
         project_id, number, region = profile.project_id, profile.project_number, self._serverless_region(profile)
         email = f"{number}-compute@developer.gserviceaccount.com" if account == "default" else f"{name}@{project_id}.iam.gserviceaccount.com"
         ingress = "internal" if exposure == "internal" else "internal-and-cloud-load-balancing" if exposure == "behind-lb-locked" else "all"
+        levers = profile.cost_levers
+        first = bool(profile.serverless and profile.serverless.services and profile.serverless.services[0][0] == name)
+        connector = f"projects/{project_id}/locations/{region}/connectors/conn-main" if first and levers and levers.connector == "used" else ""
+        other_region = next(r for r in REGIONS if r != region)
+        sql_instance = f"{project_id}:{other_region}:sql-0" if first and levers and levers.cross_region_sql else ""
         if v2:
             data = {"name": f"projects/{project_id}/locations/{region}/services/{name}", "uri": f"https://{name}-{number}.{region}.run.app",
                     "ingress": {"all": "INGRESS_TRAFFIC_ALL", "internal": "INGRESS_TRAFFIC_INTERNAL_ONLY", "internal-and-cloud-load-balancing": "INGRESS_TRAFFIC_INTERNAL_LOAD_BALANCER"}[ingress],
@@ -1022,14 +1182,25 @@ class SyntheticGcp:
                 data["iapEnabled"] = True
             if exposure == "public-setting":
                 data["invokerIamDisabled"] = True
+            if connector:  # v18.8
+                data["template"]["vpcAccess"] = {"connector": connector, "egress": "PRIVATE_RANGES_ONLY"}
+            if sql_instance:
+                data["template"]["volumes"] = [{"name": "cloudsql", "cloudSqlInstance": {"instances": [sql_instance]}}]
             return data
         annotations = {"run.googleapis.com/ingress": ingress, "run.googleapis.com/ingress-status": ingress}
         if exposure == "iap":
             annotations["run.googleapis.com/iap-enabled"] = "true"
         if exposure == "public-setting":
             annotations["run.googleapis.com/invoker-iam-disabled"] = "true"
+        template_annotations = {}  # v18.8: the revision template's annotations, where the connector and the Cloud SQL instances live
+        if connector:
+            template_annotations["run.googleapis.com/vpc-access-connector"] = "conn-main"
+            template_annotations["run.googleapis.com/vpc-access-egress"] = "private-ranges-only"
+        if sql_instance:
+            template_annotations["run.googleapis.com/cloudsql-instances"] = sql_instance
         return {"apiVersion": "serving.knative.dev/v1", "kind": "Service", "metadata": {"name": name, "namespace": number, "annotations": annotations, "labels": {"cloud.googleapis.com/location": region}},
-                "spec": {"template": {"spec": {"serviceAccountName": email, "containers": [{"image": f"gcr.io/{project_id}/{name}"}]}}}, "status": {"url": f"https://{name}-{number}.{region}.run.app"}}
+                "spec": {"template": {"metadata": {"annotations": template_annotations}, "spec": {"serviceAccountName": email, "containers": [{"image": f"gcr.io/{project_id}/{name}"}]}}},
+                "status": {"url": f"https://{name}-{number}.{region}.run.app"}}
 
     def _function_record(self, profile, v2=False):
         """The project's Cloud Function (gen 1: a flat ``CloudFunction``; gen 2: ``serviceConfig`` naming its Cloud Run service) or ``None``."""
@@ -1107,6 +1278,10 @@ class SyntheticGcp:
         certificate = self._certificate_record(profile)
         if certificate and edge is not None and edge.lb.startswith("https") and "compute.googleapis.com/SslCertificate" in asset_types:
             asset("compute", "global/sslCertificates/edge-cert", certificate)
+        connector = self._connector_record(profile, by_number=True)  # v18.8: the inventory names it by project number
+        if connector and "vpcaccess.googleapis.com/Connector" in asset_types:
+            found.append(SimpleNamespace(name=f"//vpcaccess.googleapis.com/{connector['name']}",
+                                         resource=SimpleNamespace(data=connector, parent=f"//cloudresourcemanager.googleapis.com/projects/{number}")))
         return found
 
     def _h_run_projects_locations_services_list(self, kw, project_id):
@@ -1202,10 +1377,10 @@ class SyntheticGcp:
             if edge.legacy_network:
                 asset("compute", "global/networks/legacy-net", {"name": "legacy-net", "selfLink": f"{compute}/global/networks/legacy-net", "IPv4Range": "10.240.0.0/16"})
         if "compute.googleapis.com/Subnetwork" in asset_types:
-            for (name, subnet_region, pga), logs in zip(profile.subnets, edge.flow_logs):
+            for position, (name, subnet_region, pga) in enumerate(profile.subnets):
                 asset("compute", f"regions/{subnet_region}/subnetworks/{name}",
                       {"name": name, "region": f"{compute}/regions/{subnet_region}", "network": f"{compute}/global/networks/vpc-main", "purpose": "PRIVATE",
-                       "privateIpGoogleAccess": pga, "enableFlowLogs": logs, "logConfig": {"enable": logs}})
+                       "privateIpGoogleAccess": pga, **self._subnet_log_config(profile, position)})
             if profile.proxy_subnet and profile.subnets:
                 asset("compute", f"regions/{region}/subnetworks/proxy-only", {"name": "proxy-only", "region": f"{compute}/regions/{region}", "purpose": "REGIONAL_MANAGED_PROXY",
                                                                              "network": f"{compute}/global/networks/vpc-main", "enableFlowLogs": False})
@@ -1769,6 +1944,8 @@ class _BucketStub:
         self.storage_class = "STANDARD"
         # v18.1: soft delete (the 7-day default, or off for the unprotected buckets) and a retention policy on some
         profile = provider.world.project(project_id)
+        if profile.cost_levers and bucket.name in profile.cost_levers.pruned_buckets:  # v18.8: the versioned buckets that prune their history
+            self.lifecycle_rules.append({"action": {"type": "Delete"}, "condition": {"numNewerVersions": 3}})
         self.soft_delete_policy = SimpleNamespace(retention_duration_seconds=0 if bucket.name in profile.unprotected_buckets else 604800)
         self.retention_period = 86400 * 30 if bucket.name in profile.retention_buckets else None
 

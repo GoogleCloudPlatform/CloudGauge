@@ -23,6 +23,9 @@
 #   6. export   with BIGQUERY_DATASET: create the dataset (in REGION) and let the service account load
 #               into it (WRITER on the dataset, roles/bigquery.jobUser on the project); every finished
 #               scan is then exported (README › History and analytics).
+#   6b. spend   with BILLING_EXPORT (v18.8): let the service account read the billing export dataset
+#               (READER on the dataset when it is in PROJECT_ID — the dataset owner's one grant otherwise
+#               — and roles/bigquery.jobUser on the project); Spend Briefing and Spend Anomalies then read it.
 #   7. schedule with SCHEDULES: create or update one Cloud Scheduler job per entry, posting to the
 #               worker's /scheduled-scan with the service account's OIDC token.
 #
@@ -45,6 +48,10 @@
 #                     its own variable because EXTRA_ENV values cannot contain commas
 #   TRUSTED_DOMAINS   domains besides the organization's primary one whose users and groups External Principals
 #                     does not list, comma-separated (partner.example,acquired.example); its own variable for the same reason
+#   BILLING_EXPORT    the BigQuery dataset the billing account exports to, <project>.<dataset> (v18.8): Spend Briefing
+#                     and Spend Anomalies read its standard export tables; nothing is read from the billing account
+#   SPEND_ANOMALY_FLOOR
+#                     the least a project's week on a service must cost to be a spend anomaly (v18.8)      [50]
 #   SCHEDULES         scheduled scans, semicolon-separated NAME=SCOPE/SCOPE_ID@CRON (cron in UTC), e.g.
 #                     "weekly-org=organization/123456789012@30 0 * * 1;nightly-prod=project/my-prod@0 2 * * *"
 #   SKIP_SETUP=1      skip step 1 (updating a deployment that works)
@@ -80,10 +87,18 @@ EXTRA_ENV="${EXTRA_ENV:-}"
 BIGQUERY_DATASET="${BIGQUERY_DATASET:-}"
 COST_ALLOCATION_LABELS="${COST_ALLOCATION_LABELS:-}"
 TRUSTED_DOMAINS="${TRUSTED_DOMAINS:-}"
+BILLING_EXPORT="${BILLING_EXPORT:-}"
+SPEND_ANOMALY_FLOOR="${SPEND_ANOMALY_FLOOR:-}"
 SCHEDULES="${SCHEDULES:-}"
 DRY_RUN="${DRY_RUN:-0}"
 if [[ -n "$BIGQUERY_DATASET" && ! "$BIGQUERY_DATASET" =~ ^[A-Za-z0-9_]+$ ]]; then
   echo "BIGQUERY_DATASET must be a dataset ID: letters, digits and underscores." >&2; exit 2
+fi
+if [[ -n "$BILLING_EXPORT" && ! "$BILLING_EXPORT" =~ ^[a-z][a-z0-9-]{4,28}[a-z0-9][.:][A-Za-z0-9_]+$ ]]; then
+  echo "BILLING_EXPORT must be <project>.<dataset>: the BigQuery dataset the billing account exports to." >&2; exit 2
+fi
+if [[ -n "$SPEND_ANOMALY_FLOOR" && ! "$SPEND_ANOMALY_FLOOR" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+  echo "SPEND_ANOMALY_FLOOR must be a number (in the export's currency)." >&2; exit 2
 fi
 
 # The schedules, parsed now so that a typo stops the script before it changes anything: NAME=SCOPE/SCOPE_ID@CRON.
@@ -143,6 +158,7 @@ note "operators        ${MEMBERS:-(none: grant access afterwards, see the end)}"
 note "BigQuery export  ${BIGQUERY_DATASET:-(off: set BIGQUERY_DATASET to export every scan)}"
 note "label keys       ${COST_ALLOCATION_LABELS:-(none: Cost Allocation Labels stays Informational)}"
 note "trusted domains  ${TRUSTED_DOMAINS:-(none: the primary domain alone)}"
+note "billing export   ${BILLING_EXPORT:-(none: Spend Briefing and Spend Anomalies stay Informational)}"
 note "schedules        ${SCHEDULES:-(none)}"
 if [[ "$DRY_RUN" == 1 ]]; then note "DRY RUN: nothing is executed"; fi
 
@@ -161,7 +177,7 @@ IAP_AGENT="service-${PROJECT_NUMBER}@gcp-sa-iap.iam.gserviceaccount.com"
 # The services' variables, joined with "|" behind gcloud's "^|^" delimiter prefix so that a value may contain
 # commas (COST_ALLOCATION_LABELS, TRUSTED_DOMAINS). EXTRA_ENV is comma-separated pairs whose values have none, so its commas
 # become the separator.
-COMMON_ENV="^|^PROJECT_ID=${PROJECT_ID}|LOCATION=${REGION}|TASK_QUEUE=${QUEUE}|RESULTS_BUCKET=${BUCKET}|SERVICE_ACCOUNT_EMAIL=${SA_EMAIL}${EXTRA_ENV:+|${EXTRA_ENV//,/|}}${BIGQUERY_DATASET:+|BIGQUERY_DATASET=${BIGQUERY_DATASET}}${COST_ALLOCATION_LABELS:+|COST_ALLOCATION_LABELS=${COST_ALLOCATION_LABELS}}${TRUSTED_DOMAINS:+|TRUSTED_DOMAINS=${TRUSTED_DOMAINS}}"
+COMMON_ENV="^|^PROJECT_ID=${PROJECT_ID}|LOCATION=${REGION}|TASK_QUEUE=${QUEUE}|RESULTS_BUCKET=${BUCKET}|SERVICE_ACCOUNT_EMAIL=${SA_EMAIL}${EXTRA_ENV:+|${EXTRA_ENV//,/|}}${BIGQUERY_DATASET:+|BIGQUERY_DATASET=${BIGQUERY_DATASET}}${COST_ALLOCATION_LABELS:+|COST_ALLOCATION_LABELS=${COST_ALLOCATION_LABELS}}${TRUSTED_DOMAINS:+|TRUSTED_DOMAINS=${TRUSTED_DOMAINS}}${BILLING_EXPORT:+|BILLING_EXPORT=${BILLING_EXPORT}}${SPEND_ANOMALY_FLOOR:+|SPEND_ANOMALY_FLOOR=${SPEND_ANOMALY_FLOOR}}"
 
 # --- 1. setup -----------------------------------------------------------------------------------
 if [[ "${SKIP_SETUP:-0}" != 1 ]]; then
@@ -305,6 +321,46 @@ PY
   g projects add-iam-policy-binding "$PROJECT_ID" --member="serviceAccount:${SA_EMAIL}" --role=roles/bigquery.jobUser --condition=None >/dev/null
   note "Every finished scan loads into ${BIGQUERY_DATASET}.scans and ${BIGQUERY_DATASET}.findings (README › History and analytics)."
   note "Earlier scans: python tools/backfill_export.py --project ${PROJECT_ID} --location ${REGION} --bucket ${BUCKET} --dataset ${BIGQUERY_DATASET}"
+fi
+
+# --- 6b. spend (v18.8) --------------------------------------------------------------------------
+# The billing export is read, never written: READER on the dataset (what roles/bigquery.dataViewer grants, on this
+# dataset alone) when the dataset is in this project; a dataset in another project needs the same entry from its
+# owner (the note says how). The queries run here, under the Job User role the export step grants too.
+if [[ -n "$BILLING_EXPORT" && "${SKIP_SETUP:-0}" != 1 ]]; then
+  CURRENT_STEP="spend"
+  EXPORT_PROJECT="${BILLING_EXPORT%%[.:]*}"
+  EXPORT_DATASET="${BILLING_EXPORT#*[.:]}"
+  step "Billing export ${EXPORT_PROJECT}:${EXPORT_DATASET} for Spend Briefing and Spend Anomalies"
+  if [[ "$EXPORT_PROJECT" == "$PROJECT_ID" ]]; then
+    if ! command -v bq >/dev/null 2>&1; then echo "bq (part of the Cloud SDK) is needed to grant READER on the dataset: gcloud components install bq" >&2; exit 2; fi
+    if [[ "$DRY_RUN" == 1 ]]; then
+      note "+ grant READER on ${EXPORT_PROJECT}:${EXPORT_DATASET} to ${SA_EMAIL}; roles/bigquery.jobUser on ${PROJECT_ID}"
+    else
+      if ! command -v python3 >/dev/null 2>&1; then
+        echo "python3 is needed to edit the dataset's access list; grant ${SA_EMAIL} READER on ${EXPORT_PROJECT}:${EXPORT_DATASET} in the console instead." >&2; exit 2
+      fi
+      ACCESS_FILE="$(mktemp)"
+      bq --project_id="$PROJECT_ID" show --format=prettyjson "${EXPORT_PROJECT}:${EXPORT_DATASET}" > "$ACCESS_FILE"
+      python3 - "$ACCESS_FILE" "$SA_EMAIL" <<'PY'
+import json, sys
+path, email = sys.argv[1], sys.argv[2]
+dataset = json.load(open(path))
+access = dataset.setdefault("access", [])
+if not any(entry.get("userByEmail") == email and entry.get("role") in ("READER", "WRITER", "OWNER") for entry in access):
+    access.append({"role": "READER", "userByEmail": email})
+json.dump({"access": access}, open(path, "w"))
+PY
+      bq --project_id="$PROJECT_ID" update --source "$ACCESS_FILE" "${EXPORT_PROJECT}:${EXPORT_DATASET}" >/dev/null
+      rm -f "$ACCESS_FILE"
+    fi
+  else
+    note "The dataset is in ${EXPORT_PROJECT}: its owner grants ${SA_EMAIL} READER on it once (BigQuery › dataset › Sharing › Permissions, or"
+    note "  bq show --format=prettyjson ${EXPORT_PROJECT}:${EXPORT_DATASET} > ds.json; add {\"role\": \"READER\", \"userByEmail\": \"${SA_EMAIL}\"} to access; bq update --source ds.json ${EXPORT_PROJECT}:${EXPORT_DATASET})."
+  fi
+  # The two queries per scan run in this project: Job User, nothing wider (the export step grants the same role).
+  g projects add-iam-policy-binding "$PROJECT_ID" --member="serviceAccount:${SA_EMAIL}" --role=roles/bigquery.jobUser --condition=None >/dev/null
+  note "Spend Briefing and Spend Anomalies read the standard export tables (gcp_billing_export_v1_*) of ${EXPORT_PROJECT}.${EXPORT_DATASET}; nothing is read from the billing account."
 fi
 
 # --- 7. schedules (v17) -------------------------------------------------------------------------

@@ -26,7 +26,7 @@ from dataclasses import dataclass
 # The release, as the image tag names it ("15.6" for v15.6; tests/test_packaging.py pins it to the newest entry
 # of RELEASE_NOTES.md). The report's footer shows it, and every scan summary records it so the next scan can tell
 # a check that is new to the release from one that merely had nothing to check last time (app.reporting.changes).
-VERSION = "18.7"
+VERSION = "18.8"
 # The policy table of the Organization Policies check (v18.1): by default the one shipped with the release
 # (assets/gcp_best_practices.csv, copied into the image), so a scan never depends on GitHub and the rules move only
 # with a release. BEST_PRACTICES_CSV_URL set to a gs:// object (read as the service account) or an https:// URL
@@ -125,6 +125,15 @@ DEFAULT_ADVISORY_WINDOW_DAYS = 365
 DEFAULT_SNAPSHOT_MAX_AGE_DAYS = 90
 DEFAULT_RESERVATION_COVERAGE_MIN_VCPUS = 32
 
+# --- Spend (v18.8) ---
+# BILLING_EXPORT: the BigQuery dataset the organization's billing account exports to, as <project>.<dataset>
+# (or <project>:<dataset>); the standard usage cost tables in it (gcp_billing_export_v1_*) feed Spend Briefing and
+# Spend Anomalies. The service account needs roles/bigquery.dataViewer on the dataset (a dataset-level grant;
+# nothing on the billing account). Unset: both report *Not configured* and stay out of the score.
+# SPEND_ANOMALY_FLOOR: a project's week on a service has to cost at least this much (in the export's currency) to be
+# an anomaly; 2 % of last month's net spend applies instead when that is higher.
+DEFAULT_SPEND_ANOMALY_FLOOR = 50.0
+
 # --- Identities (v18.5) ---
 # TRUSTED_DOMAINS: domains besides the organization's primary one whose users and groups External Principals
 # does not list ("partner.example,acquired.example"). Unset: the primary domain alone is the organization's.
@@ -219,6 +228,17 @@ def _dataset(value):
     return dataset
 
 
+def _billing_export(value):
+    """``BILLING_EXPORT`` as ``(project_id, dataset_id)`` — ``<project>.<dataset>`` or ``<project>:<dataset>`` — or ``None`` when unset."""
+    text = (value or '').strip()
+    if not text:
+        return None
+    match = re.fullmatch(r'([a-z][a-z0-9-]{4,28}[a-z0-9]|[a-z0-9.-]+:[a-z][a-z0-9-]{4,28}[a-z0-9])[.:]([A-Za-z0-9_]{1,1024})', text)
+    if not match:
+        raise ValueError(f"BILLING_EXPORT must be <project>.<dataset> (the billing export dataset in BigQuery), got '{text}'")
+    return match.group(1), match.group(2)
+
+
 def _switch(value, name, default=True):
     """``on``/``off`` (also ``true``/``false``, ``1``/``0``, ``yes``/``no``); the default when unset."""
     text = (value or '').strip().lower()
@@ -290,6 +310,9 @@ class Settings:
     trusted_domains: tuple = ()  # TRUSTED_DOMAINS (v18.5): domains counted as the organization's by External Principals
     snapshot_max_age_days: int = DEFAULT_SNAPSHOT_MAX_AGE_DAYS
     reservation_coverage_min_vcpus: int = DEFAULT_RESERVATION_COVERAGE_MIN_VCPUS
+    # Spend (v18.8): the billing export dataset as (project, dataset), or None (Spend Briefing and Spend Anomalies not configured).
+    billing_export: tuple | None = None
+    spend_anomaly_floor: float = DEFAULT_SPEND_ANOMALY_FLOOR
     # History and analytics (v17): the BigQuery dataset scans are exported to, in PROJECT_ID. None: no export.
     bigquery_dataset: str | None = None
     bigquery_export_wait_seconds: int = DEFAULT_BIGQUERY_EXPORT_WAIT_SECONDS
@@ -352,6 +375,8 @@ class Settings:
             trusted_domains=_domains(env.get('TRUSTED_DOMAINS')),
             snapshot_max_age_days=_number(env, 'SNAPSHOT_MAX_AGE_DAYS', DEFAULT_SNAPSHOT_MAX_AGE_DAYS, int, minimum=1, maximum=3660),
             reservation_coverage_min_vcpus=_number(env, 'RESERVATION_COVERAGE_MIN_VCPUS', DEFAULT_RESERVATION_COVERAGE_MIN_VCPUS, int, minimum=1),
+            billing_export=_billing_export(env.get('BILLING_EXPORT')),
+            spend_anomaly_floor=_number(env, 'SPEND_ANOMALY_FLOOR', DEFAULT_SPEND_ANOMALY_FLOOR, float, minimum=0),
             bigquery_dataset=_dataset(env.get('BIGQUERY_DATASET')),
             bigquery_export_wait_seconds=_number(env, 'BIGQUERY_EXPORT_WAIT_SECONDS', DEFAULT_BIGQUERY_EXPORT_WAIT_SECONDS, int, minimum=0, maximum=600),
             synthetic_projects=synthetic_projects,

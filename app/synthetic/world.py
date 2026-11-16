@@ -306,6 +306,23 @@ class Privileges:
 
 
 @dataclass(frozen=True)
+class CostLevers:
+    """v18.8: what the log, serverless and lifecycle cost rules read (the Logging, Monitoring, Compute, Cloud Run and VPC Access handlers,
+    the bucket stubs) and the scale of the project's spend in the synthetic billing export (``SyntheticOrg.daily_spend``)."""
+    log_retention: int  # retention days of the _Default log bucket: 30 (the included days) or more
+    audit_bucket: bool  # a locked "audit" log bucket kept 400 days
+    flow_sampling: tuple  # per subnet (the profile's order): the flow-log sampling rate where flow logs are on
+    flow_verbose: bool  # the sampled subnets also keep all metadata at a 5-second interval
+    log_volume_gib: float  # the project's 30-day log volume
+    debug_share: float  # the DEBUG share of it
+    debug_exclusion: bool  # the _Default sink drops DEBUG entries
+    connector: str  # "" | "idle" | "used": a Serverless VPC Access connector, the first service routed through it when used
+    cross_region_sql: bool  # the first service names a Cloud SQL instance in another region
+    pruned_buckets: tuple  # the versioned buckets whose lifecycle deletes noncurrent versions
+    spend_scale: float  # multiplies the project's daily spend
+
+
+@dataclass(frozen=True)
 class ProjectProfile:
     index: int
     project_id: str
@@ -374,6 +391,7 @@ class ProjectProfile:
     posture: Posture = None  # v18.5
     serverless: Serverless = None  # v18.6
     privileges: Privileges = None  # v18.7
+    cost_levers: CostLevers = None  # v18.8
 
     @property
     def project_number(self):
@@ -757,6 +775,17 @@ class SyntheticOrg:
             custom_role=rng.choice(["", "", "", "powers-held", "powers-dormant", "retired-bound"]),
             pam=rng.choice(["", "", "", "approved", "unapproved", "unapproved-standing"]))
 
+        # v18.8 (drawn last again): the cost levers — log retention and volume, flow-log sampling, a connector, a cross-region database,
+        # the versioned buckets that prune, and the project's weight in the synthetic billing export.
+        cost_levers = CostLevers(
+            log_retention=rng.choice([30, 30, 30, 90, 180, 400]), audit_bucket=_chance(rng, 0.1),
+            flow_sampling=tuple(rng.choice([0.5, 0.5, 1.0]) for _ in subnets), flow_verbose=_chance(rng, 0.5),
+            log_volume_gib=rng.choice([2.0, 8.0, 20.0, 120.0, 400.0]), debug_share=rng.choice([0.02, 0.02, 0.15, 0.4]), debug_exclusion=_chance(rng, 0.3),
+            connector=rng.choice(["", "", "", "idle", "used"]) if serverless.services else rng.choice(["", "", "", "", "idle"]),
+            cross_region_sql=bool(serverless.services) and _chance(rng, 0.2),
+            pruned_buckets=tuple(bucket.name for bucket in buckets if bucket.versioning and bucket.lifecycle and _chance(rng, 0.6)),
+            spend_scale=rng.choice([0.5, 1.0, 1.0, 2.0, 5.0]))
+
         return ProjectProfile(
             index=index, project_id=project_id, display_name=f"Synthetic Project {index}",
             folder_id=self.folder_of(index), denied=denied, osconfig_disabled=osconfig_disabled,
@@ -780,7 +809,37 @@ class SyntheticOrg:
             unprotected_buckets=unprotected_buckets, sink_buckets=sink_buckets, retention_buckets=retention_buckets, proxy_subnet=proxy_subnet,
             gke_auto_repair=gke_auto_repair, project_audit_configs=project_audit_configs, project_contact=project_contact,
             gke_operations=gke_operations, network_edge=network_edge, data_governance=data_governance, posture=posture, serverless=serverless, privileges=privileges,
+            cost_levers=cost_levers,
         )
+
+    # --- the synthetic billing export (v18.8) ---
+
+    def daily_spend(self, profile, day_offset):
+        """``[(service, cost, credit, committed-use credit)]`` of a project on the day ``day_offset`` days before today (1 = yesterday): steady
+        per-service costs from the inventory with mild deterministic noise, scaled by the project's ``spend_scale``; a Compute Engine spike
+        over the last week in every seventh project, a new BigQuery line in every eleventh, Cloud SQL stopped two weeks ago in every
+        thirteenth; sustained-use credits on Compute Engine, committed-use credits where the project holds commitments."""
+        index, levers = profile.index, profile.cost_levers
+        scale = levers.spend_scale if levers else 1.0
+        base = {"Compute Engine": 1.0 * len(profile.vms), "Cloud Storage": 0.05 * len(profile.buckets), "Networking": 0.3 * len(profile.vms),
+                "Cloud SQL": 2.5 * len(profile.sql_instances), "Kubernetes Engine": 2.4 * len(profile.gke_clusters)}
+        if index % 13 == 2 and day_offset <= 14:
+            base["Cloud SQL"] = 0.0
+        if index % 7 == 3 and day_offset <= 7:
+            base["Compute Engine"] *= 2.5
+        if index % 11 == 5 and day_offset <= 7:
+            base["BigQuery"] = 12.0
+        lines = []
+        for service, amount in base.items():
+            if amount <= 0:
+                continue
+            cost = amount * scale * (1 + ((index * 31 + day_offset * 17 + len(service)) % 21 - 10) / 100)
+            credit = cud = 0.0
+            if service == "Compute Engine":
+                cud = -0.3 * cost if profile.commitments else 0.0
+                credit = cud if profile.commitments else -0.2 * cost
+            lines.append((service, round(cost, 6), round(credit, 6), round(cud, 6)))
+        return lines
 
     # --- organization-level data ---
 

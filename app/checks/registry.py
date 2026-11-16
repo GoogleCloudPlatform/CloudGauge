@@ -36,7 +36,11 @@ from app.checks.cost import (
     run_cost_recommendations,
 )
 from app.checks.vm_hardening import VM_SA_CHECK, check_vm_posture
-from app.checks.serverless import EXPOSURE_CHECK, SCANNING_CHECK, check_container_scanning, check_serverless_posture
+from app.checks.serverless import COST_CHECK as SERVERLESS_COST_CHECK
+from app.checks.serverless import EXPOSURE_CHECK, SCANNING_CHECK, check_container_scanning, check_serverless_cost, check_serverless_posture
+from app.checks.spend import BRIEFING as SPEND_BRIEFING
+from app.checks.spend import check_spend
+from app.checks.log_cost import LOG_COST_CHECK, check_log_cost
 from app.checks.edge_security import ARMOR_CHECK, check_edge_security
 from app.checks.privileges import CUSTOM_ROLES_CHECK, FOLDER_ROLES_CHECK, PRIVILEGED_GRANTS_CHECK, check_custom_roles, check_folder_roles, check_privileged_grants
 from app.checks.secrets import SECRET_SCOPE_CHECK, check_secret_posture
@@ -234,6 +238,13 @@ def build_check_plan(scope, scope_id, job_id, all_projects, active_zones, active
         CheckSpec("Security & Identity", PRIVILEGED_GRANTS_CHECK, check_privileged_grants, (scope, scope_id, all_projects, job_id)),
         CheckSpec("Security & Identity", SECRET_SCOPE_CHECK, check_secret_posture, (scope, scope_id, job_id)),
         CheckSpec("Security & Identity", CUSTOM_ROLES_CHECK, check_custom_roles, (scope, scope_id, all_projects, job_id)),
+        # v18.8: forecasts, budgets and spend — Spend Briefing + Spend Anomalies from the billing export in BigQuery (two queries under the scope's
+        # ancestry), Log Cost Levers per project (log buckets, subnets, sinks, the log volume by severity), Serverless Cost Hygiene from one listing of
+        # the scope's services, jobs, gen-2 functions and connectors (+ the Cloud Run and VPC Access APIs per project). Cloud Storage Lifecycle gained
+        # the versioned-without-pruning row.
+        CheckSpec("Cost Optimization", SPEND_BRIEFING, check_spend, (scope, scope_id, job_id)),
+        CheckSpec("Cost Optimization", LOG_COST_CHECK, check_log_cost, (scope_id, all_projects, job_id)),
+        CheckSpec("Cost Optimization", SERVERLESS_COST_CHECK, check_serverless_cost, (scope, scope_id, job_id)),
     ]
 
     if scope == 'organization':
@@ -268,6 +279,7 @@ SCOPE_LEVEL_CHECKS = frozenset({
     VM_SA_CHECK, SA_PRIVILEGES_CHECK,  # v18.5: one listing each (two records each: VM Hardening, External Principals)
     EXPOSURE_CHECK, ARMOR_CHECK, SCANNING_CHECK,  # v18.6: one listing each (two records each for the first two: Serverless Service Accounts, SSL Certificate Health)
     FOLDER_ROLES_CHECK, SECRET_SCOPE_CHECK,  # v18.7: the folders under the scope; one IAM search + one resource search (two records: Secret Manager Posture)
+    SPEND_BRIEFING, SERVERLESS_COST_CHECK,  # v18.8: two BigQuery queries under the scope's ancestry (two records: Spend Anomalies); one listing of the scope's workloads and connectors
 })
 # The checks that do both: scope-wide work plus per-project work. Shards split them
 # with keyword flags: the scope shard runs the first set, the project shards the second

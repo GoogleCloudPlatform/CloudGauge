@@ -37,12 +37,20 @@ Second-generation functions are Cloud Run services (that is where their IAM
 and ingress live): they are judged once, through the service, labelled as
 functions. API Gateway configurations are not read (no API Gateway in the
 organization this shipped from; a later addition).
+
+v18.8 adds **Serverless Cost Hygiene** (Cost Optimization, its own listing of
+the scope's services, jobs, gen-2 functions and Serverless VPC Access
+connectors, then the Cloud Run v2 and VPC Access APIs per project that has
+any): a workload whose egress goes through a **connector** (its instances bill
+around the clock; Direct VPC egress scales to zero), a connector **no workload
+uses**, and a workload whose Cloud SQL instance sits in **another region**
+(cross-region egress and latency on every query) — all *Investigation*.
 """
 import logging
 
 from google.cloud import asset_v1
 
-from app.checks.data_governance import PUBLIC_MEMBERS, PUBLIC_QUERY, public_policy_rows
+from app.checks.data_governance import PUBLIC_MEMBERS, PUBLIC_QUERY, project_ids_by_number, public_policy_rows
 from app.checks.edge_security import api_facts
 from app.checks.gke_operations import ACTION_REQUIRED, INVESTIGATION, write_rows
 from app.checks.gke_security import account_roles, privileged_roles
@@ -55,6 +63,7 @@ from app.services import gcp
 EXPOSURE_CHECK = "Serverless Exposure"
 SERVERLESS_SA_CHECK = "Serverless Service Accounts"
 SCANNING_CHECK = "Container Scanning Enabled"
+COST_CHECK = "Serverless Cost Hygiene"  # v18.8
 SERVERLESS_CHECKS = (EXPOSURE_CHECK, SERVERLESS_SA_CHECK)
 
 RUN_SERVICE, RUN_JOB = "run.googleapis.com/Service", "run.googleapis.com/Job"
@@ -64,6 +73,9 @@ SERVERLESS_TYPES = [RUN_SERVICE, RUN_JOB, FUNCTION_GEN1, FUNCTION_GEN2, NEG, *BA
 INVOKER_TYPES = [RUN_SERVICE, FUNCTION_GEN1]  # gen-2 functions' IAM lives on their Cloud Run service
 REPOSITORY, SERVICE_USAGE = "artifactregistry.googleapis.com/Repository", "serviceusage.googleapis.com/Service"
 SCANNING_API = "containerscanning.googleapis.com"
+CONNECTOR = "vpcaccess.googleapis.com/Connector"  # v18.8
+COST_TYPES = [RUN_SERVICE, RUN_JOB, FUNCTION_GEN2, CONNECTOR]
+CONNECTOR_ANNOTATION, INTERFACES_ANNOTATION, SQL_ANNOTATION = "run.googleapis.com/vpc-access-connector", "run.googleapis.com/network-interfaces", "run.googleapis.com/cloudsql-instances"
 
 INVOKER_ROLES = ("roles/run.invoker", "roles/cloudfunctions.invoker")
 INGRESS_ALL, INGRESS_INTERNAL, INGRESS_LB = "all", "internal", "internal-and-cloud-load-balancing"
@@ -521,3 +533,246 @@ def check_container_scanning(scope, scope_id, job_id, *, sink):
         scanning = refresh_scanning(repositories, scanning, gcp.api_build("serviceusage", "v1", credentials=credentials), skipped)
     write_rows(sink, job_id, SCANNING_CHECK, scanning_rows(repositories, scanning), SCANNING_ALL_CLEAR)
     skipped.write(sink, job_id)
+
+
+# --- v18.8: Serverless Cost Hygiene -----------------------------------------------------------------------------------------
+
+COST_ALL_CLEAR = "No Cloud Run workload pays for an always-on VPC connector or crosses regions to its database, and no connector sits unused."
+
+
+def annotations_in(data):
+    """Every ``annotations`` mapping in a Knative resource (the service's, the revision template's, a job's task template's), merged."""
+    merged = {}
+
+    def walk(node):
+        if isinstance(node, dict):
+            annotations = node.get("annotations")
+            if isinstance(annotations, dict):
+                merged.update(annotations)
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for value in node:
+                walk(value)
+    walk(data)
+    return merged
+
+
+def connector_key(project_id, location, value):
+    """``projects/p/locations/r/connectors/c`` of a connector reference: a full name, or the short name of a connector in the workload's project and region."""
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if "/connectors/" in text:
+        return text.split("//vpcaccess.googleapis.com/", 1)[-1]
+    return f"projects/{project_id}/locations/{location}/connectors/{text}"
+
+
+def sql_region(instance):
+    """The region of a ``project:region:instance`` connection name (``""`` when the name has no region)."""
+    parts = str(instance or "").split(":")
+    return parts[1] if len(parts) == 3 else ""
+
+
+def cost_facts(project_id, data, name="", kind=SERVICE):
+    """What the cost rules read of one workload — the inventory's Knative copy, the v2 API's shape, or a gen-2 function's ``serviceConfig``:
+    ``{kind, project_id, name, location, connector, direct_vpc, sql_instances}``."""
+    location = location_of(name or data.get("name"))
+    annotations = annotations_in(data)
+    connector, direct, instances = annotations.get(CONNECTOR_ANNOTATION) or "", bool(annotations.get(INTERFACES_ANNOTATION)), []
+    instances += [i.strip() for i in str(annotations.get(SQL_ANNOTATION) or "").split(",") if i.strip()]
+    template = data.get("template") or {}
+    for shape in (template, template.get("template") or {}):  # a v2 service's template; a v2 job's execution template's task template
+        access = shape.get("vpcAccess") or {}
+        connector = connector or access.get("connector") or ""
+        direct = direct or bool(access.get("networkInterfaces"))
+        for volume in shape.get("volumes") or []:
+            instances += list((volume.get("cloudSqlInstance") or {}).get("instances") or [])
+    config = data.get("serviceConfig") or {}  # a gen-2 function from the inventory
+    connector = connector or config.get("vpcConnector") or ""
+    if config.get("service"):
+        workload_name = tail(config["service"])
+    else:
+        workload_name = (data.get("metadata") or {}).get("name") or tail(data.get("name") or name)
+    return {"kind": kind, "project_id": project_id, "name": workload_name, "location": location,
+            "connector": connector_key(project_id, location, connector), "direct_vpc": direct, "sql_instances": list(dict.fromkeys(instances))}
+
+
+def cost_workloads(grouped):
+    """``{(project, kind, name): fact}`` of the scope's services, jobs and gen-2 functions (a function's service carries its settings; the function
+    adds its connector when the service listing lacks it)."""
+    found = {}
+    for fact in grouped.get("services", []):
+        w = cost_facts(fact["project_id"], fact["data"], fact["link"], FUNCTION_2 if ((fact["data"].get("metadata") or {}).get("labels") or {}).get(FUNCTIONS_LABEL) == "cloudfunctions" else SERVICE)
+        found[(w["project_id"], w["location"], w["name"])] = w
+    for fact in grouped.get("jobs", []):
+        w = cost_facts(fact["project_id"], fact["data"], fact["link"], JOB)
+        found[(w["project_id"], w["location"], "job:" + w["name"])] = w
+    for fact in grouped.get("functions", []):
+        w = cost_facts(fact["project_id"], fact["data"], fact["link"], FUNCTION_2)
+        key_ = (w["project_id"], w["location"], w["name"])
+        if key_ in found:
+            found[key_]["kind"] = FUNCTION_2
+            found[key_]["connector"] = found[key_]["connector"] or w["connector"]
+        elif w["connector"] or w["sql_instances"]:
+            found[key_] = w
+    return found
+
+
+def connector_facts(fact):
+    """``{key, project_id, name, region, network, subnet, min_instances, max_instances, machine_type}`` of a connector asset's fact."""
+    data = fact["data"]
+    full = str(data.get("name") or fact["link"] or "").split("//vpcaccess.googleapis.com/", 1)[-1]
+    subnet = (data.get("subnet") or {}).get("name") or ""
+    return {"key": full, "project_id": fact["project_id"], "name": tail(full), "region": location_of(full) or fact["region"],
+            "network": tail(data.get("network")) if data.get("network") else "", "subnet": subnet,
+            "min_instances": int(data.get("minInstances") or 2), "max_instances": int(data.get("maxInstances") or 10), "machine_type": data.get("machineType") or "e2-micro"}
+
+
+def serverless_cost_rows(workloads, connectors):
+    """The rows: a workload on a connector, an idle connector, a workload whose Cloud SQL instance is in another region."""
+    rows, used = [], set()
+    by_key = {c["key"]: c for c in connectors}
+    for w in sorted(workloads.values(), key=lambda w: (w["project_id"], w["kind"], w["name"])):
+        update = f"gcloud run jobs update {w['name']}" if w["kind"] == JOB else f"gcloud run services update {w['name']}"
+        base = f"{update} --region={w['location']} --project={w['project_id']}"
+        row = {"Project": w["project_id"], "Workload": w["name"], "Location": w["location"], "Kind": w["kind"]}
+        if w["connector"]:
+            used.add(w["connector"])
+            connector = by_key.get(w["connector"])
+            if connector:
+                where = (f"connector {connector['name']} in {connector['region']} keeps {connector['min_instances']}–{connector['max_instances']} {connector['machine_type']} "
+                         f"instances billed around the clock")
+                network, subnet = connector["network"] or "<network>", connector["subnet"] or "<subnet with free addresses>"
+            else:
+                where, network, subnet = f"connector {tail(w['connector'])} (its instances are billed around the clock)", "<network>", "<subnet with free addresses>"
+            rows.append({**row, "Issue": "Serverless VPC Access connector.",
+                         "Detail": f"Egress goes through {where}; Direct VPC egress sends it from the subnet itself and scales to zero with the workload.",
+                         "Fix": f"{base} --network={network} --subnet={subnet} --clear-vpc-connector  # the subnet needs free addresses for the instances", "_status": INVESTIGATION})
+        for instance in w["sql_instances"]:
+            region = sql_region(instance)
+            if region and w["location"] and region != w["location"]:
+                rows.append({**row, "Issue": "Cloud SQL in another region.",
+                             "Detail": f"Connects to {instance} in {region} from {w['location']}: every query crosses regions (egress billed, latency on each round trip).",
+                             "Fix": f"gcloud run deploy {w['name']} --region={region} --project={w['project_id']} --image=<the image>  # redeploy beside the instance, or add a read replica in {w['location']}",
+                             "_status": INVESTIGATION})
+    for connector in sorted(connectors, key=lambda c: (c["project_id"], c["region"], c["name"])):
+        if connector["key"] in used:
+            continue
+        rows.append({"Project": connector["project_id"], "Workload": connector["name"], "Location": connector["region"], "Kind": "connector", "Issue": "Idle connector.",
+                     "Detail": f"No service, job or function routes through it, and its {connector['min_instances']}–{connector['max_instances']} {connector['machine_type']} instances bill around the clock.",
+                     "Fix": f"gcloud compute networks vpc-access connectors delete {connector['name']} --region={connector['region']} --project={connector['project_id']}", "_status": INVESTIGATION})
+    return rows
+
+
+def api_cost_workloads(run, project_id, job_locations):
+    """The project's services and jobs from the Cloud Run v2 API as cost facts (``api_services`` reads ingress; this reads the templates)."""
+    found, services, jobs = {}, run.projects().locations().services(), run.projects().locations().jobs()
+    request = services.list(parent=f"projects/{project_id}/locations/-")
+    while request:
+        response = request.execute() or {}
+        for data in response.get("services") or []:
+            w = cost_facts(project_id, data, data.get("name"), FUNCTION_2 if (data.get("labels") or {}).get(FUNCTIONS_LABEL) == "cloudfunctions" else SERVICE)
+            found[(project_id, w["location"], w["name"])] = w
+        request = services.list_next(previous_request=request, previous_response=response)
+    for location in sorted(job_locations):
+        request = jobs.list(parent=f"projects/{project_id}/locations/{location}")
+        while request:
+            response = request.execute() or {}
+            for data in response.get("jobs") or []:
+                w = cost_facts(project_id, data, data.get("name"), JOB)
+                found[(project_id, w["location"], "job:" + w["name"])] = w
+            request = jobs.list_next(previous_request=request, previous_response=response)
+    return found
+
+
+def api_connectors(vpcaccess, project_id, regions):
+    """The project's connectors from the VPC Access API, per region the inventory showed one in."""
+    found, collection = [], vpcaccess.projects().locations().connectors()
+    for region in sorted(regions):
+        request = collection.list(parent=f"projects/{project_id}/locations/{region}")
+        while request:
+            response = request.execute() or {}
+            for data in response.get("connectors") or []:
+                found.append(connector_facts({"data": data, "link": f"//vpcaccess.googleapis.com/{data.get('name')}", "project_id": project_id, "region": region}))
+            request = collection.list_next(previous_request=request, previous_response=response)
+    return found
+
+
+def named_by_id(workloads, connectors, project_ids):
+    """The facts with projects named by ID: the inventory names connectors by project *number*
+    (``//vpcaccess.googleapis.com/projects/123/…``, as it does API keys and secrets), and the report names projects by ID like every other
+    check — a workload's short connector reference (``projects/<id>/…``) must meet the connector's key too."""
+    def rename(text):
+        parts = str(text or "").split("/")
+        if len(parts) > 1 and parts[0] == "projects" and parts[1] in project_ids:
+            parts[1] = project_ids[parts[1]]
+        return "/".join(parts)
+    for w in workloads.values():
+        w["project_id"] = project_ids.get(w["project_id"], w["project_id"])
+        w["connector"] = rename(w["connector"])
+    for c in connectors:
+        c["project_id"] = project_ids.get(c["project_id"], c["project_id"])
+        c["key"] = rename(c["key"])
+    return workloads, connectors
+
+
+def refresh_cost_facts(workloads, connectors, credentials, skipped):
+    """Every project's workloads and connectors re-read from the Cloud Run v2 and VPC Access APIs (the inventory lags changes by hours; a
+    deleted connector or a service moved to Direct VPC egress must clear on the next scan). The inventory's copy stands where a read is refused."""
+    by_project = {}
+    for w in workloads.values():
+        by_project.setdefault(w["project_id"], []).append(w)
+    run = None
+    for project_id in sorted(by_project):
+        run = run or gcp.api_build("run", "v2", credentials=credentials)
+        try:
+            fresh = api_cost_workloads(run, project_id, {w["location"] for w in by_project[project_id] if w["kind"] == JOB})
+        except Exception as e:
+            skipped.add(project_id, e, detail="Cloud Run services and jobs: the API read failed; the inventory's copy was used, which can lag changes by hours")
+            continue
+        gen2 = {(w["location"], w["name"]) for w in by_project[project_id] if w["kind"] == FUNCTION_2}
+        for w in fresh.values():
+            if (w["location"], w["name"]) in gen2:
+                w["kind"] = FUNCTION_2
+        workloads = {k: w for k, w in workloads.items() if w["project_id"] != project_id}
+        workloads.update(fresh)
+    connector_projects = {}
+    for c in connectors:
+        connector_projects.setdefault(c["project_id"], set()).add(c["region"])
+    vpcaccess = None
+    for project_id, regions in sorted(connector_projects.items()):
+        vpcaccess = vpcaccess or gcp.api_build("vpcaccess", "v1", credentials=credentials)
+        try:
+            fresh = api_connectors(vpcaccess, project_id, regions)
+        except Exception as e:
+            skipped.add(project_id, e, detail="VPC Access connectors: the API read failed; the inventory's copy was used, which can lag a deletion by hours")
+            continue
+        connectors = [c for c in connectors if c["project_id"] != project_id] + fresh
+    return workloads, connectors
+
+
+def check_serverless_cost(scope, scope_id, job_id, *, sink):
+    """Writes *Serverless Cost Hygiene*: the scope's services, jobs, gen-2 functions and connectors from the inventory, then each project's
+    from the Cloud Run v2 and VPC Access APIs."""
+    print(f"💸 [{job_id}] Checking {COST_CHECK} under {scope} {scope_id}...")
+    parent = f"{scope}s/{scope_id}"
+    try:
+        credentials, _ = gcp.auth_default(scopes=SCOPES)
+        asset_client = gcp.asset_client(credentials)
+        grouped = by_kind(list_assets(asset_client, parent, COST_TYPES))
+    except Exception as e:
+        logging.error(f"[{job_id}] {COST_CHECK}: could not list under {parent}: {e}")
+        sink.write_finding(job_id, COST_CHECK.replace(" ", "_"), {"Check": COST_CHECK, "Finding": [{"Error": str(e)}], "Status": "Error"})
+        return
+    skipped = NotChecked(COST_CHECK)
+    workloads, connectors = cost_workloads(grouped), [connector_facts(f) for f in grouped.get("connectors", [])]
+    if any(c["project_id"].isdigit() for c in connectors) or any(w["project_id"].isdigit() for w in workloads.values()):
+        try:
+            workloads, connectors = named_by_id(workloads, connectors, project_ids_by_number(asset_client, parent))
+        except Exception as e:
+            skipped.add(parent, e, detail="project names: the project search failed; the projects named by number stay so")
+    workloads, connectors = refresh_cost_facts(workloads, connectors, credentials, skipped)
+    write_rows(sink, job_id, COST_CHECK, serverless_cost_rows(workloads, connectors), COST_ALL_CLEAR)
+    skipped.write(sink, job_id)
+

@@ -8,7 +8,191 @@ the test suite running inside the image, a zero-traffic canary revision scanned
 against a real organization, promotion, and a production scan compared fact for
 fact with the previous version's report.
 
-Versions are the image tags (`v5` … `v18.7`); the commit is the one that shipped.
+Versions are the image tags (`v5` … `v18.8`); the commit is the one that shipped.
+
+## v18.8 — Forecasts, budgets and spend
+
+The FinOps release held since v17.4, with the configuration-level cost rows
+the google/skills mining found riding along. Until now the report said what
+could be saved and nothing about what is spent; the one reader of spend
+Google Cloud offers without a billing-account role is the **billing export**
+the account owner already keeps in BigQuery, and that is what this release
+reads — a dataset-level grant, two partition-pruned queries per scan, cents a
+month, nothing on any billing account (the 2026-10-23 decision stands). The
+log, serverless and lifecycle levers come from reads the scanner's roles
+already allow — the Logging, Compute, Monitoring, Cloud Run v2 and VPC
+Access APIs, the inventory for the connectors — fresh, so a fix shows on the
+next scan. No new API, no new organization-level role.
+
+### Added
+
+- **Spend Briefing** (Cost Optimization, every scope; a briefing —
+  *Informational*, never scored, like *Capacity Commitments*): from the
+  standard usage cost tables (`gcp_billing_export_v1_<account>`, discovered
+  by prefix; several accounts summed and named) of
+  `BILLING_EXPORT=<project>.<dataset>`: **month to date** against the same
+  days last month, a **forecast** (month to date plus the mean of the last
+  seven complete days over the days remaining), **last month** and the month
+  before, the top ten **projects** and **services** of the last 30 days with
+  share and change against the 30 before, the **credits** by type with the
+  **committed-use coverage** of the commitment-eligible services (Compute
+  Engine, GKE, Cloud SQL, Spanner, Cloud Run, Memorystore, AlloyDB, Bigtable,
+  Dataflow; 0 % = nothing committed), and the export's **freshness** (hours
+  behind, the tables read, the account-level charges without a project that
+  an organization scan does not attribute). The scope is the scan's — an
+  organization's or a folder's rows by `project.ancestry_numbers`, a
+  project's by ID — so a project the export still bills after its deletion
+  counts where it belonged. The complete days are the ones before today (UTC);
+  on the first of a month the line says so and the forecast is the 7-day mean
+  over the whole month. Rows `Line, Value, Detail, Fix` — every line's Fix is
+  the exact `bq query` that reproduces it; the credits line's names
+  Resource-Based Commitment Recommendations and the Capacity Planner. Unset:
+  one *Informational* row saying how to configure it (the Cost Allocation
+  Labels pattern). The dataset unreadable or without an export table: Error,
+  the row naming the grant. The scan's queries run in the deployment project
+  (`jobs.query`, the location following the tables; a long job is polled, pages
+  followed).
+- **Spend Anomalies** (Cost Optimization, every scope; the same function):
+  a project's spend on a service over the last seven complete days at least
+  **1.5 ×** the weekly mean of the three weeks before and at least the
+  **floor** — `SPEND_ANOMALY_FLOOR` (50 in the export's currency) or 2 % of
+  last month's net when that is higher — or **new spend** of at least the
+  floor: *Investigation Recommended*, rows `Project, Service, This Week,
+  Weekly Mean Before, Change, Issue, Detail, Fix` with the SKU breakdown of
+  the pair as the fix. The rule runs in SQL (parameters, not interpolation):
+  only the flagged pairs come back, two hundred at most. Drops are not rows.
+  Not configured: the briefing's Informational row.
+- **Log Cost Levers** (Cost Optimization, per project): a log bucket other
+  than `_Required` **kept beyond the 30 days** included with ingestion
+  (Informational — compliance may want the history; the row counts the paid
+  days and says when the bucket is locked and cannot be shortened); a subnet
+  with VPC flow logs **sampled above 0.5** (*Investigation*; all metadata and
+  the 5-second interval named in the fix when set); **DEBUG entries at 10 %
+  or more** of a project's 30-day log volume above the 50 GiB free tier with
+  no enabled exclusion on the `_Default` sink (or any sink into the `_Default`
+  bucket) that drops them (*Investigation*). Buckets and sinks from the
+  Logging API, subnets from `subnetworks.aggregatedList`, the volume from
+  Cloud Monitoring (`logging.googleapis.com/byte_count` summed by severity
+  over 30 days). `_Required` streams, Data Access logs and the severities
+  above DEBUG are never proposed for exclusion. Each failing read is its own
+  line under *Projects not checked* (a project without the Compute Engine
+  API has no subnets to read). Rows `Project, Resource, Issue, Detail, Fix`
+  (`gcloud logging buckets update … --retention-days=30`; `gcloud compute
+  networks subnets update … --logging-flow-sampling=0.5`; `gcloud logging
+  sinks update _Default … --add-exclusion=…`).
+- **Serverless Cost Hygiene** (Cost Optimization, every scope): a Cloud Run
+  service, job or gen-2 function whose egress goes through a **Serverless
+  VPC Access connector** (its instances bill around the clock; Direct VPC
+  egress scales to zero — the fix moves it, naming the connector's network
+  and subnet), a connector **no workload uses**, and a workload whose Cloud
+  SQL instance is **in another region** — all *Investigation*. One listing of
+  the scope's services, jobs, gen-2 functions and connectors (the connector's
+  content from the search index, which names it by project *number* — mapped
+  to IDs by the project search, as API keys and secrets are; the workloads' connector, Direct VPC
+  interfaces and Cloud SQL instances read from every `annotations` mapping of
+  the Knative copy or from the v2 templates), then the Cloud Run v2 and VPC
+  Access APIs per project that has any, the inventory's copy standing where a
+  read is refused (said under *Projects not checked*). Rows `Project,
+  Workload, Location, Kind, Issue, Detail, Fix`.
+- **Cloud Storage Lifecycle** gains a row: a bucket with **versioning on and
+  no lifecycle rule that deletes noncurrent versions** (`Delete` on
+  `numNewerVersions`, `daysSinceNoncurrentTime` or `isLive: false`) keeps
+  every overwritten or deleted object for ever, billed — *Investigation*; the
+  fix writes the bucket's existing rules plus one that keeps the three newest
+  noncurrent versions, in one line — the merged configuration to a file, then
+  `--lifecycle-file` (the file replaces the whole configuration; `gcloud`
+  cannot read it from `/dev/stdin`: the closed loop found the here-string form
+  fails with *Unable to read file [/proc/…/fd/pipe]*). A bucket with no rule
+  at all and versioning on gets both rows. The all-clear text says both.
+- The Scorecard's **Efficiency** line opens with the spend when the briefing
+  has it — "month to date 975.81 USD, forecast ≈ 1,938.43 USD, last month
+  1,927.37 USD" — beside the savings tally; the score is unchanged (the
+  briefing is Informational, Spend Anomalies counts like any check). The
+  executive summary, generated from the Scorecard, sees the sentence.
+- `BILLING_EXPORT` and `SPEND_ANOMALY_FLOOR` (`app.config`, validated);
+  `tools/deploy.sh` takes both, grants the service account READER on the
+  export dataset when it is in `PROJECT_ID` (the access-list edit the export
+  step makes; a note with the `bq` lines when the dataset is elsewhere) and
+  `roles/bigquery.jobUser` on the project; `terraform/` takes
+  `billing_export` and `spend_anomaly_floor`, grants the same READER
+  (`google_bigquery_dataset_access`, non-authoritative) and the Job User role.
+
+### Changed
+
+- Shard merging (`app.checks.categories.merge_shard_findings`): an
+  *Informational* record of a check joins the verdict records of the same
+  check under the worst status, as a single scan writes it — a per-project
+  check whose rows are Informational in one shard and Investigation in
+  another (Log Cost Levers' retention rows beside a sampling row) is one
+  record in both shapes. Nothing else changes: Informational records of a
+  check with no verdict record are joined as before.
+- The synthetic organization draws the cost levers (log retention and a
+  locked audit bucket, flow-log sampling and verbosity, log volume and DEBUG
+  share, a DEBUG exclusion, a connector idle or used, a cross-region Cloud SQL
+  instance, the versioned buckets that prune, a spend scale; drawn last) and
+  answers the two spend queries from a deterministic daily series — steady
+  per-service costs with a Compute Engine spike in every seventh project, a
+  new BigQuery line in every eleventh, Cloud SQL stopped in every thirteenth,
+  sustained-use and committed-use credits — the way BigQuery would; the
+  provider fakes `bigquery.tables.list`, `bigquery.jobs.query`, the log
+  buckets, the project sinks, the `byte_count` series, the connectors (search,
+  listing and API) and the subnets' flow-log configuration.
+- README: the four catalogue entries and the lifecycle sentence, the
+  Efficiency line, a **Spend** section under History and analytics, the
+  prerequisites step 2d, the `deploy.sh` and Configuration Reference rows,
+  the scope note, the project structure, the roadmap row. `VERSION = "18.8"`.
+
+### Tests
+
+- `tests/test_spend.py`: the scope predicates; the two SQL texts (partition
+  pruning per table shape, the union of several accounts, the parameters);
+  the table discovery; `run_query` polling an unfinished job and following
+  pages; the facts from the query's rows; percentages and shares; the
+  briefing's lines from a steady series (every line, the `bq` fixes, the
+  organization's unattributed charges, folder and project predicates), at the
+  first of a month, across February, with a short export, empty; the credits
+  line with committed-use coverage; the floor; the anomaly rows; the
+  Scorecard sentence; the setting's validation; the check end to end — not
+  configured, a refused dataset with the grant, no export table, a failing
+  query, the floor from last month, two tables.
+- `tests/test_log_cost.py`: the retention rows (locked, `_Required`,
+  deleted, odd shapes), the sampling rows and the verbose fix, the DEBUG
+  exclusions, the volume and the DEBUG row's three conditions, the Monitoring
+  request; the check end to end under the worst status, Informational alone,
+  all clear, and with each read failing on its own.
+- `tests/test_serverless.py`: cost facts from the Knative copy, the v2
+  service and job templates and a gen-2 function; gen-2 functions merged into
+  their services; the connector facts; the rows (a job on an unlisted
+  connector, a service on a connector with its subnet, a cross-region
+  instance, an idle connector, Direct VPC and same-region instances passing);
+  the check end to end with the APIs as the copy of record, refused reads,
+  nothing serverless, the listing failing; the catalogue entry.
+- `tests/test_finops.py`: the pruning rule, the merged lifecycle fix, the
+  versioned-bucket rows; `tests/test_worker.py`, `tests/test_fanout.py`,
+  `tests/test_synthetic.py`, `tests/test_category_consistency.py`,
+  `tests/test_terraform.py`: the plan, the scope shard, the names, the
+  variables, the roles.
+- 1,217 tests.
+
+### Upgrade notes
+
+- No new role and no new API on the organization: `logging.buckets.list`,
+  `logging.sinks.list`, `monitoring.timeSeries.list`, `compute.subnetworks.list`,
+  `vpcaccess.connectors.list` and `bigquery.tables.list` are in
+  `roles/iam.securityReviewer`, `roles/logging.viewer`, `roles/monitoring.viewer`
+  and `roles/compute.networkViewer`; the connector search under
+  `roles/cloudasset.viewer` — verified as the service account before the
+  release. **One setup step** for the spend records: `roles/bigquery.dataViewer`
+  on the billing export dataset (a dataset-level entry: `tools/deploy.sh
+  BILLING_EXPORT=…` adds it when the dataset is in the deployment project, the
+  dataset's owner otherwise) and `BILLING_EXPORT` on both services. Without
+  it the two records are Informational and the rest of the release works.
+- The first scan after the upgrade shows **Spend Anomalies**, **Log Cost
+  Levers** and **Serverless Cost Hygiene** as *new check* on the Changes card
+  (the briefing is Informational and not compared); Cloud Storage Lifecycle's
+  new rows are *new* findings, not a rule change.
+
+---
 
 ## v18.7 — Folders, keys and privileged grants
 
@@ -3207,7 +3391,7 @@ performance; modernization; enablement; roadmap and roadblocks).
 | **v18.5** | VM hardening & identities | *Shipped.* **VM Service Accounts** (the default account, by its roles and scopes), **VM Hardening** (OS Login and project-wide keys per project; serial console, IP forwarding, Shielded VM and Secure Boot per instance), **Service Account Privileges** (administrative roles on service accounts, separation of duties), **External Principals** (users, groups and domains outside the organization and `TRUSTED_DOMAINS`, consumer accounts, deleted principals, public folders and images), **Unused Service Accounts** (the IAM recommender's 90-day insights). No new role, no new API. |
 | **v18.6** | Serverless and edge exposure | *Shipped.* **Serverless Exposure** (public Cloud Run services and functions — by binding or by the disabled invoker check — and services reachable around their load balancer), **Serverless Service Accounts** (the default account on Cloud Run and Cloud Functions, by its roles), **Cloud Armor Policy Content** (legacy rulesets, policies that protect nothing, preview-only WAFs, the rule quota), **SSL Certificate Health** (expiring self-managed and failed Google-managed certificates), **Container Scanning Enabled** (Artifact Analysis off beside Docker repositories); IAP over HTTP in Load Balancer Edge; the time-travel row graded by billing model, a Note on the contested Cloud SQL flags, zonal buckets out of Cloud Storage Versioning. The first release deduced from the google/skills mining and the Workload Manager catalogue diff. No new role, no new API. |
 | **v18.7** | Folders, keys and privileged grants | *Shipped.* **Folder Primitive Roles** (Owner, Editor and Project Creator on folders, with the projects below), **Privileged Grants** (domain-wide project creation and billing roles at the organization, Organization Administrator redundancy, no deny policy; Privileged Access Manager entitlements without approval and the standing grants that duplicate them), **Secret Access Scope** (secret roles granted resource-wide, with the secrets in reach), **Secret Manager Posture** (stale secrets without a rotation schedule, single-location replication, empty secrets), **Custom Roles With IAM Powers** (custom roles that grant, impersonate or write policies, with their holders; retired roles still bound), **User-Managed Keys** (every account with a live key, beside the rotation rows). The second release deduced from the google/skills mining and the Workload Manager catalogue diff. No new role, no new API. |
-| **v18.8** | Forecasts, budgets and spend | A **spend briefing** from the organization's **billing export to BigQuery** (`BILLING_EXPORT=<project>.<dataset>`, a dataset-level read, no billing-account IAM; *Informational — not configured* when unset): spend by project and service, month-to-date against last month, a trend forecast, week-over-week anomaly flags, the Scorecard's Efficiency line grounded in real spend; **commitment coverage** from the export's credits; the spend-based commitment recommendations from the Recommender export once that export carries billing-account rows; plus the config-level cost rows the skills mining found — log retention, DEBUG volume and flow-log sampling, serverless VPC connectors, versioning without pruning, uncovered BigQuery baseline slots, staging datasets without expiry, non-production Cloud SQL HA, backend buckets without CDN, resource labels beyond projects, GKE cost allocation. Budget coverage (billing-account IAM) and Capacity Planner forecasts stay optional-later. |
+| **v18.8** | Forecasts, budgets and spend | *Shipped.* **Spend Briefing** from the organization's **billing export to BigQuery** (`BILLING_EXPORT=<project>.<dataset>`, a dataset-level read, no billing-account IAM; *Informational — not configured* when unset): month to date against last month, a 7-day-mean forecast, projects and services with their change, credits with **committed-use coverage**, freshness, every line with its `bq` query; **Spend Anomalies** (week over week ≥ 1.5 × and above a floor, new spend); the Scorecard's Efficiency line grounded in real spend; **Log Cost Levers** (retention beyond 30 days, flow-log sampling above 0.5, DEBUG volume above the free tier without an exclusion); **Serverless Cost Hygiene** (connectors in use or idle, cross-region Cloud SQL); versioning without pruning in Cloud Storage Lifecycle. Not taken: the spend-based commitment recommendations from the Recommender export (that export still carries no billing-account rows — dropped by decision), budgets and Capacity Planner forecasts (billing-account IAM), the remaining config-level cost rows (BigQuery baseline slots, staging datasets without expiry, non-production Cloud SQL HA, backend buckets without CDN, resource labels, GKE cost allocation) — Later. |
 | **v18.9** | Logging pipeline and alerting hygiene | **Audit Log Pipeline** (sink filters missing audit log types, destination retention and lock, the writer's grant, export errors), **Duplicate Log Routing** (central sink plus untouched `_Default` sinks; free audit streams re-stored), **Project Log Routing** (`_Default` disabled, Data Access logs in the default view, Log Analytics), **Alert Notification Channels** (policies routed to nobody, unverified or disabled channels, undeliverable Pub/Sub channels), **Synthetic and SLO Coverage**. No new role, no new API. |
 | **v19** | Footprint and detection | A **Platform Footprint** page (what runs where: services, regions, versions); the detective half of the SSRF chain over Cloud Logging — **GKE control-plane activity** (exec, webhooks, RBAC and DaemonSet changes by service accounts or external IPs), **service-account activity signals**; **Findings and vulnerabilities** — Security Command Center active findings by category (the v2 API answers under the roles already held), detector services and modules off, findings export, VM Manager OS vulnerabilities with a fix available, exposed privileged VMs (the join of three existing checks); a **Support cases** briefing (its own API and role, its own decision); the deprecations recommender, once confirmed to exist. |
 | Later | | In this order: GKE health, backup and support (cluster conditions and CA expiry, Backup for GKE, end of support, workload disruption readiness); Compute reliability (disk backup coverage, VM availability policy, MIG and load-balancer resilience, reservations); managed databases and storage finished (Cloud SQL deletion protection, maintenance windows, password policy, CA expiry, IAM authentication; AlloyDB open networks; Public Access Prevention, versioning without cleanup; BigQuery unpartitioned tables); the data plane never read (Pub/Sub, Memorystore, Filestore, Spanner, Bigtable, Firestore, NetApp); org-policy depth and residency (exceptions below the root, domain-restriction values, location and service-usage drift); SLO coverage, PDF export. The Workload Manager results import does not ship (a new role, a per-project API, a dedupe layer). |
