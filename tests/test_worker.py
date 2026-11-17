@@ -370,8 +370,11 @@ V18_8_CHECKS = ['check_spend', 'check_log_cost', 'check_serverless_cost']
 # v18.9: logging pipeline and alerting hygiene — three scope-level checks (the scope's sinks; the aggregated sinks under it; the load balancers, services
 # and clusters) and two per-project ones (the _Default sink, bucket and view; the alert policies and their channels).
 V18_9_CHECKS = ['check_audit_pipeline', 'check_duplicate_routing', 'check_project_routing', 'check_alert_channels', 'check_synthetic_coverage']
+# v19: findings and vulnerabilities — SCC's findings under the scope (scope-level), the detector services per project, VM Manager's reports per project,
+# the exposed-privileged-VM join (scope-level).
+V19_CHECKS = ['check_scc_findings', 'check_detector_coverage', 'check_os_vulnerabilities', 'check_exposed_vms']
 LATER_CHECKS = (V14_CHECKS | V15_CHECKS | V15_6_CHECKS | V17_CHECKS | set(V18_1_CHECKS) | set(V18_2_CHECKS) | set(V18_3_CHECKS) | set(V18_4_CHECKS)
-                | set(V18_5_CHECKS) | set(V18_6_CHECKS) | set(V18_7_CHECKS) | set(V18_8_CHECKS) | set(V18_9_CHECKS))
+                | set(V18_5_CHECKS) | set(V18_6_CHECKS) | set(V18_7_CHECKS) | set(V18_8_CHECKS) | set(V18_9_CHECKS) | set(V19_CHECKS))
 
 
 def finished_checks(progress_updates):
@@ -389,7 +392,7 @@ def test_runner_runs_the_beta_v1_check_plan(scope, scope_id, beta, monkeypatch):
     specs = registry.build_check_plan(scope, scope_id, JOB_ID, PROJECTS, zones, regions)
     names = [spec.func.__name__ for spec in specs]
     v17_names = {spec.name for spec in specs if spec.func.__name__ in V17_CHECKS}
-    assert len(names) == (67 if scope == 'organization' else 64)
+    assert len(names) == (71 if scope == 'organization' else 68)
     # Same order as beta v1's plan lists, which append the four checks after "Service Quota Limits".
     beta_plan = ast.parse(textwrap.dedent(inspect.getsource(beta.run_all_checks)))
     beta_lists = [[entry.elts[2].id for entry in node.elts if isinstance(entry, ast.Tuple)]
@@ -411,7 +414,8 @@ def test_runner_runs_the_beta_v1_check_plan(scope, scope_id, beta, monkeypatch):
     assert names[51:55] == V18_7_CHECKS
     assert names[55:58] == V18_8_CHECKS
     assert names[58:63] == V18_9_CHECKS
-    assert names[-2:] == (['check_audit_logging', 'check_org_advisories'] if scope == 'organization' else ['check_synthetic_coverage', 'check_project_advisories'])
+    assert names[63:67] == V19_CHECKS
+    assert names[-2:] == (['check_audit_logging', 'check_org_advisories'] if scope == 'organization' else ['check_exposed_vms', 'check_project_advisories'])
     calls = {'beta': {}, 'new': {}}
     sink = RecordingSink()
 
@@ -460,7 +464,8 @@ def test_runner_runs_the_beta_v1_check_plan(scope, scope_id, beta, monkeypatch):
               registry.EXPOSURE_CHECK, registry.ARMOR_CHECK, registry.SCANNING_CHECK,  # v18.6
               registry.FOLDER_ROLES_CHECK, registry.PRIVILEGED_GRANTS_CHECK, registry.SECRET_SCOPE_CHECK, registry.CUSTOM_ROLES_CHECK,  # v18.7
               registry.SPEND_BRIEFING, registry.LOG_COST_CHECK, registry.SERVERLESS_COST_CHECK,  # v18.8
-              registry.AUDIT_PIPELINE_CHECK, registry.DUPLICATE_ROUTING_CHECK, registry.PROJECT_ROUTING_CHECK, registry.CHANNELS_CHECK, registry.SYNTHETIC_CHECK}  # v18.9
+              registry.AUDIT_PIPELINE_CHECK, registry.DUPLICATE_ROUTING_CHECK, registry.PROJECT_ROUTING_CHECK, registry.CHANNELS_CHECK, registry.SYNTHETIC_CHECK,  # v18.9
+              registry.SCC_FINDINGS_CHECK, registry.DETECTOR_CHECK, registry.OS_VULN_CHECK, registry.EXPOSED_VM_CHECK}  # v19
     assert finished_checks(progress) - later == finished_checks(beta_progress) - {'Personalized Service Health', registry.RESILIENCE_CHECK, 'Essential Contacts'}
     assert sink.findings == []
 
@@ -473,7 +478,7 @@ def test_check_plan_is_the_legacy_plan_plus_the_beta_v1_checks(scope, legacy):
     legacy_names = set(legacy.run_all_checks.__code__.co_names)
     advisories = 'check_org_advisories' if scope == 'organization' else 'check_project_advisories'
     assert [name for name in names if name not in legacy_names] == \
-           BETA_V1_CHECKS + ['check_service_health_incidents', 'check_gke_supported_versions'] + V17_COMMON_CHECKS + V17_1_CHECKS + ['check_data_access_audit_logs', 'check_gke_operations'] + V18_3_CHECKS + V18_4_CHECKS + V18_5_CHECKS + V18_6_CHECKS + V18_7_CHECKS + V18_8_CHECKS + V18_9_CHECKS + [advisories]
+           BETA_V1_CHECKS + ['check_service_health_incidents', 'check_gke_supported_versions'] + V17_COMMON_CHECKS + V17_1_CHECKS + ['check_data_access_audit_logs', 'check_gke_operations'] + V18_3_CHECKS + V18_4_CHECKS + V18_5_CHECKS + V18_6_CHECKS + V18_7_CHECKS + V18_8_CHECKS + V18_9_CHECKS + V19_CHECKS + [advisories]
     if scope == 'organization':  # the one legacy check the plan no longer runs
         assert {name for name in legacy_names if name.startswith('check_')} - set(names) == RETIRED_CHECKS
 
@@ -516,10 +521,11 @@ def test_runner_runs_the_scope_level_checks_when_there_is_no_project(scope, scop
                    'Serverless Exposure', 'Cloud Armor Policy Content', 'Container Scanning Enabled',  # v18.6: serverless and edge exposure (two records each for the first two)
                    'Folder Primitive Roles', 'Secret Access Scope',  # v18.7: the folders under the scope; the secrets (two records)
                    'Spend Briefing', 'Serverless Cost Hygiene',  # v18.8: the billing export under the scope's ancestry (two records); the workloads and connectors
-                   'Audit Log Pipeline', 'Duplicate Log Routing', 'Synthetic and SLO Coverage']  # v18.9: the scope's sinks; the aggregated sinks under it; the edge and the workloads
+                   'Audit Log Pipeline', 'Duplicate Log Routing', 'Synthetic and SLO Coverage',  # v18.9: the scope's sinks; the aggregated sinks under it; the edge and the workloads
+                   'SCC Active Findings', 'Exposed Privileged VMs']  # v19: SCC's findings under the scope; the instances, firewall rules and policies
     split_halves = ['Privileged Grants', 'Custom Roles With IAM Powers']  # v18.7: the scope halves of the two split checks, in every scope
     if scope == 'organization':
-        assert ran[:33] == scope_level + ['Organization IAM Policy'] and registry.MISCELLANEOUS_CHECK in ran and 'IAM Least Privilege' in ran and ran[-2:] == split_halves
+        assert ran[:35] == scope_level + ['Organization IAM Policy'] and registry.MISCELLANEOUS_CHECK in ran and 'IAM Least Privilege' in ran and ran[-2:] == split_halves
     elif scope == 'folder':
         assert ran == scope_level + ['Open Firewall Rules', 'IAM Least Privilege'] + split_halves  # the split halves: firewall policies (v18.3), the folder's IAM recommendations
     else:

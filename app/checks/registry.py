@@ -43,6 +43,8 @@ from app.checks.spend import check_spend
 from app.checks.log_cost import LOG_COST_CHECK, check_log_cost
 from app.checks.log_pipeline import AUDIT_PIPELINE_CHECK, DUPLICATE_ROUTING_CHECK, PROJECT_ROUTING_CHECK, check_audit_pipeline, check_duplicate_routing, check_project_routing
 from app.checks.alerting import CHANNELS_CHECK, SYNTHETIC_CHECK, check_alert_channels, check_synthetic_coverage
+from app.checks.scc import DETECTOR_CHECK, SCC_FINDINGS_CHECK, check_detector_coverage, check_scc_findings
+from app.checks.vulnerabilities import EXPOSED_VM_CHECK, OS_VULN_CHECK, check_exposed_vms, check_os_vulnerabilities
 from app.checks.edge_security import ARMOR_CHECK, check_edge_security
 from app.checks.privileges import CUSTOM_ROLES_CHECK, FOLDER_ROLES_CHECK, PRIVILEGED_GRANTS_CHECK, check_custom_roles, check_folder_roles, check_privileged_grants
 from app.checks.secrets import SECRET_SCOPE_CHECK, check_secret_posture
@@ -257,6 +259,13 @@ def build_check_plan(scope, scope_id, job_id, all_projects, active_zones, active
         CheckSpec("Operational Excellence & Observability", PROJECT_ROUTING_CHECK, check_project_routing, (scope_id, all_projects, job_id)),
         CheckSpec("Operational Excellence & Observability", CHANNELS_CHECK, check_alert_channels, (scope_id, all_projects, job_id)),
         CheckSpec("Reliability & Resilience", SYNTHETIC_CHECK, check_synthetic_coverage, (scope, scope_id, job_id)),
+        # v19: findings and vulnerabilities — SCC Active Findings (SCC v2 under the scope, through REST), SCC Detector Coverage per project (the
+        # Security Center Management services), OS Vulnerabilities per project (VM Manager's reports per zone), Exposed Privileged VMs from one
+        # listing of the scope's instances, firewall rules and policies (+ the IAM-policy search Service Account Privileges makes).
+        CheckSpec("Security & Identity", SCC_FINDINGS_CHECK, check_scc_findings, (scope, scope_id, job_id)),
+        CheckSpec("Security & Identity", DETECTOR_CHECK, check_detector_coverage, (scope_id, all_projects, job_id)),
+        CheckSpec("Security & Identity", OS_VULN_CHECK, check_os_vulnerabilities, (scope_id, all_projects, job_id)),
+        CheckSpec("Security & Identity", EXPOSED_VM_CHECK, check_exposed_vms, (scope, scope_id, job_id)),
     ]
 
     if scope == 'organization':
@@ -293,6 +302,7 @@ SCOPE_LEVEL_CHECKS = frozenset({
     FOLDER_ROLES_CHECK, SECRET_SCOPE_CHECK,  # v18.7: the folders under the scope; one IAM search + one resource search (two records: Secret Manager Posture)
     SPEND_BRIEFING, SERVERLESS_COST_CHECK,  # v18.8: two BigQuery queries under the scope's ancestry (two records: Spend Anomalies); one listing of the scope's workloads and connectors
     AUDIT_PIPELINE_CHECK, DUPLICATE_ROUTING_CHECK, SYNTHETIC_CHECK,  # v18.9: the scope's sinks; the aggregated sinks under it; one listing of its load balancers, services and clusters
+    SCC_FINDINGS_CHECK, EXPOSED_VM_CHECK,  # v19: SCC's findings under the scope; one listing of instances, firewall rules and policies
 })
 # The checks that do both: scope-wide work plus per-project work. Shards split them
 # with keyword flags: the scope shard runs the first set, the project shards the second

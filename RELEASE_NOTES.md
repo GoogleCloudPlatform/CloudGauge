@@ -8,7 +8,157 @@ the test suite running inside the image, a zero-traffic canary revision scanned
 against a real organization, promotion, and a production scan compared fact for
 fact with the previous version's report.
 
-Versions are the image tags (`v5` … `v18.9`); the commit is the one that shipped.
+Versions are the image tags (`v5` … `v19`); the commit is the one that shipped.
+
+## v19 — Findings and vulnerabilities
+
+Theme H of the google/skills mining, the first release that reads **Security
+Command Center** as a source rather than a tier flag. Until now the report said
+whether SCC was activated; it said nothing about what SCC had found, whether SCC
+looked at every project, which CVEs sit on the VMs, or which VM combines the
+three facts a break-in needs. Four records, no new API, no new organization-level
+role: SCC v2 findings, the Security Center Management services and VM Manager's
+vulnerability reports answer under `roles/iam.securityReviewer`, the exposure
+join reads the inventory and the IAM-policy search the report already makes.
+The two SCC endpoints go through plain authorized REST, the way Service Health
+does — the image's static discovery documents have no SCC v2, and the Security
+Center Management API serves no discovery document at all.
+
+What our own organization reads after it: Security Command Center covers **one
+project in three** — the detector services are inherited-off at the organization
+and switched on in `stark-argolis` alone — and in that one project SCC holds 51
+active findings, among them a CRITICAL (a Gemini model without Model Armor),
+three open GKE security bulletins and ten buckets without logging, none of which
+the report said before. Findings leave SCC nowhere. VM Manager is not fully
+enabled anywhere, so no CVE is known. No VM combines the three exposure legs.
+
+### Added
+
+- **SCC Active Findings** (Security & Identity, every scope; scope-level): the
+  active, unmuted findings under the scope — `findings.list` at the
+  organization or the project (`state="ACTIVE" AND mute!="MUTED"`); a folder
+  scan reads the organization's and keeps the findings whose resource belongs
+  to one of the folder's projects, by number or by ID (the folder parent is
+  refused at the Standard tier with the legacy-disabled message; a project SCC
+  does not serve directly falls back the same way). One row per class ×
+  category × severity, the worst severity first: the count, the first three
+  resources, the newest event time, SHA's explanation as the issue and its
+  recommendation as the fix (plus the `gcloud scc findings list --filter` that
+  lists them), and a **CloudGauge check** column — the record of this report
+  that judges the same fact (`COVERAGE_MAP`, 134 categories), or "—" where the
+  report has none: the oracle the sourcing plan asked for, inside the report.
+  SCC's severity is the verdict: CRITICAL **Action Required**, HIGH and MEDIUM
+  *Investigation*, LOW and the OBSERVATION class Informational, an `SCC_ERROR`
+  finding *Investigation*. An organization scan adds a row when findings are
+  exported nowhere (`notificationConfigs` and `bigQueryExports` both empty):
+  Informational at the Standard tier (the v1beta2 subscription says which),
+  *Investigation* at Premium or Enterprise. An organization SCC was never
+  activated for is one Informational note (*Security Command Center Status*
+  says what to do); a permission error is the scanner's and an Error. Capped at
+  200 categories. **One check in the score** whatever it lists (D3, with a
+  test): a fact failing here and in its own record costs the category two
+  checks, never two plus the rows. Rows `Severity, Class, Category, Count,
+  Resources, Latest, CloudGauge check, Issue, Detail, Fix`.
+- **SCC Detector Coverage** (Security & Identity, per project): the *effective*
+  enablement of each detector service at the project
+  (`securityCenterServices.list` — the organization's own list says
+  *inherited → disabled* for every service here while `stark-argolis` has five
+  on; the project is the level that tells the truth). Security Health
+  Analytics off → **Action Required** ("the project is never scanned"); Event,
+  Container, VM and Cloud Run Threat Detection and Web Security Scanner off →
+  *Investigation* where the project runs another threat detector (its
+  Premium-tier services are on, this one was left off), Informational where it
+  runs none ("needs the Premium or Enterprise tier") — judged per project, so a
+  sharded scan reads exactly as a single one (the first cut judged against the
+  whole scope, and the shard harness caught the difference). Module states
+  counted, not judged (141 names
+  here, most of them other clouds'). Rows `Project, Service, State, Issue,
+  Detail, Fix` (`gcloud scc manage services update … --enablement-state=ENABLED`,
+  effective once Security Command Center is activated at the project or the
+  organization — the sandbox probe switched the intended state and the
+  effective one stayed off, which the check reads). *Security Command Center
+  Status* is unchanged beside it.
+- **OS Vulnerabilities** (Security & Identity, per project): the zones with
+  RUNNING VMs outside the managed fleets (from `instances.aggregatedList`),
+  then VM Manager's `vulnerabilityReports.list` per zone; an instance with
+  **critical CVEs that have a fix available** (`availableInventoryItemIds`)
+  → **Action Required**, with **high** ones → *Investigation*, the three worst
+  CVEs named with their CVSS, the fix an OS Config patch job on the instance;
+  CVEs without a fix and MEDIUM and below counted in the Detail. A project where
+  the API answers *vulnerability reports are disabled* → one Informational row
+  (full VM Manager off: the CVEs on its N VMs are unknown), the other zones not
+  asked. Rows `Project, Instance, Zone, Critical, High, Fixable, Issue, Detail,
+  Fix`.
+- **Exposed Privileged VMs** (Security & Identity, every scope; scope-level):
+  one inventory listing of the scope's instances, VPC firewall rules and
+  firewall policies, plus the project IAM policies from one search. A RUNNING
+  instance outside the managed fleets with an **external address** (IPv4 NAT
+  or external IPv6), a **privileged identity** (the default compute account
+  with the `cloud-platform` scope; or any service account on it holding
+  Owner, Editor, an `*.admin` or an `iam.*` role on the project) and an **open
+  ingress rule that reaches it** (enabled, allow, `0.0.0.0/0` or `::/0` among
+  the sources, in its network — a hierarchical policy applies to every
+  network — targeting it by no target, a tag or a service account; a firewall
+  policy rule in the shape of a VPC rule, as *Open Firewall Rules* reads them)
+  → **Action Required**, the row naming the three facts, the fix removing the
+  address (`delete-access-config`), the rule and the identity named as the
+  alternatives. Two legs are not a row. The IAM search is made only when a
+  running VM has an external address; failing, the default account alone
+  counts, said under *Projects not checked*. Rows `Project, Instance, Zone,
+  External IP, Identity, Open rule, Issue, Detail, Fix`.
+
+### Changed
+
+- The synthetic organization draws the findings profile (drawn last): a
+  project's SCC findings in one of four shapes (misconfigurations of mixed
+  severity; plus a CRITICAL vulnerability; threats; everything including an
+  `SCC_ERROR` and an observation), muted ones the filter must leave out, the
+  detector services inherited-off / Standard / Premium, full VM Manager on or
+  off with CVE counts per VM. The provider answers the two REST endpoints
+  (`http_get`: the organization's and a project's findings, a folder's 400,
+  the services by profile, no exports), `vulnerabilityReports.list` (or the
+  precondition error), and lists the firewall rules and the instances'
+  interfaces in the inventory.
+- README: the four catalogue entries, the scope note, the project structure.
+  `VERSION = "19"`; the Terraform module name carries it. The roadmap: v19
+  shipped; **v19.1 Footprint and detection** added with the survey's numbers;
+  the *deprecations recommender* line removed (the Recommender catalogue —
+  76 recommenders — has none); *Support cases* marked as needing a role.
+
+### Tests
+
+- `tests/test_scc.py`: the REST helpers (retries, pages, the cap, the
+  not-activated reading); finding facts and rows (the ladder over every class
+  and severity, muted and inactive left out, the resources and latest, the
+  coverage column, the fixes, the cap); the export row by tier; service facts
+  and the detector rows with and without Premium available; both checks end
+  to end — the organization with pages and the export row, a project scan,
+  the all-clear, the folder fallback, the project fallback, not activated, a
+  permission error, the export reads failing, the search failing; the score
+  guarantee (one check whatever the rows).
+- `tests/test_vulnerabilities.py`: the running zones, report facts and rows
+  (fixable critical and high, the worst CVEs, the patch-job fix), the
+  precondition row and its reading; instance facts, the identity rule, the
+  open rules (VPC and policy, disabled, egress, deny, tags, other networks,
+  hierarchical), the reaching rule, the three-leg join; both checks end to end
+  with the precondition, the Compute API disabled, a zone failing, the IAM
+  search failing, no external VM, the inventory failing.
+- `tests/test_worker.py`, `tests/test_fanout.py`, `tests/test_synthetic.py`:
+  the plan (71 / 68), the scope-level list, the project shards (33), one more
+  organization listing.
+- 1,284 tests.
+
+### Upgrade notes
+
+- Nothing to do: redeploy as usual. The first scan after the upgrade shows the
+  four records as *new check* on the Changes card; *Security Command Center
+  Status* is unchanged. The `securitycenter`, `securitycentermanagement` and
+  `osconfig` APIs must be enabled in the project CloudGauge runs in (they are
+  in a deployment made by `tools/deploy.sh` or Terraform since v17.1 / v18);
+  `tools/deploy.sh` and the Terraform configuration enable
+  `securitycentermanagement.googleapis.com` from this release.
+
+---
 
 ## v18.9 — Logging pipeline and alerting hygiene
 
@@ -3657,5 +3807,6 @@ performance; modernization; enablement; roadmap and roadblocks).
 | **v18.8** | Forecasts, budgets and spend | *Shipped.* **Spend Briefing** from the organization's **billing export to BigQuery** (`BILLING_EXPORT=<project>.<dataset>`, a dataset-level read, no billing-account IAM; *Informational — not configured* when unset): month to date against last month, a 7-day-mean forecast, projects and services with their change, credits with **committed-use coverage**, freshness, every line with its `bq` query; **Spend Anomalies** (week over week ≥ 1.5 × and above a floor, new spend); the Scorecard's Efficiency line grounded in real spend; **Log Cost Levers** (retention beyond 30 days, flow-log sampling above 0.5, DEBUG volume above the free tier without an exclusion); **Serverless Cost Hygiene** (connectors in use or idle, cross-region Cloud SQL); versioning without pruning in Cloud Storage Lifecycle. Not taken: the spend-based commitment recommendations from the Recommender export (that export still carries no billing-account rows — dropped by decision), budgets and Capacity Planner forecasts (billing-account IAM), the remaining config-level cost rows (BigQuery baseline slots, staging datasets without expiry, non-production Cloud SQL HA, backend buckets without CDN, resource labels, GKE cost allocation) — Later. |
 | **v18.8.1** | API attribution | *Shipped.* The static client identifier `cloud-solutions/cloudgauge-v<release>` on the user agent of every Google Cloud API call a scan makes (and the Terraform provider's module name at deploy time), so adoption can be measured from API usage alone — nothing added to what leaves a deployment; `CLOUDGAUGE_DISABLE_ATTRIBUTION=true` turns it off; the README's *Privacy & API Attribution*; a public-repository guardrail in the test suite. No check changed. |
 | **v18.9** | Logging pipeline and alerting hygiene | *Shipped.* **Audit Log Pipeline** (sink filters missing audit log types, destination retention and lock, the writer's grant, export errors), **Duplicate Log Routing** (central sink plus untouched `_Default` sinks; free audit streams re-stored), **Project Log Routing** (`_Default` disabled, Data Access logs in the default view, Log Analytics), **Alert Notification Channels** (policies routed to nobody, unverified or disabled channels, undeliverable Pub/Sub channels), **Synthetic and SLO Coverage**. No new role, no new API. |
-| **v19** | Footprint and detection | A **Platform Footprint** page (what runs where: services, regions, versions); the detective half of the SSRF chain over Cloud Logging — **GKE control-plane activity** (exec, webhooks, RBAC and DaemonSet changes by service accounts or external IPs), **service-account activity signals**; **Findings and vulnerabilities** — Security Command Center active findings by category (the v2 API answers under the roles already held), detector services and modules off, findings export, VM Manager OS vulnerabilities with a fix available, exposed privileged VMs (the join of three existing checks); a **Support cases** briefing (its own API and role, its own decision); the deprecations recommender, once confirmed to exist. |
+| **v19** | Findings and vulnerabilities | *Shipped.* **SCC Active Findings** (Security Command Center's active findings under the scope, SCC's severity as the verdict, the CloudGauge record that judges the same fact named per category, the no-export row), **SCC Detector Coverage** (Security Health Analytics and the threat detectors per project — the real organization covers one project in three), **OS Vulnerabilities** (VM Manager's CVEs with a fix available; the precondition row where VM Manager is off), **Exposed Privileged VMs** (external address + privileged identity + open ingress rule). No new role, no new API. The *deprecations recommender* line leaves the roadmap: the Recommender catalogue has none. |
+| **v19.1** | Footprint and detection | A **Platform Footprint** briefing (what runs where: one all-types inventory search — 1,908 assets, 113 types, 2 s on the real organization — by product, location and project, the enabled APIs, the GKE and Cloud SQL versions); the detective half of the SSRF chain over Cloud Logging, 7 days under the scope (a 30-day project query took 181 s) — **GKE Control Plane Activity** (exec, attach, port-forward, secrets reads, DaemonSet and CronJob creation in `kube-system`, cluster-admin bindings, webhook changes by non-Google principals or from external addresses; Google's own agents and `system:` principals excluded — the real organization's 120 entries in 30 days are all theirs), **Service Account Activity Signals** (key creation, IAM changes, metadata writes, token minting by service accounts from external addresses; token minting needs Data Access logs, the row says so). A **Support cases** briefing needs `roles/cloudsupport.viewer` on the organization — a new org-level role, not scheduled. |
 | Later | | In this order: GKE health, backup and support (cluster conditions and CA expiry, Backup for GKE, end of support, workload disruption readiness); Compute reliability (disk backup coverage, VM availability policy, MIG and load-balancer resilience, reservations); managed databases and storage finished (Cloud SQL deletion protection, maintenance windows, password policy, CA expiry, IAM authentication; AlloyDB open networks; Public Access Prevention, versioning without cleanup; BigQuery unpartitioned tables); the data plane never read (Pub/Sub, Memorystore, Filestore, Spanner, Bigtable, Firestore, NetApp); org-policy depth and residency (exceptions below the root, domain-restriction values, location and service-usage drift); SLO coverage, PDF export. The Workload Manager results import does not ship (a new role, a per-project API, a dedupe layer). |

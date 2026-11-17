@@ -80,7 +80,7 @@ def enabled_apis(text):
 
 def test_the_apis_are_the_scripts_and_the_readmes(tf, script, readme):
     terraform = hcl_list(tf['main.tf'], 'apis')
-    assert len(terraform) == len(set(terraform)) == 25
+    assert len(terraform) == len(set(terraform)) == 26  # v19: + securitycentermanagement
     assert set(terraform) == enabled_apis(script), 'terraform/main.tf and tools/deploy.sh enable different APIs'
     assert set(terraform) == enabled_apis(readme), 'terraform/main.tf and README › Common Prerequisites enable different APIs'
     assert 'disable_on_destroy = false' in tf['main.tf']  # other things in the project may use them

@@ -250,8 +250,9 @@ def test_scan_completes_against_the_synthetic_organization(gcp, scope):
     # v18.8: one more (Serverless Cost Hygiene's workloads and connectors; the connectors come from the search, the workloads from the listing).
     # v18.9: one more (Synthetic and SLO Coverage's load balancers, services and clusters); Audit Log Pipeline lists destinations only for a
     # sink into a dataset, bucket or topic in scope, and the synthetic organization's own sink writes outside it.
-    assert by_method.get('asset.listAssets(org)', 0) == (26 if scope == 'organization' else 0)  # v18.5: the identity checks search instead
-    assert by_method.get('asset.listAssets(folder)', 0) == (26 if scope == 'folder' else 0)
+    # v19: one more (Exposed Privileged VMs' instances, firewall rules and policies); SCC's findings and services come through REST.
+    assert by_method.get('asset.listAssets(org)', 0) == (27 if scope == 'organization' else 0)  # v18.5: the identity checks search instead
+    assert by_method.get('asset.listAssets(folder)', 0) == (27 if scope == 'folder' else 0)
     assert by_method.get('accesscontextmanager.servicePerimeters.list', 0) == 1
     metrics = provider.metrics.snapshot()
     assert metrics['total_calls'] > 50 and metrics['errors'] == {}

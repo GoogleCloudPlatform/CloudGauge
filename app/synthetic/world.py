@@ -339,6 +339,16 @@ class Observability:
 
 
 @dataclass(frozen=True)
+class Findings:
+    """v19: what the SCC and vulnerability rules read (the SCC v2 and Security Center Management REST answers, VM Manager's reports)."""
+    scc: str  # "" | "misconfig" | "critical" | "threats" | "mixed": the project's active findings
+    muted: int  # muted findings, which the filter must leave out
+    detectors: str  # "inherited" (every service effective DISABLED) | "standard" (SHA on, the threat detectors off) | "premium" (all on)
+    vm_manager: bool  # full VM Manager on: vulnerability reports exist for the project's VMs
+    cves: tuple  # per VM (the profile's order): (critical CVEs with a fix, high CVEs with a fix, other CVEs)
+
+
+@dataclass(frozen=True)
 class ProjectProfile:
     index: int
     project_id: str
@@ -409,6 +419,7 @@ class ProjectProfile:
     privileges: Privileges = None  # v18.7
     cost_levers: CostLevers = None  # v18.8
     observability: Observability = None  # v18.9
+    findings: Findings = None  # v19
 
     @property
     def project_number(self):
@@ -817,6 +828,12 @@ class SyntheticOrg:
             uptime=rng.choice(["", "silent", "alerted"]) if network_edge.lb != "none" else "",
             slo=rng.choice(["", "", "silent", "alerted"]) if serverless.services else "")
 
+        # v19 (drawn last again): what Security Command Center and VM Manager say about the project.
+        findings = Findings(
+            scc=rng.choice(["", "", "misconfig", "misconfig", "critical", "threats", "mixed"]), muted=rng.choice([0, 0, 1, 3]),
+            detectors=rng.choice(["inherited", "inherited", "standard", "standard", "premium"]), vm_manager=_chance(rng, 0.4),
+            cves=tuple((rng.choice([0, 0, 0, 1, 2]), rng.choice([0, 0, 1, 4]), rng.choice([3, 12, 40])) for _ in vms))
+
         return ProjectProfile(
             index=index, project_id=project_id, display_name=f"Synthetic Project {index}",
             folder_id=self.folder_of(index), denied=denied, osconfig_disabled=osconfig_disabled,
@@ -840,7 +857,7 @@ class SyntheticOrg:
             unprotected_buckets=unprotected_buckets, sink_buckets=sink_buckets, retention_buckets=retention_buckets, proxy_subnet=proxy_subnet,
             gke_auto_repair=gke_auto_repair, project_audit_configs=project_audit_configs, project_contact=project_contact,
             gke_operations=gke_operations, network_edge=network_edge, data_governance=data_governance, posture=posture, serverless=serverless, privileges=privileges,
-            cost_levers=cost_levers, observability=observability,
+            cost_levers=cost_levers, observability=observability, findings=findings,
         )
 
     # --- the synthetic billing export (v18.8) ---

@@ -260,6 +260,10 @@ class SyntheticGcp:
     def http_get(self, url, **kwargs):
         if "servicehealth.googleapis.com/" in url:
             return self._service_health_events(url, kwargs.get("params") or {})
+        if "securitycenter.googleapis.com/v2/" in url:  # v19
+            return self._scc_v2(url, kwargs.get("params") or {})
+        if "securitycentermanagement.googleapis.com/v1/" in url:  # v19
+            return self._scc_management(url)
         self.call("http", "GET", style="http")
         text = BEST_PRACTICES_CSV if url.lower().endswith(".csv") else "{}"
         return _HttpResponse(200, text)
@@ -525,7 +529,11 @@ class SyntheticGcp:
 
     def _h_compute_firewalls_list(self, kw, project_id):
         self.call("compute", "firewalls.list", project_id=project_id, style="http")
-        profile = self.world.project(project_id)
+        return {"items": self._firewall_rules(self.world.project(project_id))}
+
+    @staticmethod
+    def _firewall_rules(profile):
+        project_id = profile.project_id
         rules = [{"name": name, "network": f"projects/{project_id}/global/networks/vpc-main", "direction": "INGRESS", "priority": 1000,
                   "sourceRanges": ["0.0.0.0/0"] if open_rule else ["10.0.0.0/8"], "disabled": disabled,
                   "allowed": [{"IPProtocol": "tcp", "ports": ["22"]}] if open_rule else [{"IPProtocol": "tcp", "ports": ["8080"]}]}
@@ -533,7 +541,7 @@ class SyntheticGcp:
         # v18: the hardening pattern every network should have — a deny-all from the internet — is never a finding.
         rules.append({"name": "deny-all-ingress", "network": f"projects/{project_id}/global/networks/vpc-main", "direction": "INGRESS", "priority": 65000,
                       "sourceRanges": ["0.0.0.0/0"], "disabled": False, "denied": [{"IPProtocol": "all"}]})
-        return {"items": rules}
+        return rules
 
     def _h_compute_networks_list(self, kw, project_id):
         self.call("compute", "networks.list", project_id=project_id, style="http")
@@ -1133,6 +1141,113 @@ class SyntheticGcp:
         return {"name": kw["name"], "etag": "synthetic",
                 "notificationSettings": {kind: {"enabled": kind not in profile.advisory_types_disabled} for kind in ADVISORY_TYPES}}
 
+    # --- v19: Security Command Center (REST) and VM Manager ---
+
+    def _finding_results(self, profile):
+        """The project's active SCC findings as ``ListFindingsResult`` objects, in the drawn shape; the muted ones carry ``mute: MUTED``."""
+        f, project_id, number = profile.findings, profile.project_id, profile.project_number
+        if f is None or not f.scc:
+            return []
+        org = f"organizations/{self.world.org_id}"
+        results = []
+
+        def add(cls, category, severity, resource_name, display, source, days=3, mute="UNDEFINED", recommendation="", explanation=""):
+            results.append({"finding": {"name": f"{org}/sources/1/locations/global/findings/{len(results)}", "findingClass": cls, "category": category, "severity": severity, "state": "ACTIVE",
+                                        "mute": mute, "eventTime": _iso(days), "createTime": _iso(days + 10), "resourceName": resource_name, "parentDisplayName": source,
+                                        "sourceProperties": {"Recommendation": recommendation, "Explanation": explanation} if recommendation else {}},
+                            "resource": {"name": resource_name, "displayName": display, "gcpMetadata": {"project": f"projects/{number}", "projectDisplayName": project_id}}})
+        sha = "Security Health Analytics"
+        if f.scc in ("misconfig", "critical", "mixed"):
+            for vm in profile.vms[:2]:
+                add("MISCONFIGURATION", "COMPUTE_PROJECT_WIDE_SSH_KEYS_ALLOWED", "MEDIUM", f"//compute.googleapis.com/projects/{project_id}/zones/{vm.zone}/instances/{vm.name}", vm.name, sha,
+                    recommendation="Go to the instance's details page and block project-wide SSH keys.", explanation="Project-wide SSH keys are allowed on this instance.")
+            for bucket in profile.buckets[:3]:
+                add("MISCONFIGURATION", "BUCKET_LOGGING_DISABLED", "LOW", f"//storage.googleapis.com/{bucket.name}", bucket.name, sha,
+                    recommendation="Set up logging for the bucket.", explanation="Storage logging is not enabled for this bucket.")
+            for sql in profile.sql_instances[:1]:
+                add("MISCONFIGURATION", "SQL_PUBLIC_IP", "MEDIUM", f"//cloudsql.googleapis.com/projects/{project_id}/instances/{sql.name}", sql.name, sha,
+                    recommendation="Remove the public IP from the instance.", explanation="The Cloud SQL instance has a public IP address.")
+        if f.scc in ("critical", "mixed"):
+            add("VULNERABILITY", "GEMINI_MODEL_NOT_PROTECTED_BY_MODEL_ARMOR", "CRITICAL", f"//cloudresourcemanager.googleapis.com/projects/{number}", project_id, "Model Armor", days=1)
+        if f.scc in ("threats", "mixed"):
+            add("THREAT", "Persistence: New API Method", "LOW", f"//cloudresourcemanager.googleapis.com/projects/{number}", project_id, "Event Threat Detection", days=12)
+            add("THREAT", "Persistence: New API Method", "LOW", f"//cloudresourcemanager.googleapis.com/projects/{number}", project_id, "Event Threat Detection", days=5)
+            if profile.vms:
+                add("THREAT", "Malware: Bad IP", "HIGH", f"//compute.googleapis.com/projects/{project_id}/zones/{profile.vms[0].zone}/instances/{profile.vms[0].name}", profile.vms[0].name, "Event Threat Detection", days=2)
+        if f.scc == "mixed":
+            add("SCC_ERROR", "API_DISABLED", "HIGH", f"//cloudresourcemanager.googleapis.com/projects/{number}", project_id, "Security Command Center", days=4)
+            add("OBSERVATION", "Impact: GPU Instance Created", "LOW", f"//cloudresourcemanager.googleapis.com/projects/{number}", project_id, "Sensitive Actions Service", days=30)
+        for i in range(f.muted):
+            add("MISCONFIGURATION", "BUCKET_LOGGING_DISABLED", "LOW", f"//storage.googleapis.com/muted-{i}", f"muted-{i}", sha, mute="MUTED")
+        return results
+
+    def _scc_v2(self, url, params):
+        """``GET /v2/{parent}/sources/-/locations/global/findings`` for the organization or a project (a folder answers 400, as the Standard tier
+        does); the organization's ``notificationConfigs`` and ``bigQueryExports`` (none)."""
+        path = url.split("/v2/", 1)[1]
+        if path.endswith("/notificationConfigs") or path.endswith("/bigQueryExports"):
+            self.call("securitycenter", path.rsplit("/", 1)[-1] + ".list", style="http")
+            return _HttpResponse(200, "{}")
+        if path.startswith("folders/"):
+            self.call("securitycenter", "findings.list?", style="http")
+            return _HttpResponse(400, json.dumps({"error": {"code": 400, "message": "Security Command Center Legacy has been permanently disabled as of June 7, 2021. Migrate to Security Command Center's Standard tier or Premium tier.", "status": "FAILED_PRECONDITION"}}))
+        project_id = _project_of(path) if path.startswith("projects/") else None
+        try:
+            self.call("securitycenter", "findings.list", project_id=project_id, style="http")
+        except HttpError as e:
+            return _HttpResponse(e.resp.status, e.content.decode() if isinstance(e.content, bytes) else str(e.content))
+        profiles = [self.world.project(project_id)] if project_id else self.world.projects()
+        exclude_muted = 'mute!="MUTED"' in str(params.get("filter") or "")
+        results = [r for p in profiles for r in self._finding_results(p) if not (exclude_muted and r["finding"]["mute"] == "MUTED")]
+        return _HttpResponse(200, json.dumps({"listFindingsResults": results, "totalSize": len(results)}))
+
+    def _scc_management(self, url):
+        """``GET /v1/{parent}/locations/global/securityCenterServices``: the effective states by the project's drawn profile; the organization
+        and the folders inherit-off everything (as the real organization does)."""
+        path = url.split("/v1/", 1)[1]
+        project_id = _project_of(path) if path.startswith("projects/") else None
+        try:
+            self.call("securitycentermanagement", "securityCenterServices.list", project_id=project_id, style="http")
+        except HttpError as e:
+            return _HttpResponse(e.resp.status, e.content.decode() if isinstance(e.content, bytes) else str(e.content))
+        profile = self.world.project(project_id) if project_id else None
+        detectors = profile.findings.detectors if profile and profile.findings else "inherited"
+        threat = ("EVENT_THREAT_DETECTION", "CONTAINER_THREAT_DETECTION", "VM_THREAT_DETECTION", "CLOUD_RUN_THREAT_DETECTION", "WEB_SECURITY_SCANNER")
+        services = []
+        for name in ("SECURITY_HEALTH_ANALYTICS",) + threat + ("VM_MANAGER",):
+            on = detectors == "premium" or (detectors == "standard" and name == "SECURITY_HEALTH_ANALYTICS")
+            modules = {f"MODULE_{i}": {"effectiveEnablementState": "ENABLED" if on and i % 2 == 0 else "DISABLED"} for i in range(4)} if name != "VM_MANAGER" else {}
+            services.append({"name": f"{path}/{name.lower().replace('_', '-')}", "intendedEnablementState": "ENABLED" if on else "INHERITED",
+                             "effectiveEnablementState": "ENABLED" if on else "DISABLED", "modules": modules})
+        return _HttpResponse(200, json.dumps({"securityCenterServices": services}))
+
+    def _h_osconfig_projects_locations_instances_vulnerabilityReports_list(self, kw, project_id):
+        """VM Manager's vulnerability reports of a zone's instances, or the precondition error of a project without full VM Manager."""
+        self.call("osconfig", "vulnerabilityReports.list", project_id=project_id, style="http")
+        profile = self.world.project(project_id)
+        f = profile.findings
+        if f is None or not f.vm_manager:
+            raise _http_error(400, "Vulnerability reports are disabled in this project. To view these reports, enable full VM Manager functionality.")
+        zone = str(kw.get("parent") or "").split("/locations/")[1].split("/")[0]
+        reports = []
+        for index, vm in enumerate(profile.vms):
+            if vm.zone != zone or vm.name in profile.stopped_vms or vm.gke:
+                continue
+            critical, high, other = f.cves[index] if index < len(f.cves) else (0, 0, 0)
+            vulns = [{"details": {"cve": f"CVE-2026-{1000 + n}", "severity": "CRITICAL", "cvssV3": {"baseScore": 9.8}}, "availableInventoryItemIds": ["pkg-1"], "installedInventoryItemIds": ["pkg-0"]} for n in range(critical)]
+            vulns += [{"details": {"cve": f"CVE-2026-{2000 + n}", "severity": "HIGH", "cvssV3": {"baseScore": 7.5}}, "availableInventoryItemIds": ["pkg-2"]} for n in range(high)]
+            vulns += [{"details": {"cve": f"CVE-2026-{3000 + n}", "severity": "MEDIUM", "cvssV3": {"baseScore": 5.3}}} for n in range(other)]
+            reports.append({"name": f"projects/{project_id}/locations/{zone}/instances/{self._instance_id(profile, index)}/vulnerabilityReport", "vulnerabilities": vulns, "updateTime": _iso(0)})
+        return {"vulnerabilityReports": reports}
+
+    def _firewall_assets(self, profile, asset_types):
+        """The project's VPC firewall rules as the inventory lists them (v19: the same rules ``firewalls.list`` answers)."""
+        if "compute.googleapis.com/Firewall" not in asset_types:
+            return []
+        rules = self._firewall_rules(profile)
+        return [SimpleNamespace(name=f"//compute.googleapis.com/projects/{profile.project_id}/global/firewalls/{rule['name']}",
+                                resource=SimpleNamespace(data=rule, parent=f"//cloudresourcemanager.googleapis.com/projects/{profile.project_number}")) for rule in rules]
+
     # --- Asset Inventory ---
 
     def search_all_resources(self, request):
@@ -1222,6 +1337,7 @@ class SyntheticGcp:
             found += self._posture_assets(profile, asset_types)
             found += self._serverless_assets(profile, asset_types)
             found += self._observability_assets(profile, asset_types)
+            found += self._firewall_assets(profile, asset_types)
             return found
         # Folder- or organization-wide listing: one pass over the projects in scope.
         folder_id = parent.split("/", 1)[1] if parent.startswith("folders/") else None
@@ -1239,6 +1355,7 @@ class SyntheticGcp:
             found += self._posture_assets(profile, asset_types)
             found += self._serverless_assets(profile, asset_types)
             found += self._observability_assets(profile, asset_types)
+            found += self._firewall_assets(profile, asset_types)
         self.call("asset", "listAssets(folder)" if folder_id else "listAssets(org)", pages=max(1, math.ceil(len(found) / PAGE_SIZE)))
         return found
 
@@ -1297,8 +1414,11 @@ class SyntheticGcp:
         found = []
         if "compute.googleapis.com/Instance" in asset_types:
             for index, vm in enumerate(profile.vms):
+                stopped = vm.name in profile.stopped_vms
+                access = [{"name": "External NAT", "type": "ONE_TO_ONE_NAT", **({} if stopped else {"natIP": "203.0.113.10"})}] if vm.external_ip else None
                 found.append(SimpleNamespace(name=f"//compute.googleapis.com/projects/{project_id}/zones/{vm.zone}/instances/{vm.name}", resource=SimpleNamespace(data={
-                    "name": vm.name, "status": "TERMINATED" if vm.name in profile.stopped_vms else "RUNNING",
+                    "name": vm.name, "status": "TERMINATED" if stopped else "RUNNING", "tags": {"items": ["web"]} if index == 0 else {},
+                    "networkInterfaces": [{"name": "nic0", "network": f"https://www.googleapis.com/compute/v1/projects/{project_id}/global/networks/vpc-main", **({"accessConfigs": access} if access else {})}],  # v19
                     "zone": f"https://www.googleapis.com/compute/v1/projects/{project_id}/zones/{vm.zone}", **self._instance_posture_fields(profile, index, vm)})))
         if "compute.googleapis.com/Project" in asset_types:  # the inventory's copy: without the ssh-keys item, as the real one
             items = [i for i in self._project_metadata_items(profile) if i["key"] != "ssh-keys"]
