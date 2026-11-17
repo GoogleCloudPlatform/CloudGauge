@@ -8,7 +8,143 @@ the test suite running inside the image, a zero-traffic canary revision scanned
 against a real organization, promotion, and a production scan compared fact for
 fact with the previous version's report.
 
-Versions are the image tags (`v5` … `v19`); the commit is the one that shipped.
+Versions are the image tags (`v5` … `v19.1`); the commit is the one that shipped.
+
+## v19.1 — Footprint and detection
+
+The second half of the roadmap's v19 line, split off in the v19 plan. One
+briefing and two detective records, no new API, no new organization-level
+role: the Asset Inventory search under `roles/cloudasset.viewer` and the Admin
+Activity audit logs under `roles/logging.viewer`, both of which the scanner
+already holds. Until now the report judged *configuration*; these two records
+read what was *done* in the last seven days — the half of the SSRF chain that
+posture cannot see.
+
+What our own organization reads after it: the footprint on one page — three
+projects, 1,908 indexed assets of 113 types, 112 distinct APIs enabled, one GKE
+cluster on 1.32 in the extended channel, one Cloud SQL instance on
+PostgreSQL 15, seven Cloud Run services, six VMs — and two all-clears: every
+control-plane write of the month and every IAM change of the week was Google's
+own (`system:addon-manager`, the KTD agent, the organization's own IAM
+automation). The sandbox probes confirm the rows exist when the actions do.
+
+### Added
+
+- **Platform Footprint** (Operational Excellence & Observability, every scope;
+  scope-level; a briefing): one all-types `searchAllResources` under the scope
+  (`read_mask` names, types, locations, projects — 1,908 assets in 2 s on the
+  reference organization), one content search for the resources whose version
+  matters (`versionedResources`: GKE clusters — version, channel, Autopilot or
+  Standard, node count; Cloud SQL — engine and tier; VMs — machine family and
+  state; AlloyDB, Spanner, Memorystore, Bigtable), and the enabled-service
+  assets. The lines, in the Spend Briefing's shape (`Line, Value, Detail,
+  Fix`): **Projects** (by ID), **Regions** (count and leading families per
+  location), **Enabled APIs** (per project; on in every project; on in one
+  project only), one line per product family (`FAMILIES`: Compute Engine, GKE,
+  Cloud Run, Databases, Storage, BigQuery, data processing and messaging,
+  Vertex AI, Networking, identity and secrets, registries and build,
+  Operations — 14 families, about a hundred types; each counted by its own
+  kind first — *7 services, 232 resources*, *6 VMs, 77 resources* with the
+  VMs' states and machine families), one for the **Kubernetes objects** GKE
+  indexes (every `*.k8s.io` type, by rule — 461 ClusterRoles, bindings,
+  workloads and namespaces on the reference organization, which would
+  otherwise have swamped *Other*) and **Other** for the rest, every Fix the
+  `gcloud asset search-all-resources` that lists the line.
+  *Informational*; the inventory search failing is an Error, the content and
+  service searches failing cost the versions or the API line, not the briefing.
+- **GKE Control Plane Activity** (Security & Identity, every scope; per
+  project): one `entries.list` per project (`resourceNames` the project — the
+  `k8s_cluster` audit log is a project's, and a read of the organization
+  returns the organization's *own* entries only, which the sandbox probe
+  proved: the first cut read the organization and saw nothing; ten projects
+  read at a time, a failed read under *Projects not checked*), the Admin
+  Activity log of the last 7 days, newest first, 2,000 entries per project at
+  most (a capped read says so in every row):
+  `pods.exec|attach|portforward.create|get` (SPDY is a POST, the WebSocket
+  exec of kubectl ≥ 1.31 a GET — the sandbox probe's shape), `daemonsets.create` and
+  `cronjobs.create` in `kube-system`, `clusterrolebindings.create|patch|update`
+  to `cluster-admin`, `mutating|validatingwebhookconfigurations.create|update|
+  patch`. Google's own principals are left out — `system:*` (except a workload's
+  Kubernetes service account outside the GKE-managed namespaces, which is the
+  very caller the exec rule is for), `*@gcp-sa-*`,
+  `*@system.gserviceaccount.com`, the GKE robot, `cloudservices`; the default
+  compute account stays, it is the customer's. Caller addresses are classed
+  internal (`private`, `gce-internal-ip`, RFC 1918, shared address space,
+  loopback, link-local, ULA — spelled out, not Python's `is_private`, whose
+  meaning moved between releases) or external. Grouped by project, cluster,
+  action, principal and address class; a user's exec *Informational*, a
+  service account's *Investigation*, **Action Required** from outside;
+  `cluster-admin` granted *Investigation* by a user, **Action Required** by a
+  service account; `kube-system` workloads and webhook changes
+  *Investigation*, **Action Required** by a service account from outside — an
+  external address escalates service accounts only, people work from laptops
+  (the plan had "or from outside" on the binding; the sandbox probe's admin,
+  granting `cluster-admin` from a workstation, showed what that would flag). A
+  refused call (a non-zero status — RBAC, IAM, an organization policy) counts
+  and is said (*2 of them were denied*): an attempt is a signal. The
+  all-clear says that secrets reads are Data Access logs and are not read.
+  Rows `Project, Cluster, Action, Principal, From, Count, Latest, Issue,
+  Detail, Fix` (`gcloud logging read … --project|--organization|--folder`,
+  then the RBAC or the access to remove).
+- **Service Account Activity Signals** (Security & Identity, every scope; a
+  split check — the organization's or folder's own entries in the scope shard,
+  an IAM change on the organization being written there, and every project's
+  in the project shards): the same read for principals ending in `gserviceaccount.com`
+  — `CreateServiceAccountKey`, `SetIamPolicy`, `setCommonInstanceMetadata`,
+  `compute.instances.setMetadata`, `CreateServiceAccount` — Google's own
+  excluded (on the reference organization the whole week's 43 entries were the
+  organization's IAM automation). Keys, IAM changes and metadata writes
+  *Investigation*, **Action Required** from an external address; service
+  accounts created *Informational*; refused calls counted and said, as above
+  (the sandbox probe's first key attempt, refused by
+  `iam.disableServiceAccountKeyCreation`, reads *1 of them was denied*). The
+  key's target is the account's email from the resource labels; an organization- or folder-level entry keeps its
+  parent in the Project column and the fix line names it. The all-clear says
+  that token minting is a Data Access log and is not read. Rows `Project,
+  Principal, Action, Target, From, Count, Latest, Issue, Detail, Fix`.
+
+### Changed
+
+- The synthetic organization draws a detection profile (drawn last): a user's
+  exec, a service account's exec from outside, a `cluster-admin` binding, a
+  Google DaemonSet (which the rules must leave out), a service account key, a
+  project factory's IAM change, the organization's own IAM churn. The provider
+  answers `entries.list` for the two filters at every scope, the all-types and
+  content searches (`versionedResources` for clusters, Cloud SQL instances and
+  VMs) and the enabled services per project.
+- README: the three catalogue entries, the scope note, the project structure.
+  `VERSION = "19.1"`; the Terraform module name carries it. The roadmap: v19.1
+  shipped; **v19.2 Support cases** added as a small release of its own (the
+  first new organization-level role, by decision).
+
+### Tests
+
+- `tests/test_footprint.py`: the family map (no type in two families, every
+  versioned type placed), the facts and the versions (dict and proto shapes,
+  Autopilot, Redis, Spanner), the lines from a two-project fixture (projects by
+  ID, regions, the APIs on everywhere and in one project only, the Compute
+  Engine states and families, the GKE and Cloud SQL versions, Other), the
+  empty scope and the counts-only briefing, the check end to end (three
+  searches with their read masks; the inventory search failing → Error; the
+  content and service searches failing → no versions, no API line).
+- `tests/test_detection.py`: the filter texts, paging and the cap, Google's
+  principals against the customer's and workload identities, the address
+  classes, the judged shapes and the two ladders, the grouping with Google's
+  churn left out, the cap note, both checks end to end (the scope's parent in
+  `resourceNames`, the window from the pinned clock, the all-clear, the Error).
+- `tests/test_worker.py`: the plan is 74 checks for an organization and 71
+  otherwise; the three new names in their places, Platform Footprint in the
+  scope-level list, the Service Account Activity Signals scope half beside the
+  other split halves. `tests/test_fanout.py`: 35 project-level names.
+- `tests/fakes.py`: a search without asset types returns every resource, as
+  the API does.
+- 1,303 tests.
+
+### Upgrade notes
+
+No new API, no new role: `tools/deploy.sh` and the Terraform module are
+unchanged but for the version. The three records appear from the first scan
+after the upgrade; the scan after that compares them.
 
 ## v19 — Findings and vulnerabilities
 
@@ -3808,5 +3944,6 @@ performance; modernization; enablement; roadmap and roadblocks).
 | **v18.8.1** | API attribution | *Shipped.* The static client identifier `cloud-solutions/cloudgauge-v<release>` on the user agent of every Google Cloud API call a scan makes (and the Terraform provider's module name at deploy time), so adoption can be measured from API usage alone — nothing added to what leaves a deployment; `CLOUDGAUGE_DISABLE_ATTRIBUTION=true` turns it off; the README's *Privacy & API Attribution*; a public-repository guardrail in the test suite. No check changed. |
 | **v18.9** | Logging pipeline and alerting hygiene | *Shipped.* **Audit Log Pipeline** (sink filters missing audit log types, destination retention and lock, the writer's grant, export errors), **Duplicate Log Routing** (central sink plus untouched `_Default` sinks; free audit streams re-stored), **Project Log Routing** (`_Default` disabled, Data Access logs in the default view, Log Analytics), **Alert Notification Channels** (policies routed to nobody, unverified or disabled channels, undeliverable Pub/Sub channels), **Synthetic and SLO Coverage**. No new role, no new API. |
 | **v19** | Findings and vulnerabilities | *Shipped.* **SCC Active Findings** (Security Command Center's active findings under the scope, SCC's severity as the verdict, the CloudGauge record that judges the same fact named per category, the no-export row), **SCC Detector Coverage** (Security Health Analytics and the threat detectors per project — the real organization covers one project in three), **OS Vulnerabilities** (VM Manager's CVEs with a fix available; the precondition row where VM Manager is off), **Exposed Privileged VMs** (external address + privileged identity + open ingress rule). No new role, no new API. The *deprecations recommender* line leaves the roadmap: the Recommender catalogue has none. |
-| **v19.1** | Footprint and detection | A **Platform Footprint** briefing (what runs where: one all-types inventory search — 1,908 assets, 113 types, 2 s on the real organization — by product, location and project, the enabled APIs, the GKE and Cloud SQL versions); the detective half of the SSRF chain over Cloud Logging, 7 days under the scope (a 30-day project query took 181 s) — **GKE Control Plane Activity** (exec, attach, port-forward, secrets reads, DaemonSet and CronJob creation in `kube-system`, cluster-admin bindings, webhook changes by non-Google principals or from external addresses; Google's own agents and `system:` principals excluded — the real organization's 120 entries in 30 days are all theirs), **Service Account Activity Signals** (key creation, IAM changes, metadata writes, token minting by service accounts from external addresses; token minting needs Data Access logs, the row says so). A **Support cases** briefing needs `roles/cloudsupport.viewer` on the organization — a new org-level role, not scheduled. |
+| **v19.1** | Footprint and detection | *Shipped.* **Platform Footprint** (what runs where: one all-types inventory search — 1,908 assets, 113 types, 2 s on the real organization — by product family, location and project, the enabled APIs, the GKE, Cloud SQL and VM versions; a briefing), the detective half of the SSRF chain over 7 days of Admin Activity logs under the scope — **GKE Control Plane Activity** (exec, attach, port-forward, `kube-system` DaemonSets and CronJobs, `cluster-admin` bindings, webhook changes by principals other than Google's own, judged by who and from where; secrets reads are Data Access logs and are not read), **Service Account Activity Signals** (keys, IAM changes, metadata writes and account creation by service accounts; token minting is Data Access and not read). No new role, no new API. |
+| **v19.2** | Support cases | A small release of its own and the first to ask for a new organization-level role: a **Support Cases** briefing (the open cases under the organization — `cases.search` under `organizations/<id>`, which returns the organization's and its projects' cases where `cases.list` returns only the directly parented ones — by priority, age and project; titles and metadata only, never the case bodies) and a scored **Case Hygiene** companion (cases open past the response objective of their priority, cases waiting on the customer, escalations). Opt-in: `SUPPORT_CASES=1`, `roles/cloudsupport.viewer` on the organization and `cloudsupport.googleapis.com` enabled; unset, one Informational line says how. Fixture-verified only — the reference organization has Basic support, which has no cases to list; meant for organizations on Standard, Enhanced or Premium support, where the tool runs. |
 | Later | | In this order: GKE health, backup and support (cluster conditions and CA expiry, Backup for GKE, end of support, workload disruption readiness); Compute reliability (disk backup coverage, VM availability policy, MIG and load-balancer resilience, reservations); managed databases and storage finished (Cloud SQL deletion protection, maintenance windows, password policy, CA expiry, IAM authentication; AlloyDB open networks; Public Access Prevention, versioning without cleanup; BigQuery unpartitioned tables); the data plane never read (Pub/Sub, Memorystore, Filestore, Spanner, Bigtable, Firestore, NetApp); org-policy depth and residency (exceptions below the root, domain-restriction values, location and service-usage drift); SLO coverage, PDF export. The Workload Manager results import does not ship (a new role, a per-project API, a dedupe layer). |

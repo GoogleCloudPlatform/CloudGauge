@@ -521,7 +521,8 @@ class FakeAssets:
                 assets.requests.append(request)
                 if assets.error:
                     raise assets.error
-                return [r for r in assets.resources if r.asset_type in request['asset_types']]
+                types = request.get('asset_types')  # absent or empty: every type, as the API searches (v19.1's Platform Footprint)
+                return [r for r in assets.resources if not types or r.asset_type in types]
 
             def list_assets(self, request):
                 assets.list_requests.append(request)

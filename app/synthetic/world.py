@@ -349,6 +349,18 @@ class Findings:
 
 
 @dataclass(frozen=True)
+class Detection:
+    """v19.1: the Admin Activity entries the detective rules read, and Google's own that they must leave out (``entries.list``)."""
+    user_exec: int  # pods.exec.create by a user from an office address (Informational)
+    sa_exec: int  # pods.exec.create by a customer service account from an external address (Action Required)
+    admin_binding: str  # "" | "user" | "sa": a clusterrolebinding to cluster-admin created by a user from inside, or by a service account from outside
+    google_daemonset: bool  # the Kubernetes Threat Detection agent creating its DaemonSet in kube-system (left out)
+    sa_key: int  # CreateServiceAccountKey by a customer service account from an external address (Action Required)
+    factory_iam: int  # SetIamPolicy by the project-factory account from a private address (Investigation)
+    google_churn: int  # SetIamPolicy by service-agent-manager@system (left out)
+
+
+@dataclass(frozen=True)
 class ProjectProfile:
     index: int
     project_id: str
@@ -420,6 +432,7 @@ class ProjectProfile:
     cost_levers: CostLevers = None  # v18.8
     observability: Observability = None  # v18.9
     findings: Findings = None  # v19
+    detection: Detection = None  # v19.1
 
     @property
     def project_number(self):
@@ -834,6 +847,12 @@ class SyntheticOrg:
             detectors=rng.choice(["inherited", "inherited", "standard", "standard", "premium"]), vm_manager=_chance(rng, 0.4),
             cves=tuple((rng.choice([0, 0, 0, 1, 2]), rng.choice([0, 0, 1, 4]), rng.choice([3, 12, 40])) for _ in vms))
 
+        # v19.1 (drawn last again): the week's Admin Activity entries the detective rules read.
+        detection = Detection(
+            user_exec=rng.choice([0, 0, 2, 5]) if gke_clusters else 0, sa_exec=rng.choice([0, 0, 0, 1]) if gke_clusters else 0,
+            admin_binding=rng.choice(["", "", "user", "sa"]) if gke_clusters else "", google_daemonset=bool(gke_clusters) and _chance(rng, 0.5),
+            sa_key=rng.choice([0, 0, 0, 1, 3]), factory_iam=rng.choice([0, 1, 1, 4]), google_churn=rng.choice([0, 2, 16]))
+
         return ProjectProfile(
             index=index, project_id=project_id, display_name=f"Synthetic Project {index}",
             folder_id=self.folder_of(index), denied=denied, osconfig_disabled=osconfig_disabled,
@@ -857,7 +876,7 @@ class SyntheticOrg:
             unprotected_buckets=unprotected_buckets, sink_buckets=sink_buckets, retention_buckets=retention_buckets, proxy_subnet=proxy_subnet,
             gke_auto_repair=gke_auto_repair, project_audit_configs=project_audit_configs, project_contact=project_contact,
             gke_operations=gke_operations, network_edge=network_edge, data_governance=data_governance, posture=posture, serverless=serverless, privileges=privileges,
-            cost_levers=cost_levers, observability=observability, findings=findings,
+            cost_levers=cost_levers, observability=observability, findings=findings, detection=detection,
         )
 
     # --- the synthetic billing export (v18.8) ---

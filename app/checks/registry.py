@@ -45,6 +45,8 @@ from app.checks.log_pipeline import AUDIT_PIPELINE_CHECK, DUPLICATE_ROUTING_CHEC
 from app.checks.alerting import CHANNELS_CHECK, SYNTHETIC_CHECK, check_alert_channels, check_synthetic_coverage
 from app.checks.scc import DETECTOR_CHECK, SCC_FINDINGS_CHECK, check_detector_coverage, check_scc_findings
 from app.checks.vulnerabilities import EXPOSED_VM_CHECK, OS_VULN_CHECK, check_exposed_vms, check_os_vulnerabilities
+from app.checks.footprint import FOOTPRINT_CHECK, check_platform_footprint
+from app.checks.detection import GKE_ACTIVITY_CHECK, SA_SIGNALS_CHECK, check_gke_activity, check_sa_signals
 from app.checks.edge_security import ARMOR_CHECK, check_edge_security
 from app.checks.privileges import CUSTOM_ROLES_CHECK, FOLDER_ROLES_CHECK, PRIVILEGED_GRANTS_CHECK, check_custom_roles, check_folder_roles, check_privileged_grants
 from app.checks.secrets import SECRET_SCOPE_CHECK, check_secret_posture
@@ -266,6 +268,11 @@ def build_check_plan(scope, scope_id, job_id, all_projects, active_zones, active
         CheckSpec("Security & Identity", DETECTOR_CHECK, check_detector_coverage, (scope_id, all_projects, job_id)),
         CheckSpec("Security & Identity", OS_VULN_CHECK, check_os_vulnerabilities, (scope_id, all_projects, job_id)),
         CheckSpec("Security & Identity", EXPOSED_VM_CHECK, check_exposed_vms, (scope, scope_id, job_id)),
+        # v19.1: footprint and detection — Platform Footprint (one all-types inventory search under the scope; a briefing), GKE Control Plane
+        # Activity and Service Account Activity Signals (one 7-day Admin Activity log read each under the scope).
+        CheckSpec("Operational Excellence & Observability", FOOTPRINT_CHECK, check_platform_footprint, (scope, scope_id, job_id)),
+        CheckSpec("Security & Identity", GKE_ACTIVITY_CHECK, check_gke_activity, (scope_id, all_projects, job_id)),  # per project: the k8s_cluster audit log is a project's
+        CheckSpec("Security & Identity", SA_SIGNALS_CHECK, check_sa_signals, (scope, scope_id, all_projects, job_id)),  # split: the scope's own entries + every project's
     ]
 
     if scope == 'organization':
@@ -303,6 +310,7 @@ SCOPE_LEVEL_CHECKS = frozenset({
     SPEND_BRIEFING, SERVERLESS_COST_CHECK,  # v18.8: two BigQuery queries under the scope's ancestry (two records: Spend Anomalies); one listing of the scope's workloads and connectors
     AUDIT_PIPELINE_CHECK, DUPLICATE_ROUTING_CHECK, SYNTHETIC_CHECK,  # v18.9: the scope's sinks; the aggregated sinks under it; one listing of its load balancers, services and clusters
     SCC_FINDINGS_CHECK, EXPOSED_VM_CHECK,  # v19: SCC's findings under the scope; one listing of instances, firewall rules and policies
+    FOOTPRINT_CHECK,  # v19.1: one all-types search under the scope (the two detection records read per project; the SA one is split)
 })
 # The checks that do both: scope-wide work plus per-project work. Shards split them
 # with keyword flags: the scope shard runs the first set, the project shards the second
@@ -319,6 +327,8 @@ SPLIT_CHECKS = {  # in plan order
     # entitlements per project shard; the organization's custom roles in the scope shard, the projects' per shard.
     PRIVILEGED_GRANTS_CHECK: (("organization", "folder", "project"), {"project_level": False}, {"scope_level": False}),
     CUSTOM_ROLES_CHECK: (("organization", "folder", "project"), {"project_level": False}, {"scope_level": False}),
+    # v19.1: the organization's or folder's own Admin Activity entries in the scope shard (a project scan has no scope half), the projects' per shard.
+    SA_SIGNALS_CHECK: (("organization", "folder"), {"project_level": False}, {"scope_level": False}),
 }
 
 

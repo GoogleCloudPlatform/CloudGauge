@@ -465,7 +465,7 @@ def test_shard_failure_is_retried_then_becomes_error_rows(store, queue, monkeypa
     assert marker['status'] == 'failed' and marker['attempt'] == 3 and 'quota exceeded' in marker['error']
     names = [spec.name for spec in registry.project_check_plan('organization', SCOPE_ID, JOB, projects(2), [], [])]
     errors = store.read_all_findings(JOB, shard_id='shard-001')
-    assert sorted(f['Check'] for f in errors) == sorted(names) and len(names) == 33  # v14: + Service Health Incidents; v15: + GKE Supported Versions; v17: + 6; v18.5: + Unused Service Accounts; v18.7: + the project halves of Privileged Grants and Custom Roles; v18.8: + Log Cost Levers; v18.9: + Project Log Routing, Alert Notification Channels; v19: + SCC Detector Coverage, OS Vulnerabilities
+    assert sorted(f['Check'] for f in errors) == sorted(names) and len(names) == 35  # v14: + Service Health Incidents; v15: + GKE Supported Versions; v17: + 6; v18.5: + Unused Service Accounts; v18.7: + the project halves of Privileged Grants and Custom Roles; v18.8: + Log Cost Levers; v18.9: + Project Log Routing, Alert Notification Channels; v19: + SCC Detector Coverage, OS Vulnerabilities; v19.1: + GKE Control Plane Activity, the project half of Service Account Activity Signals
     assert all(f['Status'] == 'Error' and f['Finding'][0]['Error'].startswith(
         'Not checked for 2 projects (p-000, p-001): the scan failed after 3 attempts. Last error: ') for f in errors)
     assert 'quota exceeded' in errors[0]['Finding'][0]['Error']
@@ -683,7 +683,7 @@ def test_sweep_finishes_the_job_when_a_shard_has_died(store, queue, monkeypatch)
     marker = store.read_markers(JOB)['shard-002']
     assert marker['status'] == 'failed' and marker['swept'] == 1 and 'crashed on every attempt' in marker['error']
     errors = store.read_all_findings(JOB, shard_id='shard-002')
-    assert len(errors) == 33 and all(f['Status'] == 'Error' for f in errors)  # one per project-level check (v15: 19; v17: 25; v18.5: 26; v18.7: 28; v18.8: 29; v18.9: 31; v19: 33)
+    assert len(errors) == 35 and all(f['Status'] == 'Error' for f in errors)  # one per project-level check (v15: 19; v17: 25; v18.5: 26; v18.7: 28; v18.8: 29; v18.9: 31; v19: 33; v19.1: 35)
     assert queue.calls == [('/run-aggregation', BODY, f'{JOB}-aggregate', None)]
     assert store.read_status(JOB, SCOPE_ID)['current_task'] == 'The scan of 1 project failed; merging the results of the others...'
     assert all(f['Finding'][0]['Error'] == 'Not checked for 1 project (p-002): the scan crashed on every attempt.' for f in errors)

@@ -498,8 +498,12 @@ class SyntheticGcp:
         return {"items": items}
 
     def _h_logging_entries_list(self, kw, project_id):
-        """``entries.list`` over one project: the Compute Engine operations that failed for capacity or quota (v17)."""
+        """``entries.list``: the Compute Engine operations that failed for capacity or quota (v17) over one project; v19.1: the week's
+        GKE control-plane and service-account Admin Activity entries under the organization, a folder or a project, by the filter."""
         body = kw.get("body") or {}
+        log_filter = str(body.get("filter") or "")
+        if 'resource.type="k8s_cluster"' in log_filter or "CreateServiceAccountKey" in log_filter:
+            return self._detection_entries(body, log_filter)
         names = [name for name in body.get("resourceNames", []) if str(name).startswith("projects/")]
         project_id = names[0].split("/", 1)[1] if names else None
         self.call("logging", "entries.list", project_id=project_id, style="http")
@@ -515,6 +519,60 @@ class SyntheticGcp:
                     "protoPayload": {"methodName": "v1.compute.instances.insert", "status": {"code": 8, "message": message},
                                      "resourceName": f"projects/{project_id}/zones/{zone}/instances/vm-new-{n}",
                                      "request": {"machineType": MACHINE_TYPE_URL.format(project=project_id, zone=zone, machine_type=machine_type)}}})
+        return {"entries": entries}
+
+    def _detection_entries(self, body, log_filter):
+        """v19.1: the Admin Activity entries of the scope's projects in the drawn shapes — the customer's and Google's own, which the rules leave out."""
+        names = [str(n) for n in body.get("resourceNames", [])]
+        scope = names[0] if names else f"organizations/{self.world.org_id}"
+        project_id = scope.split("/", 1)[1] if scope.startswith("projects/") else None
+        folder_id = scope.split("/", 1)[1] if scope.startswith("folders/") else None
+        try:
+            self.call("logging", "entries.list", project_id=project_id, style="http")
+        except HttpError:
+            raise
+        profiles = [self.world.project(project_id)] if project_id else self.world.projects(folder_id)
+        gke = 'resource.type="k8s_cluster"' in log_filter
+        entries = []
+        for profile in profiles:
+            d, pid, number = profile.detection, profile.project_id, profile.project_number
+            if d is None:
+                continue
+            log_name = f"projects/{pid}/logs/cloudaudit.googleapis.com%2Factivity"
+
+            def entry(method, principal, ip, resource_name, resource_type, labels, days, request=None):
+                entries.append({"timestamp": _iso(days), "logName": log_name, "resource": {"type": resource_type, "labels": {"project_id": pid, **labels}},
+                                "protoPayload": {"methodName": method, "authenticationInfo": {"principalEmail": principal}, "requestMetadata": {"callerIp": ip},
+                                                 "resourceName": resource_name, **({"request": request} if request else {})}})
+            if gke:
+                for cluster in profile.gke_clusters[:1]:
+                    labels = {"cluster_name": cluster.name, "location": cluster.location}
+                    for n in range(d.user_exec):
+                        entry("io.k8s.core.v1.pods.exec.create", "ops@example.com", "203.0.113.7", f"core/v1/namespaces/default/pods/web-{n}/exec", "k8s_cluster", labels, 1 + n * 0.3)
+                    for n in range(d.sa_exec):
+                        entry("io.k8s.core.v1.pods.exec.create", f"ci@{pid}.iam.gserviceaccount.com", "198.51.100.9", "core/v1/namespaces/default/pods/api-0/exec", "k8s_cluster", labels, 2)
+                    if d.admin_binding == "user":
+                        entry("io.k8s.authorization.rbac.v1.clusterrolebindings.create", "ops@example.com", "10.0.0.5", "rbac.authorization.k8s.io/v1/clusterrolebindings/cg-admin", "k8s_cluster", labels, 3,
+                              request={"roleRef": {"name": "cluster-admin"}})
+                    elif d.admin_binding == "sa":
+                        entry("io.k8s.authorization.rbac.v1.clusterrolebindings.create", f"ci@{pid}.iam.gserviceaccount.com", "198.51.100.9", "rbac.authorization.k8s.io/v1/clusterrolebindings/cg-admin", "k8s_cluster", labels, 3,
+                              request={"roleRef": {"name": "cluster-admin"}})
+                    if d.google_daemonset:
+                        entry("io.k8s.apps.v1.daemonsets.create", f"service-project-{number}@gcp-sa-ktd-hpsa.iam.gserviceaccount.com", "127.0.0.1", "apps/v1/namespaces/kube-system/daemonsets/container-watcher", "k8s_cluster", labels, 4)
+                        entry("io.k8s.authorization.rbac.v1.clusterrolebindings.patch", "system:addon-manager", "172.16.0.5", "rbac.authorization.k8s.io/v1/clusterrolebindings/system:controller", "k8s_cluster", labels, 0.5)
+            else:
+                for n in range(d.sa_key):
+                    entry("google.iam.admin.v1.CreateServiceAccountKey", f"deployer@{pid}.iam.gserviceaccount.com", "198.51.100.20", f"projects/-/serviceAccounts/deployer@{pid}.iam.gserviceaccount.com", "service_account", {}, 1 + n)
+                for n in range(d.factory_iam):
+                    entry("SetIamPolicy", "project-factory@tooling.iam.gserviceaccount.com", "private", f"projects/{pid}", "project", {}, 2 + n)
+                for n in range(d.google_churn):
+                    entry("SetIamPolicy", "service-agent-manager@system.gserviceaccount.com", "private", f"projects/{pid}", "project", {}, n / 4)
+        if not gke and not project_id and not folder_id:  # the organization's own churn (Google's)
+            for n in range(3):
+                entries.append({"timestamp": _iso(n), "logName": f"organizations/{self.world.org_id}/logs/cloudaudit.googleapis.com%2Factivity", "resource": {"type": "organization", "labels": {}},
+                                "protoPayload": {"methodName": "google.cloud.resourcemanager.v3.Organizations.SetIamPolicy", "authenticationInfo": {"principalEmail": "latchkey-multiorg-ephemeral-iam-automation@system.gserviceaccount.com"},
+                                                 "requestMetadata": {"callerIp": "private"}, "resourceName": f"organizations/{self.world.org_id}"}})
+        entries.sort(key=lambda e: e["timestamp"], reverse=True)
         return {"entries": entries}
 
     def _h_compute_addresses_aggregatedList(self, kw, project_id):
@@ -1255,6 +1313,12 @@ class SyntheticGcp:
         scope, asset_types = request["scope"], request.get("asset_types", [])
         folder_id = scope.split("/")[1] if scope.startswith("folders/") else None
         results = []
+        if not asset_types or "versionedResources" in str(request.get("read_mask") or ""):  # v19.1: the footprint's all-types and content searches
+            project_id = scope.split("/", 1)[1] if scope.startswith("projects/") else None
+            profiles = [self.world.project(project_id)] if project_id else self.world.projects(folder_id)
+            results = self._footprint_results(profiles, set(asset_types), "versionedResources" in str(request.get("read_mask") or ""))
+            self.call("asset", "searchAllResources", pages=max(1, math.ceil(len(results) / PAGE_SIZE)))
+            return results
         if "cloudresourcemanager.googleapis.com/Folder" in asset_types:
             folder_ids = [folder_id] if folder_id else ([] if scope.startswith("projects/") else list(self.world.folder_ids))  # v18.7: a folder scope includes itself
             results += [SimpleNamespace(name=f"//cloudresourcemanager.googleapis.com/folders/{fid}", display_name=self._folder_display(fid),
@@ -1604,12 +1668,73 @@ class SyntheticGcp:
                                                versioned_resources=[{"version": "v1", "resource": {"name": name.split("//artifactregistry.googleapis.com/")[1], "format": "DOCKER", "mode": "STANDARD_REPOSITORY"}}]))
         return results
 
+    COMMON_SERVICES = ("compute.googleapis.com", "storage.googleapis.com", "logging.googleapis.com", "monitoring.googleapis.com", "iam.googleapis.com", "cloudresourcemanager.googleapis.com",
+                       "serviceusage.googleapis.com", "bigquery.googleapis.com", "pubsub.googleapis.com", "cloudasset.googleapis.com")
+
     def _enabled_service_results(self, profiles, query):
-        """``serviceusage.googleapis.com/Service`` search results for ``name:<service>``: one per project where the world has the service on."""
+        """``serviceusage.googleapis.com/Service`` search results for ``name:<service>``: one per project where the world has the service on;
+        without a query (v19.1, the footprint) the common services of every project plus the ones the project's workloads imply."""
+        def result(p, service):
+            return SimpleNamespace(name=f"//serviceusage.googleapis.com/projects/{p.project_number}/services/{service}", asset_type="serviceusage.googleapis.com/Service",
+                                   project=f"projects/{p.project_number}", state="ENABLED", location="global")
+        if not query:
+            results = []
+            for p in profiles:
+                services = list(self.COMMON_SERVICES) + (["container.googleapis.com"] if p.gke_clusters else []) + (["sqladmin.googleapis.com"] if p.sql_instances else []) + \
+                           (["run.googleapis.com"] if p.serverless and p.serverless.services else []) + (["containerscanning.googleapis.com"] if p.serverless and p.serverless.scanning else [])
+                results += [result(p, service) for service in services]
+            return results
         service = query.split("name:", 1)[-1].strip()
-        return [SimpleNamespace(name=f"//serviceusage.googleapis.com/projects/{p.project_number}/services/{service}", asset_type="serviceusage.googleapis.com/Service",
-                                project=f"projects/{p.project_number}", state="ENABLED")
-                for p in profiles if service == "containerscanning.googleapis.com" and p.serverless and p.serverless.scanning]
+        return [result(p, service) for p in profiles if service == "containerscanning.googleapis.com" and p.serverless and p.serverless.scanning]
+
+    def _footprint_results(self, profiles, asset_types, with_content):
+        """v19.1: the all-types search (names, types, locations, projects) over the world's inventory, or — with ``versionedResources`` in the
+        read mask — the content of the versioned types (GKE clusters, Cloud SQL and Compute instances)."""
+        org = f"organizations/{self.world.org_id}"
+        results = []
+
+        def add(asset_type, name, location, p, data=None):
+            if asset_types and asset_type not in asset_types:
+                return
+            results.append(SimpleNamespace(name=name, asset_type=asset_type, location=location, project=f"projects/{p.project_number}", state="ACTIVE", organization=org,
+                                           folders=[f"folders/{p.folder_id}"], versioned_resources=[{"version": "v1", "resource": data}] if with_content and data is not None else []))
+        for p in profiles:
+            pid, region = p.project_id, self._serverless_region(p)
+            if not with_content:
+                add("cloudresourcemanager.googleapis.com/Project", f"//cloudresourcemanager.googleapis.com/projects/{pid}", "global", p)
+            for index, vm in enumerate(p.vms):
+                stopped = vm.name in p.stopped_vms
+                add("compute.googleapis.com/Instance", f"//compute.googleapis.com/projects/{pid}/zones/{vm.zone}/instances/{vm.name}", vm.zone, p,
+                    {"machineType": MACHINE_TYPE_URL.format(project=pid, zone=vm.zone, machine_type=vm.machine_type), "status": "TERMINATED" if stopped else "RUNNING"})
+                if not with_content:
+                    add("compute.googleapis.com/Disk", f"//compute.googleapis.com/projects/{pid}/zones/{vm.zone}/disks/{vm.name}", vm.zone, p)
+            for cluster in p.gke_clusters:
+                add("container.googleapis.com/Cluster", f"//container.googleapis.com/projects/{pid}/locations/{cluster.location}/clusters/{cluster.name}", cluster.location, p,
+                    {"currentMasterVersion": cluster.master_version, "releaseChannel": {"channel": "REGULAR"} if cluster.release_channel else {}, "currentNodeCount": 3 * len(cluster.node_pools)})
+            for sql in p.sql_instances:
+                add("sqladmin.googleapis.com/Instance", f"//cloudsql.googleapis.com/projects/{pid}/instances/{sql.name}", region, p, {"databaseVersion": sql.database_version, "settings": {"tier": "db-custom-2-7680"}})
+            if not with_content:
+                for bucket in p.buckets:
+                    add("storage.googleapis.com/Bucket", f"//storage.googleapis.com/{bucket.name}", region, p)
+                for name, _, _ in (p.serverless.services if p.serverless else ()):
+                    add("run.googleapis.com/Service", f"//run.googleapis.com/projects/{pid}/locations/{region}/services/{name}", region, p)
+                for sa in p.service_accounts:
+                    add("iam.googleapis.com/ServiceAccount", f"//iam.googleapis.com/projects/{pid}/serviceAccounts/{sa.email}", "global", p)
+                for name, _, _ in p.firewall_rules:
+                    add("compute.googleapis.com/Firewall", f"//compute.googleapis.com/projects/{pid}/global/firewalls/{name}", "global", p)
+                add("compute.googleapis.com/Network", f"//compute.googleapis.com/projects/{pid}/global/networks/vpc-main", "global", p)
+                for name, subnet_region, _ in p.subnets:
+                    add("compute.googleapis.com/Subnetwork", f"//compute.googleapis.com/projects/{pid}/regions/{subnet_region}/subnetworks/{name}", subnet_region, p)
+                for i in range(p.single_region_snapshots + p.multi_region_snapshots):
+                    add("compute.googleapis.com/Snapshot", f"//compute.googleapis.com/projects/{pid}/global/snapshots/snap-{i}", "us", p)
+                for dataset_id, _, _ in (p.data_governance.datasets if p.data_governance else ()):
+                    add("bigquery.googleapis.com/Dataset", f"//bigquery.googleapis.com/projects/{pid}/datasets/{dataset_id}", "US", p)
+                for i in range(2):
+                    add("datalineage.googleapis.com/Process", f"//datalineage.googleapis.com/projects/{p.project_number}/locations/{region}/processes/p{i}", region, p)
+                add("logging.googleapis.com/LogBucket", f"//logging.googleapis.com/projects/{pid}/locations/global/buckets/_Default", "global", p)
+                add("orgpolicy.googleapis.com/Policy", f"//orgpolicy.googleapis.com/projects/{pid}/policies/compute.vmExternalIpAccess", "global", p)
+                add("appengine.googleapis.com/Version", f"//appengine.googleapis.com/apps/{pid}/services/default/versions/v1", region, p)  # an "Other" type
+        return results
 
     @staticmethod
     def _sink_assets(profile):
