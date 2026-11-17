@@ -195,7 +195,8 @@ if [[ "${SKIP_SETUP:-0}" != 1 ]]; then
     cloudasset.googleapis.com
   # v17: scheduled scans, the BigQuery export. v17.1: VPC Service Controls Coverage reads the perimeters (read-only use).
   # v19: SCC Detector Coverage reads the detector services (Security Center Management, read-only).
-  g services enable cloudscheduler.googleapis.com bigquery.googleapis.com accesscontextmanager.googleapis.com securitycentermanagement.googleapis.com
+  # v19.2: Support Cases and Case Hygiene read the open support cases (Cloud Support API, read-only; the records read Informational without it).
+  g services enable cloudscheduler.googleapis.com bigquery.googleapis.com accesscontextmanager.googleapis.com securitycentermanagement.googleapis.com cloudsupport.googleapis.com
 
   step "Service account ${SA_EMAIL}"
   if [[ "$DRY_RUN" == 1 ]] || ! gcloud --project "$PROJECT_ID" iam service-accounts describe "$SA_EMAIL" >/dev/null 2>&1; then

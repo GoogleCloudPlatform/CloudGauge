@@ -37,6 +37,7 @@ locals {
     "cloudasset.googleapis.com",
     "cloudscheduler.googleapis.com", "bigquery.googleapis.com", "accesscontextmanager.googleapis.com",
     "securitycentermanagement.googleapis.com", # v19: SCC Detector Coverage (read-only)
+    "cloudsupport.googleapis.com",             # v19.2: Support Cases, Case Hygiene (read-only; Informational without it)
   ]
 
   # Project roles: Gemini calls, the Cloud Tasks queue, and Cloud Build — the image is built as this account

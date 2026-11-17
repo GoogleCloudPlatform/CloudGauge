@@ -497,6 +497,31 @@ class SyntheticGcp:
                 "resources": [{"type": "VCPU", "amount": str(vcpus)}, {"type": "MEMORY", "amount": str(memory_gb * 1024)}]})
         return {"items": items}
 
+    def _test_iam_permissions(self, kw, project_id):
+        """v19.2: ``testIamPermissions`` on an organization, a folder or a project — the synthetic scanner holds every permission it asks about."""
+        self.call("cloudresourcemanager", "testIamPermissions", project_id=project_id, style="http")
+        return {"permissions": list((kw.get("body") or {}).get("permissions") or [])}
+
+    _h_cloudresourcemanager_organizations_testIamPermissions = _test_iam_permissions
+    _h_cloudresourcemanager_folders_testIamPermissions = _test_iam_permissions
+    _h_cloudresourcemanager_projects_testIamPermissions = _test_iam_permissions
+
+    def _h_cloudsupport_cases_search(self, kw, project_id):
+        """v19.2: ``cases.search`` under an organization (every project's open cases) or a project (its own), paged by ``pageSize``/``pageToken``."""
+        parent = str(kw.get("parent") or "")
+        self.call("cloudsupport", "cases.search", project_id=project_id, style="http")
+        profiles = [self.world.project(project_id)] if parent.startswith("projects/") and self.world.project(project_id) else (list(self.world.projects()) if parent.startswith("organizations/") else [])
+        cases = []
+        for profile in profiles:
+            for n, case in enumerate(profile.support):
+                cases.append({"name": f"projects/{profile.project_number}/cases/{profile.index:05d}{n:02d}", "displayName": case.title, "priority": case.priority, "state": case.state,
+                              "createTime": _iso(case.age_days), "updateTime": _iso(case.updated_days_ago), "escalated": case.escalated,
+                              "classification": {"id": f"c{n}", "displayName": f"{case.product} > Reliability"}, "creator": {"email": f"ops@synthetic-{profile.index}.example"}, "timeZone": "UTC"})
+        page_size = int(kw.get("pageSize") or 100)
+        start = int(kw.get("pageToken") or 0)
+        page = cases[start:start + page_size]
+        return {"cases": page, **({"nextPageToken": str(start + page_size)} if start + page_size < len(cases) else {})}
+
     def _h_logging_entries_list(self, kw, project_id):
         """``entries.list``: the Compute Engine operations that failed for capacity or quota (v17) over one project; v19.1: the week's
         GKE control-plane and service-account Admin Activity entries under the organization, a folder or a project, by the filter."""

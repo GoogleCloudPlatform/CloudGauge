@@ -361,6 +361,18 @@ class Detection:
 
 
 @dataclass(frozen=True)
+class SupportCase:
+    """v19.2: one open support case of the project (``cases.search``)."""
+    title: str
+    priority: str  # P1..P4
+    state: str  # NEW | IN_PROGRESS_GOOGLE_SUPPORT | ACTION_REQUIRED | SOLUTION_PROVIDED
+    age_days: int  # since createTime
+    updated_days_ago: int  # since updateTime
+    escalated: bool
+    product: str  # the classification root
+
+
+@dataclass(frozen=True)
 class ProjectProfile:
     index: int
     project_id: str
@@ -433,6 +445,7 @@ class ProjectProfile:
     observability: Observability = None  # v18.9
     findings: Findings = None  # v19
     detection: Detection = None  # v19.1
+    support: tuple = ()  # v19.2: SupportCase per open case
 
     @property
     def project_number(self):
@@ -853,6 +866,14 @@ class SyntheticOrg:
             admin_binding=rng.choice(["", "", "user", "sa"]) if gke_clusters else "", google_daemonset=bool(gke_clusters) and _chance(rng, 0.5),
             sa_key=rng.choice([0, 0, 0, 1, 3]), factory_iam=rng.choice([0, 1, 1, 4]), google_churn=rng.choice([0, 2, 16]))
 
+        # v19.2 (drawn last again): the project's open support cases — a quiet project has none; a busy one a few, some of them waiting on the customer.
+        support = tuple(
+            SupportCase(title=rng.choice(["Cloud SQL failover took 40 minutes", "GKE node pool stuck upgrading", "BigQuery slot contention", "Quota increase for N2 CPUs", "Load balancer 502s after certificate rotation"]),
+                        priority=rng.choice(["P1", "P2", "P2", "P3", "P4"]), state=rng.choice(["NEW", "IN_PROGRESS_GOOGLE_SUPPORT", "IN_PROGRESS_GOOGLE_SUPPORT", "ACTION_REQUIRED", "SOLUTION_PROVIDED"]),
+                        age_days=rng.choice([0, 2, 5, 12, 45]), updated_days_ago=rng.choice([0, 1, 4, 10]), escalated=_chance(rng, 0.15),
+                        product=rng.choice(["Compute Engine", "Kubernetes Engine", "Cloud SQL", "BigQuery", "Networking"]))
+            for _ in range(rng.choice([0, 0, 0, 0, 1, 1, 2, 4])))
+
         return ProjectProfile(
             index=index, project_id=project_id, display_name=f"Synthetic Project {index}",
             folder_id=self.folder_of(index), denied=denied, osconfig_disabled=osconfig_disabled,
@@ -876,7 +897,7 @@ class SyntheticOrg:
             unprotected_buckets=unprotected_buckets, sink_buckets=sink_buckets, retention_buckets=retention_buckets, proxy_subnet=proxy_subnet,
             gke_auto_repair=gke_auto_repair, project_audit_configs=project_audit_configs, project_contact=project_contact,
             gke_operations=gke_operations, network_edge=network_edge, data_governance=data_governance, posture=posture, serverless=serverless, privileges=privileges,
-            cost_levers=cost_levers, observability=observability, findings=findings, detection=detection,
+            cost_levers=cost_levers, observability=observability, findings=findings, detection=detection, support=support,
         )
 
     # --- the synthetic billing export (v18.8) ---

@@ -8,7 +8,95 @@ the test suite running inside the image, a zero-traffic canary revision scanned
 against a real organization, promotion, and a production scan compared fact for
 fact with the previous version's report.
 
-Versions are the image tags (`v5` … `v19.1`); the commit is the one that shipped.
+Versions are the image tags (`v5` … `v19.2`); the commit is the one that shipped.
+
+## v19.2 — Support cases
+
+The small release the roadmap promised, and a different one from the row it
+replaced: the survey found that `roles/iam.securityReviewer` — on the
+organization since v17 — already carries `cloudsupport.techCases.list`, and
+that `cases.search` returns the full case objects. So: **no new role**, one API
+enabled in the host project, and two records that are always present. The
+owner's requirement shaped the second half — an upgraded deployment that has
+not enabled the API, or one on a custom role set without the permission, must
+lose nothing but these two records' content: both are written with their
+normal columns, *Informational*, with the exact command that configures them;
+never an Error, never a layout shift.
+
+What our own organization reads after it: an honest zero — seven lines at 0
+and *Case Hygiene* Informational, "nothing to judge". Our organization is on
+Basic support, which has no cases; the tier is not readable through any API, so
+the text says that an organization with no open case reads the same.
+
+### Added
+
+- **Support Cases** (Operational Excellence & Observability, every scope;
+  scope-level; a briefing): one `cases.search` under the scope (`state=OPEN`,
+  pages of 100, 500 at most — stated when hit) — the organization's search
+  returns its own and its projects' cases, a project's its own, a folder scan
+  searches the organization and keeps the folder's projects by number or ID
+  (`scc.scope_projects`). Seven fixed lines, zero where nothing: **Open
+  cases** (by priority; the oldest), **With Google Support** (`NEW`,
+  `IN_PROGRESS_GOOGLE_SUPPORT`; the newest), **Waiting on you**
+  (`ACTION_REQUIRED`, days since the last update), **Solution provided**,
+  **Escalated**, **By project**, **By product** (the classification's root).
+  Titles and metadata only — `description` is never read into the report.
+  Every Fix the authenticated `curl` that reproduces the line (gcloud 593 has
+  no `support cases` command). Rows `Line, Value, Detail, Fix`.
+- **Case Hygiene** (Operational Excellence & Observability, from the same
+  search): one row per open case that needs the customer — `ACTION_REQUIRED`
+  with no update for more than **3 days** (*Investigation*), open beyond the
+  expectation of its priority — **P0 1 / P1 7 / P2 30 / P3 60 / P4 90 days**
+  (*Investigation*), `SOLUTION_PROVIDED` for more than **7 days**
+  (Informational), escalated (Informational); worst issue first, every issue in
+  the Detail. Cases with nothing flagged → **Compliant**. **No open case at
+  all → Informational**, "nothing to judge" with the tier caveat: the score is
+  never moved by Basic support or by a missing API. Rows `Case, Title,
+  Priority, State, Project, Age, Issue, Detail, Fix`.
+- **Graceful degradation** (both records, always): `testIamPermissions` on the
+  scope *before* the search — without `cloudsupport.techCases.list` the API
+  does not refuse, it answers `200 {}`, indistinguishable from "no case"
+  (surveyed) — → Informational with the `add-iam-policy-binding` line
+  (`roles/cloudsupport.techSupportViewer`, or `roles/iam.securityReviewer` as
+  the README prescribes); the API not enabled in the host project (the
+  surveyed `403` with `ErrorInfo.reason = SERVICE_DISABLED`) → Informational
+  with `gcloud services enable cloudsupport.googleapis.com --project=…`; any
+  other 4xx → Informational with the API's message and both commands; a
+  failed probe never blocks the search; only a 5xx or a network failure after
+  the client's retries is an Error — and the records still exist.
+
+### Changed
+
+- `cloudsupport.googleapis.com` joins the APIs `tools/deploy.sh`, the Terraform
+  module and README › Common Prerequisites enable (27). No role.
+- The synthetic organization draws a project's open support cases (drawn
+  last: none for most, a few for some — waiting on the customer, escalated,
+  long open); the provider answers `cases.search` for the organization and a
+  project, paged, and `testIamPermissions` on every scope.
+- README: the two catalogue entries, the scope note, the project structure,
+  the prerequisites paragraph. `VERSION = "19.2"`; the Terraform module name
+  carries it. The roadmap row rewritten: no new role, no opt-in flag.
+
+### Tests
+
+- `tests/test_support.py`: the facts (the API's shape, the organization's own
+  case, never the description), the seven lines and their zero form and the
+  cap, the hygiene ladder around every threshold, the rows worst first, paging
+  and the cap, the permission probe and the error kinds, the check end to end
+  (organization, project, folder filter), no-cases Informational, the
+  degradation ladder with the surveyed error shapes (both records, their
+  columns, their status), the score guarantee (Informational outside the
+  score; one check when scored).
+- `tests/test_worker.py`: 75 checks for an organization, 72 otherwise;
+  `tests/test_terraform.py`: 27 APIs.
+- 1,313 tests.
+
+### Upgrade notes
+
+Enable `cloudsupport.googleapis.com` in the host project (`tools/deploy.sh`
+does when run without `SKIP_SETUP`; `terraform apply` does). Until then the two
+records read *Informational* with that very command. No role to grant: the
+organization's `roles/iam.securityReviewer` already carries the permission.
 
 ## v19.1 — Footprint and detection
 
@@ -3945,5 +4033,5 @@ performance; modernization; enablement; roadmap and roadblocks).
 | **v18.9** | Logging pipeline and alerting hygiene | *Shipped.* **Audit Log Pipeline** (sink filters missing audit log types, destination retention and lock, the writer's grant, export errors), **Duplicate Log Routing** (central sink plus untouched `_Default` sinks; free audit streams re-stored), **Project Log Routing** (`_Default` disabled, Data Access logs in the default view, Log Analytics), **Alert Notification Channels** (policies routed to nobody, unverified or disabled channels, undeliverable Pub/Sub channels), **Synthetic and SLO Coverage**. No new role, no new API. |
 | **v19** | Findings and vulnerabilities | *Shipped.* **SCC Active Findings** (Security Command Center's active findings under the scope, SCC's severity as the verdict, the CloudGauge record that judges the same fact named per category, the no-export row), **SCC Detector Coverage** (Security Health Analytics and the threat detectors per project — the real organization covers one project in three), **OS Vulnerabilities** (VM Manager's CVEs with a fix available; the precondition row where VM Manager is off), **Exposed Privileged VMs** (external address + privileged identity + open ingress rule). No new role, no new API. The *deprecations recommender* line leaves the roadmap: the Recommender catalogue has none. |
 | **v19.1** | Footprint and detection | *Shipped.* **Platform Footprint** (what runs where: one all-types inventory search — 1,908 assets, 113 types, 2 s on the real organization — by product family, location and project, the enabled APIs, the GKE, Cloud SQL and VM versions; a briefing), the detective half of the SSRF chain over 7 days of Admin Activity logs under the scope — **GKE Control Plane Activity** (exec, attach, port-forward, `kube-system` DaemonSets and CronJobs, `cluster-admin` bindings, webhook changes by principals other than Google's own, judged by who and from where; secrets reads are Data Access logs and are not read), **Service Account Activity Signals** (keys, IAM changes, metadata writes and account creation by service accounts; token minting is Data Access and not read). No new role, no new API. |
-| **v19.2** | Support cases | A small release of its own and the first to ask for a new organization-level role: a **Support Cases** briefing (the open cases under the organization — `cases.search` under `organizations/<id>`, which returns the organization's and its projects' cases where `cases.list` returns only the directly parented ones — by priority, age and project; titles and metadata only, never the case bodies) and a scored **Case Hygiene** companion (cases open past the response objective of their priority, cases waiting on the customer, escalations). Opt-in: `SUPPORT_CASES=1`, `roles/cloudsupport.viewer` on the organization and `cloudsupport.googleapis.com` enabled; unset, one Informational line says how. Fixture-verified only — the reference organization has Basic support, which has no cases to list; meant for organizations on Standard, Enhanced or Premium support, where the tool runs. |
+| **v19.2** | Support cases | *Shipped.* **Support Cases** (the open cases under the scope on one page — `cases.search`, the organization's own and its projects'; seven fixed lines: open by priority and the oldest, with Google Support, waiting on you, solution provided, escalated, by project, by product; titles and metadata only) and **Case Hygiene** (waiting on you > 3 days, open beyond P0 1 / P1 7 / P2 30 / P3 60 / P4 90 days, solution provided > 7 days, escalations; Informational when there is no case to judge). **No new role** — `roles/iam.securityReviewer` carries `cloudsupport.techCases.list` — and no opt-in flag: `cloudsupport.googleapis.com` enabled in the host project; without the API or the permission both records read Informational with the command that configures them. Fixture-verified — the reference organization has Basic support, which has no cases. |
 | Later | | In this order: GKE health, backup and support (cluster conditions and CA expiry, Backup for GKE, end of support, workload disruption readiness); Compute reliability (disk backup coverage, VM availability policy, MIG and load-balancer resilience, reservations); managed databases and storage finished (Cloud SQL deletion protection, maintenance windows, password policy, CA expiry, IAM authentication; AlloyDB open networks; Public Access Prevention, versioning without cleanup; BigQuery unpartitioned tables); the data plane never read (Pub/Sub, Memorystore, Filestore, Spanner, Bigtable, Firestore, NetApp); org-policy depth and residency (exceptions below the root, domain-restriction values, location and service-usage drift); SLO coverage, PDF export. The Workload Manager results import does not ship (a new role, a per-project API, a dedupe layer). |

@@ -47,6 +47,7 @@ from app.checks.scc import DETECTOR_CHECK, SCC_FINDINGS_CHECK, check_detector_co
 from app.checks.vulnerabilities import EXPOSED_VM_CHECK, OS_VULN_CHECK, check_exposed_vms, check_os_vulnerabilities
 from app.checks.footprint import FOOTPRINT_CHECK, check_platform_footprint
 from app.checks.detection import GKE_ACTIVITY_CHECK, SA_SIGNALS_CHECK, check_gke_activity, check_sa_signals
+from app.checks.support import SUPPORT_BRIEFING, check_support_cases
 from app.checks.edge_security import ARMOR_CHECK, check_edge_security
 from app.checks.privileges import CUSTOM_ROLES_CHECK, FOLDER_ROLES_CHECK, PRIVILEGED_GRANTS_CHECK, check_custom_roles, check_folder_roles, check_privileged_grants
 from app.checks.secrets import SECRET_SCOPE_CHECK, check_secret_posture
@@ -273,6 +274,8 @@ def build_check_plan(scope, scope_id, job_id, all_projects, active_zones, active
         CheckSpec("Operational Excellence & Observability", FOOTPRINT_CHECK, check_platform_footprint, (scope, scope_id, job_id)),
         CheckSpec("Security & Identity", GKE_ACTIVITY_CHECK, check_gke_activity, (scope_id, all_projects, job_id)),  # per project: the k8s_cluster audit log is a project's
         CheckSpec("Security & Identity", SA_SIGNALS_CHECK, check_sa_signals, (scope, scope_id, all_projects, job_id)),  # split: the scope's own entries + every project's
+        # v19.2: the open support cases under the scope — one search, two records (Support Cases, Case Hygiene); Informational when the API or the permission is missing.
+        CheckSpec("Operational Excellence & Observability", SUPPORT_BRIEFING, check_support_cases, (scope, scope_id, job_id)),
     ]
 
     if scope == 'organization':
@@ -311,6 +314,7 @@ SCOPE_LEVEL_CHECKS = frozenset({
     AUDIT_PIPELINE_CHECK, DUPLICATE_ROUTING_CHECK, SYNTHETIC_CHECK,  # v18.9: the scope's sinks; the aggregated sinks under it; one listing of its load balancers, services and clusters
     SCC_FINDINGS_CHECK, EXPOSED_VM_CHECK,  # v19: SCC's findings under the scope; one listing of instances, firewall rules and policies
     FOOTPRINT_CHECK,  # v19.1: one all-types search under the scope (the two detection records read per project; the SA one is split)
+    SUPPORT_BRIEFING,  # v19.2: one cases.search under the scope (two records: Case Hygiene)
 })
 # The checks that do both: scope-wide work plus per-project work. Shards split them
 # with keyword flags: the scope shard runs the first set, the project shards the second

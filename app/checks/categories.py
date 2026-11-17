@@ -104,6 +104,7 @@ CATEGORY_MAP = {
     "SCC Active Findings": "Security & Identity", "SCC Detector Coverage": "Security & Identity", "OS Vulnerabilities": "Security & Identity", "Exposed Privileged VMs": "Security & Identity",
     # v19.1: footprint and detection
     "Platform Footprint": "Operational Excellence & Observability", "GKE Control Plane Activity": "Security & Identity", "Service Account Activity Signals": "Security & Identity",
+    "Support Cases": "Operational Excellence & Observability", "Case Hygiene": "Operational Excellence & Observability",  # v19.2: one search, two records
 
     # B2: error results. These names are only written when a check fails; the
     # legacy map left them out, so failures silently disappeared from the report.
