@@ -251,8 +251,10 @@ def test_scan_completes_against_the_synthetic_organization(gcp, scope):
     # v18.9: one more (Synthetic and SLO Coverage's load balancers, services and clusters); Audit Log Pipeline lists destinations only for a
     # sink into a dataset, bucket or topic in scope, and the synthetic organization's own sink writes outside it.
     # v19: one more (Exposed Privileged VMs' instances, firewall rules and policies); SCC's findings and services come through REST.
-    assert by_method.get('asset.listAssets(org)', 0) == (27 if scope == 'organization' else 0)  # v18.5: the identity checks search instead
-    assert by_method.get('asset.listAssets(folder)', 0) == (27 if scope == 'folder' else 0)
+    # v19.3: four more (Organization Policy Exceptions' policies and hierarchy; Bucket Logging's buckets and projects — its IAM policies are the iamPolicy listing).
+    assert by_method.get('asset.listAssets(org)', 0) == (31 if scope == 'organization' else 0)  # v18.5: the identity checks search instead
+    assert by_method.get('asset.listAssets(folder)', 0) == (31 if scope == 'folder' else 0)
+    assert by_method.get('asset.listAssets(iamPolicy)', 0) == (1 if scope == 'organization' else 2)  # v19.3: a folder or project scan reads the containers above it too
     assert by_method.get('accesscontextmanager.servicePerimeters.list', 0) == 1
     metrics = provider.metrics.snapshot()
     assert metrics['total_calls'] > 50 and metrics['errors'] == {}

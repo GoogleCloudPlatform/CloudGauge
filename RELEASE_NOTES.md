@@ -8,7 +8,128 @@ the test suite running inside the image, a zero-traffic canary revision scanned
 against a real organization, promotion, and a production scan compared fact for
 fact with the previous version's report.
 
-Versions are the image tags (`v5` … `v19.2`); the commit is the one that shipped.
+Versions are the image tags (`v5` … `v19.3`); the commit is the one that shipped.
+
+## v19.3 — Finish what the report points at
+
+The last feature release before the GA cut: three themes that close gaps the
+report itself named, no new role, no new API. The first is the one the owner
+put his finger on — *Organization Policies* judges the policies as effective
+at the scanned resource and could not see a folder or project that overrides a
+guardrail; an organization scan said Compliant while our own organization has
+`compute.requireOsLogin` enforced at the top and switched off on a folder. The
+second is the SCC oracle's "—" column on the categories our organization
+actually shows. The third finishes the Cloud SQL, AlloyDB and bucket facts the
+report had left half-read.
+
+What our own organization reads after it: **Organization Policy Exceptions —
+Action Required**: OS Login enforced at the organization, off on folder
+`1061012327179`, reaching its project; the Organization Policies row for OS
+Login *Compliant — 1 exception below*. **Bucket Logging — Investigation**: no
+bucket has usage logging and no Data Access logs are on for storage anywhere.
+`aura-db` without deletion protection, a maintenance window or a password
+policy. The oracle column no longer says "—" for bucket logging, GKE secrets
+encryption or the threat-class findings.
+
+### Added
+
+- **Organization Policy Exceptions** (Security & Identity, every scope;
+  scope-level): one `assets.list` of `orgpolicy.googleapis.com/Policy` under
+  the scope — every policy set at the organization, the folders and the
+  projects, each with its `ancestors` — and one of the folders and projects
+  under it; the **effective policy of every container computed in memory**
+  with Resource Manager's rules (boolean nearest-wins and `reset`; list
+  `inheritFromParent` merge against replace, `allowAll`/`denyAll`; a rule with
+  a tag condition for tagged resources only; managed and custom constraints by
+  the same shapes). One row per policy set below the scanned resource that
+  **weakens** a best-practice constraint it holds, attributed to the **nearest
+  container that sets it** (a project that re-enforces a folder's exception is
+  not reached by it): `Constraint, Set on, Above, Below, Reaches, Issue,
+  Detail, Fix` (`gcloud org-policies delete … --folder|--project`, back to
+  inheritance). Unconditional → **Action Required**; tag-conditional →
+  *Investigation*; the rest — tightening, restating, out-of-table, the scanned
+  resource's own gaps (counted once in its table), reaching no project — one
+  Informational count line. A project scan: Informational, nothing below it.
+  The verdict function is the report's own (`evaluate_org_policies`, with a
+  parity test). **One check in the score whatever it lists**; the Organization
+  Policies tally is unchanged. Policy Analyzer is not used (Premium-only,
+  quota-bound — dropped by decision). No per-project call: thousands of
+  projects are a few pages.
+- The **Organization Policies** table gains a **Below** column — "*2
+  exceptions (folders/…, projects/…)*" — shown (HTML and CSV) when the scan
+  found any; its summary line and the Scorecard's sentence say how many
+  guardrails have exceptions below.
+- **Bucket Logging** (Operational Excellence & Observability, every scope;
+  scope-level): per project with buckets — no usage logging **and** no Data
+  Access logs (`DATA_READ`, `DATA_WRITE`) for `storage.googleapis.com` or
+  `allServices` effective at the project (set on it, a folder or the
+  organization — the IAM policies read as one `IAM_POLICY` listing) →
+  *Investigation*; usage logging off but Data Access logs on → Informational
+  (SHA's `BUCKET_LOGGING_DISABLED` reads the legacy path alone); every bucket
+  logged → no row. Rows `Project, Buckets, Usage logging, Data Access logs,
+  Issue, Detail, Fix`.
+- **Cloud SQL Deletion Protection** (Reliability, from Resilience of Critical
+  Assets' listing): deletion protection off (*Investigation*: one `delete` or
+  a Terraform destroy removes the instance and its backups), no maintenance
+  window (Informational); replicas follow their primary.
+- *Cloud SQL Security*: no instance-level **password policy** →
+  *Investigation*; the **server CA certificate** expiring within 90 days →
+  *Investigation*, within 30 → **Action Required** (create + rotate lines).
+  *Cloud SQL Flags*: `cloudsql.iam_authentication` off → an Informational
+  note (Google's recommendation, not CIS's). *AlloyDB Posture*: a public
+  instance with `0.0.0.0/0` or `::/0` among its authorized external networks
+  → **Action Required**. *Public GCS Buckets*: one Informational line per
+  project counting the buckets that rely on IAM alone (Public Access
+  Prevention enforced neither on the bucket nor by the organization policy).
+
+### Changed
+
+- The SCC oracle (`COVERAGE_MAP`): `CLUSTER_SECRETS_ENCRYPTION_DISABLED` →
+  *GKE Node Hardening* (a mapping gap: the rule existed), `BUCKET_LOGGING_DISABLED`
+  → *Bucket Logging*; THREAT-class findings read **"SCC (threat detection)"**
+  instead of "—" — a detected event is SCC's own domain, not a gap of this
+  report. `GEMINI_MODEL_NOT_PROTECTED_BY_MODEL_ARMOR` keeps its "—": Model
+  Armor is a new API, a post-GA minor.
+- The synthetic organization: the inventory answers the organization-policy
+  listing (the same draws `listOrgPolicies` answers, in the v2 shape with
+  ancestors — folders and projects override a constraint 30 % of the time),
+  the Project and Folder assets with their ancestors, the buckets with usage
+  logging derived from their existing draws, the IAM-policy listing with the
+  audit configurations; the Cloud SQL assets carry deletion protection, the
+  window, the password policy and a CA expiry derived from their existing
+  draws (no new draw — nothing shifts).
+- README: the two catalogue entries, a sentence on each finished record, the
+  scope note, the project structure. `VERSION = "19.3"`; the Terraform module
+  name carries it. The roadmap: v19.3 shipped; next, the GA work (v20).
+
+### Tests
+
+- `tests/test_org_policy_exceptions.py` (8): the v2 → v1 shapes, Resource
+  Manager's merge rules, the verdicts' parity with the report's evaluator, the
+  descriptions, the hierarchy (inactive containers out), the rows on a fixture
+  hierarchy — a folder's exception reaching the project that did not restore it,
+  a project's, a conditional one, the organization's own gap and an
+  out-of-table policy counted, a folder scan's baseline, nothing below — the
+  check end to end (organization, project, Error, all-clear), the Below
+  column and the unchanged tally.
+- `tests/test_finishers_v19_3.py` (9): the audit-configuration shapes, the
+  two-fact rule per project, the check end to end (the organization's three
+  listings, a folder's fourth, Compliant, Error), the oracle's new mappings
+  and label, the Cloud SQL password-policy and CA rows around their
+  thresholds, the IAM-authentication note, deletion protection and the window,
+  the AlloyDB open network, the Public Access Prevention count line.
+- `tests/test_worker.py`: 77 checks for an organization, 74 otherwise;
+  `tests/test_synthetic.py`: 31 organization-wide listings and the IAM-policy
+  listing; the Cloud SQL and flag fixtures carry a password policy and the
+  IAM-authentication flag so the earlier expectations stay about what they
+  tested. `tests/fakes.py`: `list_assets` honours the content type.
+- 1,330 tests.
+
+### Upgrade notes
+
+Nothing to enable or grant. The Organization Policies table shows its Below
+column from the first scan that finds an exception; the Changes card treats
+the two new records as new checks until the scan after the upgrade.
 
 ## v19.2 — Support cases
 
@@ -4034,4 +4155,6 @@ performance; modernization; enablement; roadmap and roadblocks).
 | **v19** | Findings and vulnerabilities | *Shipped.* **SCC Active Findings** (Security Command Center's active findings under the scope, SCC's severity as the verdict, the CloudGauge record that judges the same fact named per category, the no-export row), **SCC Detector Coverage** (Security Health Analytics and the threat detectors per project — the real organization covers one project in three), **OS Vulnerabilities** (VM Manager's CVEs with a fix available; the precondition row where VM Manager is off), **Exposed Privileged VMs** (external address + privileged identity + open ingress rule). No new role, no new API. The *deprecations recommender* line leaves the roadmap: the Recommender catalogue has none. |
 | **v19.1** | Footprint and detection | *Shipped.* **Platform Footprint** (what runs where: one all-types inventory search — 1,908 assets, 113 types, 2 s on the real organization — by product family, location and project, the enabled APIs, the GKE, Cloud SQL and VM versions; a briefing), the detective half of the SSRF chain over 7 days of Admin Activity logs under the scope — **GKE Control Plane Activity** (exec, attach, port-forward, `kube-system` DaemonSets and CronJobs, `cluster-admin` bindings, webhook changes by principals other than Google's own, judged by who and from where; secrets reads are Data Access logs and are not read), **Service Account Activity Signals** (keys, IAM changes, metadata writes and account creation by service accounts; token minting is Data Access and not read). No new role, no new API. |
 | **v19.2** | Support cases | *Shipped.* **Support Cases** (the open cases under the scope on one page — `cases.search`, the organization's own and its projects'; seven fixed lines: open by priority and the oldest, with Google Support, waiting on you, solution provided, escalated, by project, by product; titles and metadata only) and **Case Hygiene** (waiting on you > 3 days, open beyond P0 1 / P1 7 / P2 30 / P3 60 / P4 90 days, solution provided > 7 days, escalations; Informational when there is no case to judge). **No new role** — `roles/iam.securityReviewer` carries `cloudsupport.techCases.list` — and no opt-in flag: `cloudsupport.googleapis.com` enabled in the host project; without the API or the permission both records read Informational with the command that configures them. Fixture-verified — the reference organization has Basic support, which has no cases. |
-| Later | | In this order: GKE health, backup and support (cluster conditions and CA expiry, Backup for GKE, end of support, workload disruption readiness); Compute reliability (disk backup coverage, VM availability policy, MIG and load-balancer resilience, reservations); managed databases and storage finished (Cloud SQL deletion protection, maintenance windows, password policy, CA expiry, IAM authentication; AlloyDB open networks; Public Access Prevention, versioning without cleanup; BigQuery unpartitioned tables); the data plane never read (Pub/Sub, Memorystore, Filestore, Spanner, Bigtable, Firestore, NetApp); org-policy depth and residency (exceptions below the root, domain-restriction values, location and service-usage drift); SLO coverage, PDF export. The Workload Manager results import does not ship (a new role, a per-project API, a dedupe layer). |
+| **v19.3** | Finish what the report points at | *Shipped.* **Organization Policy Exceptions** (every organization policy set under the scope from one inventory listing, the effective policy of every container computed in memory, one row per guardrail the scanned resource holds and a folder or project weakens — Action Required, tag-conditional Investigation; a Below column on the Organization Policies table; Policy Analyzer dropped by decision), **Bucket Logging** (usage logging × Data Access logs per project — the SCC oracle's `BUCKET_LOGGING_DISABLED` gap closed; `CLUSTER_SECRETS_ENCRYPTION_DISABLED` mapped; threat-class findings labelled SCC's own), **Cloud SQL Deletion Protection**, the Cloud SQL password policy and server-CA expiry, the IAM-authentication note, AlloyDB open networks, the Public Access Prevention count. No new role, no new API. Model Armor and BigQuery unpartitioned tables stay Later. |
+| **v20** | GA | The GA work: the `main` cutover, CI on every pull request, tags and GitHub Releases with release-please, `SECURITY.md` / Dependabot / CodeQL, the enqueue retry, the README split into a landing page and `docs/`, a print stylesheet, a scale run; `v20.0.0-rc.1` soaked a week, then `v20.0.0`. |
+| Later | | In this order: GKE health, backup and support (cluster conditions and CA expiry, Backup for GKE, end of support, workload disruption readiness); Compute reliability (disk backup coverage, VM availability policy, MIG and load-balancer resilience, reservations); BigQuery unpartitioned large tables (a cost fact); Model Armor floor settings behind the SCC oracle's last "—" (`modelarmor.googleapis.com`, a new API); the data plane never read (Pub/Sub, Memorystore, Filestore, Spanner, Bigtable, Firestore, NetApp); org-policy depth and residency (exceptions below the root, domain-restriction values, location and service-usage drift); SLO coverage, PDF export. The Workload Manager results import does not ship (a new role, a per-project API, a dedupe layer). |

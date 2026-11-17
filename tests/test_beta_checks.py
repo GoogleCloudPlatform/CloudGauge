@@ -42,12 +42,12 @@ DENIED = RuntimeError('403 The caller does not have permission')
 
 SQL_INSTANCES = {
     'web-prod': {'items': [
-        {'name': 'db-public', 'settings': {'ipConfiguration': {'ipv4Enabled': True, 'requireSsl': True}}},
-        {'name': 'db-no-ssl', 'settings': {'ipConfiguration': {'ipv4Enabled': False}}},
-        {'name': 'db-both', 'settings': {'ipConfiguration': {'ipv4Enabled': True, 'requireSsl': False}}},
+        {'name': 'db-public', 'settings': {'ipConfiguration': {'ipv4Enabled': True, 'requireSsl': True}, 'passwordValidationPolicy': {'enablePasswordPolicy': True}}},
+        {'name': 'db-no-ssl', 'settings': {'ipConfiguration': {'ipv4Enabled': False}, 'passwordValidationPolicy': {'enablePasswordPolicy': True}}},
+        {'name': 'db-both', 'settings': {'ipConfiguration': {'ipv4Enabled': True, 'requireSsl': False}, 'passwordValidationPolicy': {'enablePasswordPolicy': True}}},
         {'name': 'db-bare'},  # no settings: an instance mid-operation, no rows
     ]},
-    'data-lake': {'items': [{'name': 'db-ok', 'settings': {'ipConfiguration': {'ipv4Enabled': False, 'requireSsl': True}}}]},
+    'data-lake': {'items': [{'name': 'db-ok', 'settings': {'ipConfiguration': {'ipv4Enabled': False, 'requireSsl': True}, 'passwordValidationPolicy': {'enablePasswordPolicy': True}}}]},
     'locked-down': DENIED,
 }
 NETWORKS = {
@@ -183,7 +183,7 @@ def test_cloud_sql_security_findings(apis):
     assert [(r['Instance'], r['Issue'].split(':')[0]) for r in rows] == [
         ('db-public', 'Public IP enabled.'), ('db-no-ssl', 'TLS not enforced'), ('db-both', 'TLS not enforced'), ('db-both', 'Public IP enabled.')]
     assert findings_of('check_cloud_sql_security', [LAKE]) == [
-        {'Status': 'Every Cloud SQL instance enforces TLS, has no public IP, and authorizes no internet range.'}]
+        {'Status': 'Every Cloud SQL instance enforces TLS, has no public IP, authorizes no internet range, has a password policy, and a server CA with more than 90 days left.'}]  # v19.3
     assert ('sqladmin', 'v1') in apis.discovery.calls and ('sqladmin', 'v1beta4') not in apis.discovery.calls
 
 

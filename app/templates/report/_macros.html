@@ -131,11 +131,11 @@
 {%- endif %}
 {%- endmacro %}
 
-{% macro org_policy_rows(categories) -%}
+{% macro org_policy_rows(categories, with_below=False) -%}
 {% for category in categories -%}
-<tr class="group-row"><td colspan="4">{{ category.name }}</td></tr>
+<tr class="group-row"><td colspan="{{ 5 if with_below else 4 }}">{{ category.name }}</td></tr>
 {%- for row in category.rows -%}
-<tr{% if row.new %} class="row-new"{% endif %}><td class="prose">{{ row.display_name }}</td><td class="state"><code>{{ row.expected_value }}</code></td><td class="state"><code>{{ row.current_value }}</code></td><td class="state"><span class="pill pill-{{ row.status_class }} status-text-{{ row.status_class }}">{{ row.status }}</span></td></tr>
+<tr{% if row.new %} class="row-new"{% endif %}><td class="prose">{{ row.display_name }}</td><td class="state"><code>{{ row.expected_value }}</code></td><td class="state"><code>{{ row.current_value }}</code></td><td class="state"><span class="pill pill-{{ row.status_class }} status-text-{{ row.status_class }}">{{ row.status }}</span></td>{% if with_below %}<td class="state">{% if row.below %}<span class="pill pill-action-required status-text-action-required">{{ row.below }}</span>{% else %}—{% endif %}</td>{% endif %}</tr>
 {%- endfor %}
 {% endfor %}
 {%- endmacro %}
@@ -147,15 +147,15 @@
         <summary>
             {{ chevron_icon() }}
             <span class="dot dot-{{ org_policies.status_class }}" aria-hidden="true"></span>
-            <span class="check-title"><strong>Organization Policies</strong><span class="check-summary">{% if differing %}{{ differing }} polic{{ 'y differs' if differing == 1 else 'ies differ' }} from the recommended value{% else %}Every policy is set to the recommended value{% endif %}</span></span>
+            <span class="check-title"><strong>Organization Policies</strong><span class="check-summary">{% if differing %}{{ differing }} polic{{ 'y differs' if differing == 1 else 'ies differ' }} from the recommended value{% else %}Every policy is set to the recommended value{% endif %}{% if org_policies.exceptions %}; {{ org_policies.exceptions }} ha{{ 's' if org_policies.exceptions == 1 else 've' }} exceptions below{% endif %}</span></span>
             <span class="status-badge pill pill-{{ org_policies.status_class }}">{{ org_policies.compliant }}/{{ org_policies.total }} Compliant</span>
             {{ change_chip(org_policies.change) }}
         </summary>
         <div class="check-content">
             <div class="details">
                 <table class="data-table org-policy-table">
-                    <thead><tr><th>Policy</th><th>Expected Value</th><th>Current Value</th><th>Status</th></tr></thead>
-                    <tbody>{{ org_policy_rows(org_policies.categories) }}</tbody>
+                    <thead><tr><th>Policy</th><th>Expected Value</th><th>Current Value</th><th>Status</th>{% if org_policies.exceptions %}<th>Below</th>{% endif %}</tr></thead>
+                    <tbody>{{ org_policy_rows(org_policies.categories, org_policies.exceptions > 0) }}</tbody>
                 </table>
             </div>
             {% if org_policies.source %}<div class="table-note check-note">Policy table: {{ org_policies.source }}</div>{% endif %}

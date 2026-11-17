@@ -48,6 +48,8 @@ from app.checks.vulnerabilities import EXPOSED_VM_CHECK, OS_VULN_CHECK, check_ex
 from app.checks.footprint import FOOTPRINT_CHECK, check_platform_footprint
 from app.checks.detection import GKE_ACTIVITY_CHECK, SA_SIGNALS_CHECK, check_gke_activity, check_sa_signals
 from app.checks.support import SUPPORT_BRIEFING, check_support_cases
+from app.checks.org_policy_exceptions import EXCEPTIONS_CHECK as ORG_POLICY_EXCEPTIONS_CHECK, check_org_policy_exceptions
+from app.checks.bucket_logging import BUCKET_LOGGING_CHECK, check_bucket_logging
 from app.checks.edge_security import ARMOR_CHECK, check_edge_security
 from app.checks.privileges import CUSTOM_ROLES_CHECK, FOLDER_ROLES_CHECK, PRIVILEGED_GRANTS_CHECK, check_custom_roles, check_folder_roles, check_privileged_grants
 from app.checks.secrets import SECRET_SCOPE_CHECK, check_secret_posture
@@ -276,6 +278,10 @@ def build_check_plan(scope, scope_id, job_id, all_projects, active_zones, active
         CheckSpec("Security & Identity", SA_SIGNALS_CHECK, check_sa_signals, (scope, scope_id, all_projects, job_id)),  # split: the scope's own entries + every project's
         # v19.2: the open support cases under the scope — one search, two records (Support Cases, Case Hygiene); Informational when the API or the permission is missing.
         CheckSpec("Operational Excellence & Observability", SUPPORT_BRIEFING, check_support_cases, (scope, scope_id, job_id)),
+        # v19.3: the guardrails the scanned resource holds that a folder or project below it weakens — one inventory listing, inheritance computed in memory.
+        CheckSpec("Security & Identity", ORG_POLICY_EXCEPTIONS_CHECK, check_org_policy_exceptions, (scope, scope_id, job_id)),
+        # v19.3: who could tell who read a bucket — usage logging per bucket, Data Access logs for storage at the project and above (three listings).
+        CheckSpec("Operational Excellence & Observability", BUCKET_LOGGING_CHECK, check_bucket_logging, (scope, scope_id, job_id)),
     ]
 
     if scope == 'organization':
@@ -315,6 +321,7 @@ SCOPE_LEVEL_CHECKS = frozenset({
     SCC_FINDINGS_CHECK, EXPOSED_VM_CHECK,  # v19: SCC's findings under the scope; one listing of instances, firewall rules and policies
     FOOTPRINT_CHECK,  # v19.1: one all-types search under the scope (the two detection records read per project; the SA one is split)
     SUPPORT_BRIEFING,  # v19.2: one cases.search under the scope (two records: Case Hygiene)
+    ORG_POLICY_EXCEPTIONS_CHECK, BUCKET_LOGGING_CHECK,  # v19.3: the policies set under the scope + its folders and projects; the buckets, projects and IAM policies under it
 })
 # The checks that do both: scope-wide work plus per-project work. Shards split them
 # with keyword flags: the scope shard runs the first set, the project shards the second

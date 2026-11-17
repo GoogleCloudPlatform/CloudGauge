@@ -26,6 +26,7 @@ so two scans of an unchanged estate produce identical files.
 import csv
 import io
 
+from app.checks.org_policy_exceptions import exceptions_by_constraint
 from app.reporting.context import display_rank, evaluate_org_policies, group_findings
 
 NEW_COLUMN = "New since last scan"
@@ -70,13 +71,14 @@ def generate_csv_data(all_results, row_matchers=None):
 
     # --- Write Org Policies Section  ---
     writer.writerow(['Organization Policies'])
-    writer.writerow(['Category', 'Policy', 'Expected Value', 'Current Value', 'Status'])
     org_policy_data = all_results.get('Organization Policies')
+    exceptions = exceptions_by_constraint(all_results.get("Security & Identity", []))  # v19.3: a Below column when the scan found exceptions
+    writer.writerow(['Category', 'Policy', 'Expected Value', 'Current Value', 'Status'] + (['Below'] if exceptions else []))
     if org_policy_data:
         best_practices, current_policies = org_policy_data
         for category, results in evaluate_org_policies(best_practices, current_policies):
             for result in results:
-                writer.writerow([category, result.display_name, result.expected_value, result.current_value, result.status])
+                writer.writerow([category, result.display_name, result.expected_value, result.current_value, result.status] + ([exceptions.get(result.policy_id, "")] if exceptions else []))
 
     # --- Helper to Write Other Sections ---
     def write_section(title, results):

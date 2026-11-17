@@ -529,7 +529,9 @@ class FakeAssets:
                 for asset_type in request['asset_types']:
                     if asset_type in assets.list_errors:
                         raise assets.list_errors[asset_type]
-                return [a for a in assets.assets if a.asset_type in request['asset_types'] and request['parent'] in a.parents]
+                content = request.get('content_type')
+                wants_iam = str(content).endswith('IAM_POLICY') or content == 2  # v19.3: an IAM_POLICY listing returns the policy assets (those with ``iam_policy``), a RESOURCE one the rest
+                return [a for a in assets.assets if a.asset_type in request['asset_types'] and request['parent'] in a.parents and hasattr(a, 'iam_policy') == wants_iam]
 
             def search_all_iam_policies(self, request):
                 assets.iam_queries.append(request['query'])

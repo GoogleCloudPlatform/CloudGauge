@@ -105,7 +105,7 @@ def test_findings_keep_their_rows_and_name_each_snapshot(gcp):
                   snapshot('p1', 'nightly', ['us-central1']), snapshot('p2', 'weekly', ['us', 'eu']), snapshot('p2', 'orphan', [])):
         gcp.assets.add_asset(*asset)
     checks = run().by_check
-    assert {name: f['Status'] for name, f in checks.items()} == {check: 'Action Required' for check in RESILIENCE_CHECKS}
+    assert {name: f['Status'] for name, f in checks.items()} == {**{check: 'Action Required' for check in RESILIENCE_CHECKS}, 'Cloud SQL Deletion Protection': 'Investigation Recommended'}  # v19.3: the fixture instances have no deletion protection or window
     # v17.3: the zonal instance's Region and the zonal group's Zone (as a name, whatever the API's URL form), the footprint
     # Incident Exposure reads; the other Cloud SQL rows are as before.
     assert checks['Cloud SQL High Availability']['Finding'] == [{'Project': 'p1', 'Instance': 'db-a', 'Region': 'asia-south1'}]
@@ -190,7 +190,7 @@ def test_a_credentials_failure_is_an_error_under_every_name(gcp, monkeypatch):
 def test_every_resilience_name_is_a_stability_check():
     """The runner's error name (the registry's) and the six names the check writes all land on the Stability page;
     the all-clear table covers exactly the six (test_category_consistency reads the table through DYNAMIC_NAMES)."""
-    assert set(RESILIENCE_NOTHING_FOUND) == set(RESILIENCE_CHECKS) and len(RESILIENCE_CHECKS) == 6
+    assert set(RESILIENCE_NOTHING_FOUND) == set(RESILIENCE_CHECKS) and len(RESILIENCE_CHECKS) == 7  # v19.3: + Cloud SQL Deletion Protection
     for name in RESILIENCE_CHECKS + ('Resilience of Critical Assets',):
         assert CATEGORY_MAP[name] == 'Reliability & Resilience', name
     assert RETIRED_ERROR_NAME not in CATEGORY_MAP

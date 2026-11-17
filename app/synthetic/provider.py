@@ -1410,6 +1410,8 @@ class SyntheticGcp:
     def list_assets(self, request):
         """The assets of the requested types under ``projects/``, ``folders/`` (its projects) or the organization (every project)."""
         parent, asset_types = request["parent"], set(request.get("asset_types", []))
+        if str(request.get("content_type") or "").endswith("IAM_POLICY") or request.get("content_type") == 2:  # v19.3: the IAM policies (audit configurations ride on them)
+            return self._iam_policy_assets(parent, asset_types)
         if parent.startswith("projects/"):
             project_id = parent.split("/", 1)[1]
             self.call("asset", "listAssets(project)", project_id=project_id)
@@ -1427,11 +1429,19 @@ class SyntheticGcp:
             found += self._serverless_assets(profile, asset_types)
             found += self._observability_assets(profile, asset_types)
             found += self._firewall_assets(profile, asset_types)
+            found += self._hierarchy_assets([profile], None, asset_types, with_folders=False)
+            found += self._org_policy_assets([profile], [], asset_types, with_org=False)
+            found += self._storage_assets(profile, asset_types)
             return found
         # Folder- or organization-wide listing: one pass over the projects in scope.
         folder_id = parent.split("/", 1)[1] if parent.startswith("folders/") else None
         found = []
+        profiles = self.world.projects(folder_id)
+        folders = [folder_id] if folder_id else list(self.world.folder_ids)
+        found += self._hierarchy_assets(profiles, folders, asset_types)
+        found += self._org_policy_assets(profiles, folders, asset_types, with_org=folder_id is None)
         for profile in self.world.projects(folder_id):
+            found += self._storage_assets(profile, asset_types)
             found += self._resilience_assets(profile, asset_types)
             if "container.googleapis.com/Cluster" in asset_types:
                 found += [self._cluster_asset(profile, c) for c in profile.gke_clusters]
@@ -1446,6 +1456,91 @@ class SyntheticGcp:
             found += self._observability_assets(profile, asset_types)
             found += self._firewall_assets(profile, asset_types)
         self.call("asset", "listAssets(folder)" if folder_id else "listAssets(org)", pages=max(1, math.ceil(len(found) / PAGE_SIZE)))
+        return found
+
+    def _ancestors(self, profile=None, folder_id=None):
+        org = f"organizations/{self.world.org_id}"
+        if profile is not None:
+            return [f"projects/{profile.project_number}", f"folders/{profile.folder_id}", org]
+        return [f"folders/{folder_id}", org] if folder_id else [org]
+
+    def _hierarchy_assets(self, profiles, folders, asset_types, with_folders=True):
+        """v19.3: the Project and Folder assets with their ``ancestors`` (``list_assets``, content RESOURCE)."""
+        found = []
+        if "cloudresourcemanager.googleapis.com/Project" in asset_types:
+            found += [SimpleNamespace(name=f"//cloudresourcemanager.googleapis.com/projects/{p.project_number}", asset_type="cloudresourcemanager.googleapis.com/Project", ancestors=self._ancestors(p),
+                                      resource=SimpleNamespace(data={"projectId": p.project_id, "name": p.display_name, "projectNumber": p.project_number, "lifecycleState": "ACTIVE"})) for p in profiles]
+        if with_folders and "cloudresourcemanager.googleapis.com/Folder" in asset_types:
+            found += [SimpleNamespace(name=f"//cloudresourcemanager.googleapis.com/folders/{fid}", asset_type="cloudresourcemanager.googleapis.com/Folder", ancestors=self._ancestors(folder_id=fid),
+                                      resource=SimpleNamespace(data={"displayName": f"Synthetic Folder {fid}", "state": "ACTIVE"})) for fid in (folders or [])]
+        return found
+
+    @staticmethod
+    def _v2_spec(policy):
+        """The v2 ``spec`` of a v1 ``listOrgPolicies`` policy (what the inventory stores)."""
+        if "restoreDefault" in policy:
+            return {"reset": True}
+        if "booleanPolicy" in policy:
+            return {"rules": [{"enforce": bool(policy["booleanPolicy"].get("enforced"))}]}
+        lp = policy.get("listPolicy") or {}
+        rule = {"allowAll": True} if lp.get("allValues") == "ALLOW" else {"denyAll": True} if lp.get("allValues") == "DENY" else {
+            "values": {k: v for k, v in (("allowedValues", lp.get("allowedValues")), ("deniedValues", lp.get("deniedValues"))) if v}}
+        return {"rules": [rule], **({"inheritFromParent": True} if lp.get("inheritFromParent") else {})}
+
+    def _org_policy_assets(self, profiles, folders, asset_types, with_org=True):
+        """v19.3: the ``orgpolicy.googleapis.com/Policy`` assets set on the organization, the folders and the projects in scope — the same draws
+        ``listOrgPolicies`` answers (``world.org_policies``), in the inventory's v2 shape, each with its ``ancestors``."""
+        if "orgpolicy.googleapis.com/Policy" not in asset_types:
+            return []
+        found = []
+
+        def add(container, ancestors, resource):
+            for policy in self.world.org_policies(resource):
+                cid = str(policy.get("constraint", "")).rsplit("/", 1)[-1]
+                found.append(SimpleNamespace(name=f"//orgpolicy.googleapis.com/{container}/policies/{cid}", asset_type="orgpolicy.googleapis.com/Policy", ancestors=ancestors,
+                                             resource=SimpleNamespace(data={"name": f"{container}/policies/{cid}", "spec": self._v2_spec(policy)})))
+        if with_org:
+            add(f"organizations/{self.world.org_id}", self._ancestors(), f"organizations/{self.world.org_id}")
+        for fid in folders or []:
+            add(f"folders/{fid}", self._ancestors(folder_id=fid), f"folders/{fid}")
+        for p in profiles:
+            add(f"projects/{p.project_number}", self._ancestors(p), f"projects/{p.project_id}")
+        return found
+
+    def _storage_assets(self, profile, asset_types):
+        """v19.3: the project's buckets as ``list_assets`` returns them — usage logging on for the buckets with UBLA and versioning (derived, no new draw)."""
+        if "storage.googleapis.com/Bucket" not in asset_types:
+            return []
+        return [SimpleNamespace(name=f"//storage.googleapis.com/{b.name}", asset_type="storage.googleapis.com/Bucket", ancestors=self._ancestors(profile),
+                                resource=SimpleNamespace(data={"name": b.name, "projectNumber": profile.project_number, **({"logging": {"logBucket": f"{b.name}-logs"}} if b.ubla and b.versioning else {}),
+                                                               "iamConfiguration": {"publicAccessPrevention": "enforced" if b.name in profile.pap_enforced_buckets else "inherited"}}))
+                for b in profile.buckets]
+
+    def _iam_policy_assets(self, parent, asset_types):
+        """v19.3: ``list_assets`` with content IAM_POLICY — the organization's policy (ADMIN_READ and DATA_WRITE for all services, as ``getIamPolicy`` answers),
+        the folders' (no audit configuration), the projects' (every Data Access log type when the project turns them on)."""
+        org = f"organizations/{self.world.org_id}"
+
+        def config(service, types):
+            return SimpleNamespace(service=service, audit_log_configs=[SimpleNamespace(log_type=t) for t in types])
+
+        def asset(name, asset_type, ancestors, audit_configs):
+            return SimpleNamespace(name=f"//cloudresourcemanager.googleapis.com/{name}", asset_type=f"cloudresourcemanager.googleapis.com/{asset_type}", ancestors=ancestors,
+                                   iam_policy=SimpleNamespace(bindings=[], audit_configs=audit_configs))
+        if parent.startswith("projects/"):
+            profiles, folders, with_org = [self.world.project(parent.split("/", 1)[1])], [], False
+        else:
+            folder_id = parent.split("/", 1)[1] if parent.startswith("folders/") else None
+            profiles, folders, with_org = self.world.projects(folder_id), ([folder_id] if folder_id else list(self.world.folder_ids)), folder_id is None
+        self.call("asset", "listAssets(iamPolicy)")
+        found = []
+        if with_org and "cloudresourcemanager.googleapis.com/Organization" in asset_types:
+            found.append(asset(org, "Organization", [org], [config("allServices", ["ADMIN_READ", "DATA_WRITE"])]))
+        if "cloudresourcemanager.googleapis.com/Folder" in asset_types:
+            found += [asset(f"folders/{fid}", "Folder", self._ancestors(folder_id=fid), []) for fid in folders]
+        if "cloudresourcemanager.googleapis.com/Project" in asset_types:
+            found += [asset(f"projects/{p.project_number}", "Project", self._ancestors(p), [config("allServices", ["ADMIN_READ", "DATA_READ", "DATA_WRITE"])] if p.project_audit_configs else [])
+                      for p in profiles if p is not None]
         return found
 
     def _policy_results(self, scope, asset_types):
@@ -2114,7 +2209,11 @@ class SyntheticGcp:
         region = profile.subnets[0][1] if profile.subnets else "us-central1"  # v17.3: the instance's region, as the API reports it
         data = {"name": sql.name, "databaseVersion": sql.database_version, "region": region, "settings": {
             "availabilityType": "ZONAL" if sql.zonal else "REGIONAL",
-            "backupConfiguration": {"enabled": sql.backups, "pointInTimeRecoveryEnabled": sql.pitr, "retainedBackupsCount": sql.retained_backups}}}
+            "backupConfiguration": {"enabled": sql.backups, "pointInTimeRecoveryEnabled": sql.pitr, "retainedBackupsCount": sql.retained_backups},
+            # v19.3 (derived from the existing draws, no new one): deletion protection with backups and PITR; a window for regional instances; a password policy with TLS.
+            "deletionProtectionEnabled": sql.backups and sql.pitr, **({"maintenanceWindow": {"day": 7, "hour": 2}} if not sql.zonal else {}),
+            **({"passwordValidationPolicy": {"enablePasswordPolicy": True, "minLength": 12}} if sql.require_ssl else {})},
+            "serverCaCert": {"expirationTime": _iso(-20) if sql.retained_backups == 7 else _iso(-700)}}
         governance = profile.data_governance  # v18.4: the CIS flag pack, or the engine defaults
         if governance and governance.sql_flags == "pack":
             packs = {"POSTGRES": [("log_connections", "on"), ("log_disconnections", "on"), ("log_statement", "ddl"), ("cloudsql.enable_pgaudit", "on")],

@@ -57,6 +57,7 @@ from app.reporting.changes import (IDENTITY_SEPARATOR, ORG_POLICIES_CHECK, RowMa
                                    text_identities)
 from app.reporting.layouts import lay_out
 from app.reporting.scoring import NOT_ASSESSED, NOT_ASSESSED_TEXT, Tally, tally_statuses
+from app.checks.org_policy_exceptions import exceptions_by_constraint
 from app.services.org_policies import POLICY_TABLE_META, describe_policy_table
 
 # The report's sections, in display order. The sidebar in report.html links to them.
@@ -162,6 +163,7 @@ class OrgPolicyRow:
     status: str
     status_class: str
     new: bool = False  # differs from the recommended value now and did not in the previous scan
+    below: str = ""  # v19.3: "2 exceptions (folders/…, projects/…)" — the policies set below the scanned resource that weaken this one (Organization Policy Exceptions)
 
 
 @dataclass(frozen=True)
@@ -180,6 +182,7 @@ class OrgPolicySummary:
     icon: str
     change: object = None  # app.reporting.changes.CheckChange since the previous scan, or None
     source: str = ""  # v18.1: which policy table was evaluated (app.services.org_policies.describe_policy_table)
+    exceptions: int = 0  # v19.3: how many of the policies have an exception below the scanned resource
 
     @property
     def open(self):
@@ -615,29 +618,34 @@ def evaluate_org_policies(best_practices, current_policies):
     return evaluated
 
 
-def build_org_policy_summary(org_policy_data):
-    """Builds the Organization Policies item from ``(best_practices, current_policies)``."""
+def build_org_policy_summary(org_policy_data, exceptions=None):
+    """Builds the Organization Policies item from ``(best_practices, current_policies)``; ``exceptions`` (v19.3) maps a constraint to the text of
+    its *Below* column (``exceptions_by_constraint`` over the scan's Security & Identity findings)."""
     best_practices_by_category, current_policies = org_policy_data
+    exceptions = exceptions or {}
     categories = []
-    compliant_policy_count, total_policies = 0, 0
+    compliant_policy_count, total_policies, with_exceptions = 0, 0, 0
     for category, results in evaluate_org_policies(best_practices_by_category, current_policies):
         rows = []
         for result in results:
             total_policies += 1
             if result.status == "Compliant": compliant_policy_count += 1
+            below = exceptions.get(result.policy_id, "")
+            if below: with_exceptions += 1
             rows.append(OrgPolicyRow(
                 display_name=f"{result.display_name}",
                 expected_value=f"{result.expected_value}",
                 current_value=result.current_value,
                 status=result.status,
                 status_class=result.status.lower().replace(' ', '-'),
+                below=below,
             ))
         categories.append(OrgPolicyCategory(name=f"{category}", rows=tuple(rows)))
     # Determine status class for the LI item
     status_class = "compliant" if compliant_policy_count == total_policies else "action-required"
     icon = ICON_CHECK if status_class == "compliant" else ICON_CROSS
     source = describe_policy_table(best_practices_by_category.get(POLICY_TABLE_META)) if isinstance(best_practices_by_category, dict) else ""
-    return OrgPolicySummary(tuple(categories), compliant_policy_count, total_policies, status_class, icon, source=source)
+    return OrgPolicySummary(tuple(categories), compliant_policy_count, total_policies, status_class, icon, source=source, exceptions=with_exceptions)
 
 
 def build_report_context(scope, scope_id, job_id, all_results, banner=None, coverage=None, total_projects=None, previous=None,
@@ -683,7 +691,7 @@ def build_report_context(scope, scope_id, job_id, all_results, banner=None, cove
     # --- CALCULATE SCORES AND DATA FOR ALL SECTIONS ---
     org_policy_summary = None
     if all_results.get(ORG_POLICIES_KEY):
-        org_policy_summary = build_org_policy_summary(all_results[ORG_POLICIES_KEY])
+        org_policy_summary = build_org_policy_summary(all_results[ORG_POLICIES_KEY], exceptions_by_constraint(all_results.get("Security & Identity", [])))
 
     # Each category's tally (app.reporting.scoring): verdicts in, Errors next to the score, Organization
     # Policies one check with partial credit.

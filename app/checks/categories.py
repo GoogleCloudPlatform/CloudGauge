@@ -56,7 +56,7 @@ CATEGORY_MAP = {
     "Cloud Storage Versioning": "Reliability & Resilience", "GKE Hygiene": "Reliability & Resilience",
     "Essential Contacts": "Reliability & Resilience",
     "Cloud SQL High Availability": "Reliability & Resilience", "Cloud SQL Automated Backups": "Reliability & Resilience",
-    "Cloud SQL Backup Retention": "Reliability & Resilience", "Cloud SQL PITR": "Reliability & Resilience",
+    "Cloud SQL Backup Retention": "Reliability & Resilience", "Cloud SQL PITR": "Reliability & Resilience", "Cloud SQL Deletion Protection": "Reliability & Resilience",  # v19.3
     "MIG Resilience (Zonal)": "Reliability & Resilience", "Disk Snapshot Resilience": "Reliability & Resilience",
     "GKE Cluster Resilience": "Reliability & Resilience", "Incident Exposure": "Reliability & Resilience",  # v17.3
     # v17: Cloud SQL versions in extended support; the capacity briefing and its two scored companions.
@@ -105,6 +105,7 @@ CATEGORY_MAP = {
     # v19.1: footprint and detection
     "Platform Footprint": "Operational Excellence & Observability", "GKE Control Plane Activity": "Security & Identity", "Service Account Activity Signals": "Security & Identity",
     "Support Cases": "Operational Excellence & Observability", "Case Hygiene": "Operational Excellence & Observability",  # v19.2: one search, two records
+    "Organization Policy Exceptions": "Security & Identity", "Bucket Logging": "Operational Excellence & Observability",  # v19.3
 
     # B2: error results. These names are only written when a check fails; the
     # legacy map left them out, so failures silently disappeared from the report.

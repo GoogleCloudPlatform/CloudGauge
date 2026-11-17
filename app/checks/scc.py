@@ -71,6 +71,7 @@ SERVICE_FLAGS = {SHA_SERVICE: "security-health-analytics", "EVENT_THREAT_DETECTI
                  "VM_THREAT_DETECTION": "vm-threat-detection", "CLOUD_RUN_THREAT_DETECTION": "cloud-run-threat-detection", "WEB_SECURITY_SCANNER": "web-security-scanner"}
 # The CloudGauge record that judges the same fact as an SCC category — where both looked, the rows should agree; "—" is a gap of this report.
 COVERAGE_MAP = {
+    "CLUSTER_SECRETS_ENCRYPTION_DISABLED": "GKE Node Hardening", "BUCKET_LOGGING_DISABLED": "Bucket Logging",  # v19.3: the first was a mapping gap, the second a new record
     "SQL_PUBLIC_IP": "Cloud SQL Security", "SSL_NOT_ENFORCED": "Cloud SQL Security", "SQL_NO_ROOT_PASSWORD": "Cloud SQL Security", "SQL_WEAK_ROOT_PASSWORD": "Cloud SQL Security",
     "AUTO_BACKUP_DISABLED": "Cloud SQL Automated Backups", "SQL_INSTANCE_NOT_MONITORED": "Monitoring Alert Coverage",
     "PRIMITIVE_ROLES_USED": "Primitive Roles (Owner or Editor)", "ADMIN_SERVICE_ACCOUNT": "Service Account Privileges", "KMS_ROLE_SEPARATION": "KMS Keys",
@@ -219,6 +220,15 @@ def finding_status(fact):
     return SEVERITY_STATUS.get(fact["severity"], INFORMATIONAL)
 
 
+DETECTION_SOURCES = ("Threat Detection", "Sensitive Actions Service", "Anomaly Detection")  # SCC's built-in detectors: Event/Container/VM/Cloud Run Threat Detection, the Sensitive Actions Service, Anomaly Detection
+
+
+def detected(cls, source):
+    """A finding a *detector* raised — the THREAT class, or any class from one of SCC's detection sources (the Sensitive Actions Service files
+    "Impact: GPU Instance Created" under OBSERVATION) — is Security Command Center's own domain, not a gap of this report."""
+    return cls == "THREAT" or str(source or "").endswith(DETECTION_SOURCES)
+
+
 def finding_rows(facts, org_id=""):
     """One row per class × category × severity, the worst severity first, then the most numerous."""
     groups = {}
@@ -241,7 +251,8 @@ def finding_rows(facts, org_id=""):
         fix = (first_sentence(sample["recommendation"]) + "  " if sample["recommendation"] else "") + listing
         issue = first_sentence(sample["explanation"]) or f"{SERVICE_NAMES.get(cls, cls.replace('_', ' ').title())} finding."
         rows.append({"Severity": severity.replace("_", " ").title() if severity != "SEVERITY_UNSPECIFIED" else "Unspecified", "Class": cls.replace("_", " ").title(),
-                     "Category": category, "Count": len(members), "Resources": shown, "Latest": latest[:10], "CloudGauge check": COVERAGE_MAP.get(category, "—"),
+                     "Category": category, "Count": len(members), "Resources": shown, "Latest": latest[:10],
+                     "CloudGauge check": COVERAGE_MAP.get(category, "SCC (threat detection)" if detected(cls, sample["source"]) else "—"),  # v19.3: a detected event is SCC's own domain, not a gap of this report
                      "Issue": issue, "Detail": f"{len(members)} active finding{'s' if len(members) != 1 else ''} from {sample['source'] or 'Security Command Center'}"
                                                f"{'; ' + str(len(names)) + ' resources' if len(names) > 1 else ''}; newest {latest[:10] or '?'}.",
                      "Fix": fix, "_status": finding_status(sample)})

@@ -35,7 +35,7 @@ from app.config import SCOPES
 from app.checks.not_checked import NotChecked, is_api_disabled, is_request_error
 from app.services import gcp
 from app.services.org_policies import fetch_best_practices, get_effective_org_policies
-from app.utils import call_api_with_backoff
+from app.utils import call_api_with_backoff, days_between, parse_timestamp, utcnow
 
 
 ACTION_REQUIRED, INVESTIGATION, INFORMATIONAL, COMPLIANT = "Action Required", "Investigation Recommended", "Informational", "Compliant"
@@ -536,19 +536,27 @@ def check_public_buckets(scope_id, all_projects, job_id, *, sink):
             return False
 
     def check_project(p):
-        project_id, public = p['projectId'], []  # (bucket name, bindings, PAP setting) of the buckets with a public binding
+        project_id, public, unprevented = p['projectId'], [], []  # (bucket name, bindings, PAP setting) of the buckets with a public binding; the buckets without PAP (v19.3)
         try:
             storage_client_local = gcp.project_storage_client(project_id)
             for bucket in storage_client_local.list_buckets():
                 policy = bucket.get_iam_policy(requested_policy_version=3)
+                pap = public_access_prevention(bucket)
                 if public_bucket_rows(project_id, bucket.name, policy.bindings, ""):
-                    public.append((bucket.name, policy.bindings, public_access_prevention(bucket)))
+                    public.append((bucket.name, policy.bindings, pap))
+                elif pap != "enforced":
+                    unprevented.append(bucket.name)
         except Exception as e:
             skipped.add(project_id, e)  # API disabled or permissions lacking: reported, not silently dropped
             return []
-        # The organization policy matters only for a public bucket that does not enforce PAP itself: one read per project.
-        org_enforced = any(pap != "enforced" for _, _, pap in public) and org_policy_enforced(project_id)
-        return [row for name, bindings, pap in public for row in public_bucket_rows(project_id, name, bindings, pap, org_enforced)]
+        # The organization policy matters for a public bucket that does not enforce PAP itself, and for the count of buckets relying on IAM alone: one read per project.
+        org_enforced = (any(pap != "enforced" for _, _, pap in public) or bool(unprevented)) and org_policy_enforced(project_id)
+        rows = [row for name, bindings, pap in public for row in public_bucket_rows(project_id, name, bindings, pap, org_enforced)]
+        if unprevented and not org_enforced:  # v19.3: not public today, and nothing stops a public grant tomorrow — one Informational line per project
+            rows.append({"Project": project_id, "Bucket": f"{len(unprevented)} bucket{'s' if len(unprevented) != 1 else ''} rely on IAM alone", "Principal": "—", "Role": "—",
+                         "Public access prevention": "not enforced (bucket or organization policy)",
+                         "Fix": f"gcloud storage buckets update gs://{sorted(unprevented)[0]} --public-access-prevention  # per bucket; or enforce {PAP_CONSTRAINT} at the organization or folder", "_status": INFORMATIONAL})
+        return rows
 
     all_findings = []
     for project in all_projects:
@@ -776,7 +784,14 @@ def check_open_firewall_rules(scope, scope_id, all_projects, job_id, *, sink, po
 # Cloud SQL Security (v18): TLS by ``sslMode`` (the field that replaced ``requireSsl``), the authorized networks, the public IP.
 SQL_CHECK = "Cloud SQL Security"
 SQL_TLS_OPEN = "ALLOW_UNENCRYPTED_AND_ENCRYPTED"
-SQL_ALL_CLEAR = "Every Cloud SQL instance enforces TLS, has no public IP, and authorizes no internet range."
+SQL_ALL_CLEAR = "Every Cloud SQL instance enforces TLS, has no public IP, authorizes no internet range, has a password policy, and a server CA with more than 90 days left."
+SQL_CA_WARN_DAYS, SQL_CA_URGENT_DAYS = 90, 30  # v19.3: the server CA's expiry — Investigation under 90 days, Action Required under 30
+
+
+def days_until(timestamp):
+    """Whole days from now to an RFC 3339 timestamp; ``None`` when absent or unreadable."""
+    parsed = parse_timestamp(timestamp)
+    return days_between(utcnow(), parsed) if parsed else None
 
 
 def cloud_sql_rows(project_id, instance):
@@ -807,6 +822,15 @@ def cloud_sql_rows(project_id, instance):
     elif ip.get("ipv4Enabled"):
         rows.append({"Issue": "Public IP enabled.", "Fix": f"{patch} --no-assign-ip  # after private IP (--network=projects/{project_id}/global/networks/<vpc>) or Private Service Connect is set up",
                      "_status": INVESTIGATION})
+    # v19.3: the instance-level password policy (CIS 6.x) and the server CA's expiry.
+    if not replica and not (settings.get("passwordValidationPolicy") or {}).get("enablePasswordPolicy", False):
+        rows.append({"Issue": "No password policy: any password is accepted for database users.",
+                     "Fix": f"{patch} --enable-password-policy --password-policy-min-length=12 --password-policy-complexity=COMPLEXITY_DEFAULT --password-policy-reuse-interval=5", "_status": INVESTIGATION})
+    ca_days = days_until(instance.get("serverCaCert", {}).get("expirationTime"))
+    if ca_days is not None and ca_days <= SQL_CA_WARN_DAYS:
+        rows.append({"Issue": f"Server CA certificate expires in {ca_days} day{'s' if ca_days != 1 else ''}." if ca_days >= 0 else f"Server CA certificate expired {-ca_days} days ago.",
+                     "Fix": f"gcloud sql ssl server-ca-certs create --instance={name} --project={project_id} && gcloud sql ssl server-ca-certs rotate --instance={name} --project={project_id}  # after the clients trust the new CA",
+                     "_status": ACTION_REQUIRED if ca_days <= SQL_CA_URGENT_DAYS else INVESTIGATION})
     if replica:
         for row in rows:
             row["Fix"] += "  # a replica's settings follow its primary"

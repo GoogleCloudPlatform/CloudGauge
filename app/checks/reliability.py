@@ -322,7 +322,8 @@ def check_gke_hygiene(scope_id, all_projects, job_id, *, sink):
 
 # Resilience of Critical Assets: the check names its three Asset Inventory listings write under, in report order.
 # Each name is a key of CATEGORY_MAP and ends every scan with a verdict (or an Error row when its listing failed).
-SQL_RESILIENCE_CHECKS = ("Cloud SQL High Availability", "Cloud SQL Automated Backups", "Cloud SQL Backup Retention", "Cloud SQL PITR")
+SQL_RESILIENCE_CHECKS = ("Cloud SQL High Availability", "Cloud SQL Automated Backups", "Cloud SQL Backup Retention", "Cloud SQL PITR",
+                         "Cloud SQL Deletion Protection")  # v19.3: deletion protection off (Investigation) and no maintenance window (Informational), from the same listing
 MIG_RESILIENCE_CHECK = "MIG Resilience (Zonal)"
 SNAPSHOT_RESILIENCE_CHECK = "Disk Snapshot Resilience"
 RESILIENCE_CHECKS = SQL_RESILIENCE_CHECKS + (MIG_RESILIENCE_CHECK, SNAPSHOT_RESILIENCE_CHECK)
@@ -335,6 +336,7 @@ RESILIENCE_NOTHING_FOUND = {
     "Cloud SQL Automated Backups": "No Cloud SQL instances without automated backups found.",
     "Cloud SQL Backup Retention": f"No Cloud SQL instances retaining fewer than {MIN_RETAINED_BACKUPS} backups found.",
     "Cloud SQL PITR": "No Cloud SQL instances with backups but without point-in-time recovery found.",
+    "Cloud SQL Deletion Protection": "Every Cloud SQL instance has deletion protection on and a maintenance window set.",
     "MIG Resilience (Zonal)": "No zonal managed instance groups found.",
     "Disk Snapshot Resilience": "No single-region disk snapshots found.",
 }
@@ -387,9 +389,11 @@ def check_resilience_assets(scope, scope_id, job_id, *, sink):
     parent = f"{scope}s/{scope_id}"
 
     def write(check, rows):
-        """Action Required with ``rows``, or the check's all-clear row when there are none."""
+        """Action Required with ``rows`` (or the worst of the rows' own ``_status``, v19.3), or the check's all-clear row when there are none."""
         if rows:
-            result = {"Check": check, "Finding": rows, "Status": "Action Required"}
+            statuses = [row.pop("_status", "Action Required") for row in rows]
+            order = {"Action Required": 0, "Investigation Recommended": 1, "Informational": 2}
+            result = {"Check": check, "Finding": rows, "Status": min(statuses, key=lambda s: order.get(s, 0))}
         else:
             result = {"Check": check, "Finding": [{"Status": RESILIENCE_NOTHING_FOUND[check]}], "Status": "Compliant"}
         sink.write_finding(job_id, check.replace(" ", "_"), result)
@@ -411,9 +415,18 @@ def check_resilience_assets(scope, scope_id, job_id, *, sink):
 
     # Cloud SQL: one listing, four verdicts.
     try:
-        non_ha, no_backup, bad_retention, no_pitr = [], [], [], []
+        non_ha, no_backup, bad_retention, no_pitr, unprotected = [], [], [], [], []
         for asset in list_assets(asset_client, "sqladmin.googleapis.com/Instance"):
             s, name, proj = asset.resource.data.get("settings", {}), asset.resource.data.get('name'), project_of_asset(asset.name)
+            if asset.resource.data.get("instanceType") != "READ_REPLICA_INSTANCE":  # v19.3: a replica follows its primary
+                patch_line = f"gcloud sql instances patch {name} --project={proj}"
+                if not s.get("deletionProtectionEnabled", False):
+                    unprotected.append({"Project": proj, "Instance": name, "Issue": "Deletion protection off.", "Detail": "One `gcloud sql instances delete` — or a Terraform destroy — removes the instance and its backups.",
+                                        "Fix": f"{patch_line} --deletion-protection", "_status": "Investigation Recommended"})
+                window = s.get("maintenanceWindow") or {}
+                if not window.get("day") and not window.get("hour"):
+                    unprotected.append({"Project": proj, "Instance": name, "Issue": "No maintenance window.", "Detail": "Google picks the hour of a disruptive maintenance; a window puts it where the traffic is not.",
+                                        "Fix": f"{patch_line} --maintenance-window-day=SUN --maintenance-window-hour=2", "_status": "Informational"})
             if s.get("availabilityType") == "ZONAL":
                 # The region (v17.3): what Incident Exposure meets a Cloud SQL incident's locations with.
                 non_ha.append({"Project": proj, "Instance": name, "Region": asset.resource.data.get("region") or ""})
@@ -427,7 +440,7 @@ def check_resilience_assets(scope, scope_id, job_id, *, sink):
     except Exception as e:
         write_errors(SQL_RESILIENCE_CHECKS, e)
     else:
-        for check, rows in zip(SQL_RESILIENCE_CHECKS, (non_ha, no_backup, bad_retention, no_pitr)):
+        for check, rows in zip(SQL_RESILIENCE_CHECKS, (non_ha, no_backup, bad_retention, no_pitr, unprotected)):
             write(check, rows)
 
     # Managed instance groups: a zonal MIG lives in one zone (GKE's node-pool MIGs are the cluster's concern).

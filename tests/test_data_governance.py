@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 
 from app.checks import data_governance as dg
+from app.checks.gke_operations import INFORMATIONAL as INFO
 from app.checks.not_checked import NOT_CHECKED
 from app.reporting.changes import RESHAPED_CHECKS
 
@@ -116,22 +117,23 @@ def test_engine_and_flag_values_are_read_from_the_instance():
 def test_the_flag_packs_read_an_unset_flag_as_its_engine_default():
     """Bare instances: what the engine defaults fail. PostgreSQL's defaults already satisfy four of the eight CIS items."""
     assert [(f, c, v) for f, c, _, v, _ in dg.flag_findings('POSTGRES', {})] == [
-        ('log_connections', 'off (default)', IR), ('log_disconnections', 'off (default)', IR), ('log_statement', 'none (default)', IR), ('cloudsql.enable_pgaudit', 'off (default)', IR)]
-    assert [(f, c, v) for f, c, _, v, _ in dg.flag_findings('MYSQL', {})] == [('local_infile', 'on (default)', AR), ('skip_show_database', 'off (default)', IR)]
+        ('log_connections', 'off (default)', IR), ('log_disconnections', 'off (default)', IR), ('log_statement', 'none (default)', IR), ('cloudsql.enable_pgaudit', 'off (default)', IR),
+        ('cloudsql.iam_authentication', 'off (default)', INFO)]  # v19.3: Google's recommendation, a note
+    assert [(f, c, v) for f, c, _, v, _ in dg.flag_findings('MYSQL', {})] == [('local_infile', 'on (default)', AR), ('skip_show_database', 'off (default)', IR), ('cloudsql_iam_authentication', 'off (default)', INFO)]
     assert [(f, c, v) for f, c, _, v, _ in dg.flag_findings('SQLSERVER', {})] == [('remote access', 'on (default)', AR), ('3625', 'off (default)', IR)]
     assert dg.flag_findings('', {}) == []  # an engine without a pack
 
 
 def test_the_ordered_postgres_scales_and_the_other_pack_entries():
-    full = {'log_connections': 'on', 'log_disconnections': 'on', 'log_statement': 'ddl', 'cloudsql.enable_pgaudit': 'on'}
+    full = {'log_connections': 'on', 'log_disconnections': 'on', 'log_statement': 'ddl', 'cloudsql.enable_pgaudit': 'on', 'cloudsql.iam_authentication': 'on'}
     assert dg.flag_findings('POSTGRES', full) == []
     assert [(f, c) for f, c, *_ in dg.flag_findings('POSTGRES', {**full, 'log_min_messages': 'error', 'log_min_error_statement': 'panic', 'log_statement': 'all'})] == []
     assert [(f, c) for f, c, *_ in dg.flag_findings('POSTGRES', {**full, 'log_min_messages': 'debug1', 'log_min_error_statement': 'warning', 'log_error_verbosity': 'verbose',
                                                                  'log_min_duration_statement': '0', 'log_statement': 'none'})] == [
         ('log_error_verbosity', 'verbose'), ('log_min_messages', 'debug1'), ('log_min_error_statement', 'warning'), ('log_min_duration_statement', '0'), ('log_statement', 'none')]
     assert [(f, c) for f, c, *_ in dg.flag_findings('POSTGRES', {**full, 'log_min_messages': 'bogus'})] == [('log_min_messages', 'bogus')]  # an unknown level is not "stricter"
-    assert dg.flag_findings('MYSQL', {'local_infile': 'off', 'skip_show_database': 'on'}) == []
-    assert [(f, c, v) for f, c, _, v, _ in dg.flag_findings('MYSQL', {'local_infile': 'ON'})] == [('local_infile', 'ON', AR), ('skip_show_database', 'off (default)', IR)]
+    assert dg.flag_findings('MYSQL', {'local_infile': 'off', 'skip_show_database': 'on', 'cloudsql_iam_authentication': 'on'}) == []
+    assert [(f, c, v) for f, c, _, v, _ in dg.flag_findings('MYSQL', {'local_infile': 'ON'})] == [('local_infile', 'ON', AR), ('skip_show_database', 'off (default)', IR), ('cloudsql_iam_authentication', 'off (default)', INFO)]
     sqlserver = {'remote access': 'off', '3625': 'on'}
     assert dg.flag_findings('SQLSERVER', sqlserver) == []
     assert [(f, v) for f, _, _, v, _ in dg.flag_findings('SQLSERVER', {**sqlserver, 'external scripts enabled': 'on', 'cross db ownership chaining': 'on', 'user connections': '10',
@@ -146,8 +148,8 @@ def test_sql_flag_rows_skip_replicas_and_keep_the_flags_already_set_in_the_fix()
     rows = dg.sql_flag_rows(facts['instances'])
     assert [(r['Instance'], r['Flag'], r['Current'], r['Expected'], r['_status']) for r in rows] == [
         ('aura-db', 'log_connections', 'off (default)', 'on', IR), ('aura-db', 'log_disconnections', 'off (default)', 'on', IR),
-        ('aura-db', 'log_statement', 'none (default)', 'ddl or stricter', IR), ('aura-db', 'cloudsql.enable_pgaudit', 'off (default)', 'on', IR),
-        ('orders-db', 'skip_show_database', 'off (default)', 'on', IR), ('erp-db', 'user options', '123', 'not set', IR)]
+        ('aura-db', 'log_statement', 'none (default)', 'ddl or stricter', IR), ('aura-db', 'cloudsql.enable_pgaudit', 'off (default)', 'on', IR), ('aura-db', 'cloudsql.iam_authentication', 'off (default)', 'on', INFO),
+        ('orders-db', 'skip_show_database', 'off (default)', 'on', IR), ('orders-db', 'cloudsql_iam_authentication', 'off (default)', 'on', INFO), ('erp-db', 'user options', '123', 'not set', IR)]
     assert rows[0] == {'Project': PROJECT, 'Instance': 'aura-db', 'Engine': 'POSTGRES_15', 'Flag': 'log_connections', 'Current': 'off (default)', 'Expected': 'on',
                        'Issue': 'CIS 6.2.1: log_connections is off (default), expected on.', 'Note': '',
                        'Fix': f'gcloud sql instances patch aura-db --project={PROJECT} --database-flags=log_connections=on  # patch replaces the whole list: the flags already set are included',
@@ -159,8 +161,8 @@ def test_sql_flag_rows_skip_replicas_and_keep_the_flags_already_set_in_the_fix()
     notes = {(r['Instance'], r['Flag']): r['Note'] for r in contested}
     assert notes[('pg-db', 'log_min_duration_statement')].startswith('CIS wants it off') and notes[('ms-db', 'user connections')].startswith('CIS wants 0')
     assert notes[('ms-db', '3625')].startswith('CIS wants the trace flag on') and notes[('pg-db', 'log_connections')] == ''
-    assert rows[4]['Fix'].split('--database-flags=')[1].split('  #')[0] == 'local_infile=off,max_connections=500,skip_show_database=on'  # patch replaces the list
-    assert rows[5]['Fix'].split('--database-flags=')[1].split('  #')[0] == 'remote access=off,3625=on'  # "user options" is removed, not set to ""
+    assert rows[5]['Fix'].split('--database-flags=')[1].split('  #')[0] == 'local_infile=off,max_connections=500,skip_show_database=on'  # patch replaces the list
+    assert rows[7]['Fix'].split('--database-flags=')[1].split('  #')[0] == 'remote access=off,3625=on'  # "user options" is removed, not set to "" (v19.3: two IAM-authentication notes before it)
     assert all(set(r) == set(rows[0]) for r in rows)
 
 
@@ -318,7 +320,7 @@ def test_the_five_checks_end_to_end(gcp, monkeypatch):
     records = sink.by_check()
     assert {name: record['Status'] for name, record in records.items()} == {'BigQuery Governance': AR, 'Cloud SQL Flags': AR, 'AlloyDB Posture': C, 'KMS Keys': C, 'API Keys': IR}
     assert [(r['Resource'], r['Issue']) for r in records['BigQuery Governance']['Finding']] == [('dataset scratch', 'Time travel shortened.'), ('table analytics.events', 'Table open to the public.')]
-    assert [(r['Flag'], r['Current']) for r in records['Cloud SQL Flags']['Finding']] == [('local_infile', 'on (default)'), ('skip_show_database', 'off (default)')]
+    assert [(r['Flag'], r['Current']) for r in records['Cloud SQL Flags']['Finding']] == [('local_infile', 'on (default)'), ('skip_show_database', 'off (default)'), ('cloudsql_iam_authentication', 'off (default)')]
     assert records['AlloyDB Posture']['Finding'] == [{'Status': dg.ALLOYDB_ALL_CLEAR}] and records['KMS Keys']['Finding'] == [{'Status': dg.KMS_ALL_CLEAR}]
     assert [(r['Project'], r['Key'], r['Issue']) for r in records['API Keys']['Finding']] == [(PROJECT, 'legacy', 'No application restriction.')]  # the number resolved to the ID
     assert inventory.resource_searches == [{'scope': 'organizations/987654321', 'asset_types': ['cloudresourcemanager.googleapis.com/Project']}]

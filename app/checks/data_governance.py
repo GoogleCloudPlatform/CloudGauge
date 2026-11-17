@@ -86,6 +86,7 @@ SQL_FLAG_PACKS = {
     "MYSQL": [
         ("local_infile", "on", "off", lambda v: str(v).lower() == "off", ACTION_REQUIRED, "6.1.3"),
         ("skip_show_database", "off", "on", lambda v: str(v).lower() == "on", INVESTIGATION, "6.1.2"),
+        ("cloudsql_iam_authentication", "off", "on", lambda v: str(v).lower() == "on", INFORMATIONAL, "—"),  # v19.3: Google's recommendation, not CIS's requirement
     ],
     "POSTGRES": [
         ("log_connections", "off", "on", lambda v: str(v).lower() == "on", INVESTIGATION, "6.2.1"),
@@ -96,6 +97,7 @@ SQL_FLAG_PACKS = {
         ("log_min_duration_statement", "-1", "-1 (off: statements carry data)", lambda v: str(v) == "-1", INVESTIGATION, "6.2.6"),
         ("log_statement", "none", "ddl or stricter", lambda v: _at_least(PG_STATEMENT_LEVELS, v, "ddl"), INVESTIGATION, "6.2.7"),
         ("cloudsql.enable_pgaudit", "off", "on", lambda v: str(v).lower() == "on", INVESTIGATION, "6.2.8"),
+        ("cloudsql.iam_authentication", "off", "on", lambda v: str(v).lower() == "on", INFORMATIONAL, "—"),  # v19.3: Google's recommendation, not CIS's requirement
     ],
     "SQLSERVER": [
         ("external scripts enabled", "off", "off", lambda v: str(v).lower() == "off", ACTION_REQUIRED, "6.3.1"),
@@ -158,7 +160,7 @@ def sql_flag_rows(facts):
                 wanted.pop("user options", None)
             flag_list = ",".join(f"{k}={v}" for k, v in wanted.items() if v != "") or "<none>"
             rows.append({"Project": fact["project_id"], "Instance": fact["name"], "Engine": str(data.get("databaseVersion") or engine), "Flag": flag,
-                         "Current": current, "Expected": expected, "Issue": f"CIS {cis}: {flag} is {current}, expected {expected}.",
+                         "Current": current, "Expected": expected, "Issue": (f"CIS {cis}: {flag} is {current}, expected {expected}." if cis != "—" else f"{flag} is {current}: IAM database authentication is Google's recommendation (short-lived tokens, no database passwords)."),
                          "Note": CONTESTED_FLAGS.get(flag, ""),
                          "Fix": f"gcloud sql instances patch {fact['name']} --project={fact['project_id']} --database-flags={flag_list}  "
                                 "# patch replaces the whole list: the flags already set are included",
@@ -256,7 +258,12 @@ def alloydb_rows(grouped):
         kind = str(data.get("instanceType") or "PRIMARY").upper()
         if kind == "PRIMARY" and str(data.get("availabilityType") or "").upper() == "ZONAL":
             row(instance, cluster, name, "Zonal primary.", "One zone's incident takes the database down.", f"{base} --availability-type=REGIONAL", INVESTIGATION)
-        if (data.get("networkConfig") or {}).get("enablePublicIp", False):
+        network = data.get("networkConfig") or {}
+        open_ranges = [str(n.get("cidrRange") if isinstance(n, dict) else n) for n in (network.get("authorizedExternalNetworks") or []) if str(n.get("cidrRange") if isinstance(n, dict) else n) in ("0.0.0.0/0", "::/0")]
+        if network.get("enablePublicIp", False) and open_ranges:  # v19.3: the public IP is exposure; the internet-wide authorized network is the hole
+            row(instance, cluster, name, f"Open to the internet: authorized network {', '.join(open_ranges)} on a public IP.", "Any address may try the database port.",
+                f"{base} --authorized-external-networks=<your CIDRs>  # or --no-assign-inbound-public-ip", ACTION_REQUIRED)
+        elif network.get("enablePublicIp", False):
             row(instance, cluster, name, "Public IP enabled.", "The instance answers on the internet; the Auth Proxy or private IP is the pattern.", f"{base} --no-assign-inbound-public-ip", INVESTIGATION)
         ssl_mode = str(((data.get("clientConnectionConfig") or {}).get("sslConfig") or {}).get("sslMode") or "ENCRYPTED_ONLY").upper()
         if ssl_mode != "ENCRYPTED_ONLY":

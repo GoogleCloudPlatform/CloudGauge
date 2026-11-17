@@ -128,12 +128,13 @@ def test_finding_facts_and_rows_group_rank_and_map():
         ('Low', 'Misconfiguration', 'BUCKET_LOGGING_DISABLED', 5, 'Informational'), ('Low', 'Observation', 'Impact: GPU Instance Created', 1, 'Informational'),
         ('Low', 'Threat', 'Persistence: New API Method', 1, 'Informational')]
     buckets = rows[5]
-    assert (buckets['Resources'], buckets['Latest'], buckets['CloudGauge check']) == ('b1, b2, b3 +1', '2026-11-14', '—')
+    assert (buckets['Resources'], buckets['Latest'], buckets['CloudGauge check']) == ('b1, b2, b3 +1', '2026-11-14', 'Bucket Logging')  # v19.3: no longer a gap
     assert buckets['Detail'] == '5 active findings from Security Health Analytics; 4 resources; newest 2026-11-14.'
     assert rows[4]['CloudGauge check'] == 'Cloud SQL Security' and rows[4]['Issue'] == 'The instance has a public IP.'
     assert rows[4]['Fix'] == f"Go to the console and fix it.  gcloud scc findings list --organization={ORG} --location=global --filter='category=\"SQL_PUBLIC_IP\" AND state=\"ACTIVE\"'"
     assert rows[0]['Issue'] == 'Vulnerability finding.' and rows[0]['Fix'].startswith('gcloud scc findings list --organization=')
-    assert rows[3]['CloudGauge check'] == 'VM Hardening' and rows[2]['CloudGauge check'] == 'Cloud SQL Security' and rows[7]['CloudGauge check'] == '—'
+    assert rows[3]['CloudGauge check'] == 'VM Hardening' and rows[2]['CloudGauge check'] == 'Cloud SQL Security' and rows[7]['CloudGauge check'] == 'SCC (threat detection)'  # v19.3: a threat is SCC's own
+    assert rows[6]['CloudGauge check'] == '—'  # an observation filed by Security Health Analytics (the fixture's default source): a gap; a detector's observation would read SCC's own
     assert finding_rows([], ORG) == [] and finding_rows(facts, '')[0]['Fix'].startswith('gcloud scc findings list --project=<project>')
     many = [finding_facts(result(f'CAT_{i}', 'LOW')) for i in range(scc.CATEGORY_CAP + 5)]
     assert len(finding_rows(many)) == scc.CATEGORY_CAP

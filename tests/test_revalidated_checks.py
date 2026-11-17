@@ -355,8 +355,9 @@ def test_public_buckets_check_reads_the_organization_policy_once_per_project_wit
     assert [(r['Bucket'], r['Public access prevention']) for r in record['Finding']] == [
         ('assets', 'enforced (organization policy)'), ('assets', 'enforced (organization policy)'),
         ('locked', 'enforced (bucket)'), ('locked', 'enforced (bucket)'),
-        ('lake-public', 'not enforced'), ('lake-public', 'not enforced')]
-    assert reads == [('projects/web-prod', security.PAP_CONSTRAINT), ('projects/data-lake', security.PAP_CONSTRAINT)]  # not for clean, not twice
+        ('lake-public', 'not enforced'), ('lake-public', 'not enforced'),
+        ('1 bucket rely on IAM alone', 'not enforced (bucket or organization policy)')]  # v19.3: clean's private bucket, the Informational count line (web-prod's is covered by its organization policy)
+    assert reads == [('projects/web-prod', security.PAP_CONSTRAINT), ('projects/data-lake', security.PAP_CONSTRAINT), ('projects/clean', security.PAP_CONSTRAINT)]  # v19.3: once per project with a bucket not enforcing PAP, never twice
 
 
 # --- Open Firewall Rules ------------------------------------------------------------------------------------------
@@ -455,7 +456,7 @@ def sql(name, ssl_mode=None, public=False, networks=(), **extra):
     ip = {'ipv4Enabled': public, 'authorizedNetworks': [{'value': n, 'name': n} for n in networks]}
     if ssl_mode:
         ip['sslMode'] = ssl_mode
-    return {'name': name, 'databaseVersion': 'POSTGRES_15', 'instanceType': 'CLOUD_SQL_INSTANCE', 'settings': {'ipConfiguration': ip}, **extra}
+    return {'name': name, 'databaseVersion': 'POSTGRES_15', 'instanceType': 'CLOUD_SQL_INSTANCE', 'settings': {'ipConfiguration': ip, 'passwordValidationPolicy': {'enablePasswordPolicy': True}}, **extra}  # v19.3: a password policy, so these rows stay about TLS and IPs
 
 
 def test_cloud_sql_rows_read_ssl_mode_authorized_networks_and_the_public_ip():
@@ -474,7 +475,7 @@ def test_cloud_sql_rows_read_ssl_mode_authorized_networks_and_the_public_ip():
     assert public[0] | {'Project': 'p', 'Instance': 'public', 'Kind': 'primary', 'Version': 'POSTGRES_15'} == public[0]
     replica = rows('p', sql('replica', 'ALLOW_UNENCRYPTED_AND_ENCRYPTED', instanceType='READ_REPLICA_INSTANCE', masterInstanceName='p:primary'))
     assert replica[0]['Kind'] == 'replica' and replica[0]['Fix'] == 'gcloud sql instances patch primary --project=p --ssl-mode=ENCRYPTED_ONLY  # a replica\'s settings follow its primary'
-    legacy = rows('p', {'name': 'legacy', 'settings': {'ipConfiguration': {'requireSsl': True, 'ipv4Enabled': False}}})
+    legacy = rows('p', {'name': 'legacy', 'settings': {'ipConfiguration': {'requireSsl': True, 'ipv4Enabled': False}, 'passwordValidationPolicy': {'enablePasswordPolicy': True}}})
     assert legacy == []  # no sslMode: requireSsl decides
     assert rows('p', {'name': 'mid-operation'}) == []
 

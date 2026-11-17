@@ -291,6 +291,9 @@ def build_scorecard(context):
     if org_policies is not None and org_policies.compliant < org_policies.total:
         differ = org_policies.total - org_policies.compliant
         org_line = f"{differ} of {org_policies.total} organization policies differ from the recommendation"
+    if org_policies is not None and org_policies.exceptions:  # v19.3: a guardrail held at the scanned resource and weakened below it
+        clause = f"{org_policies.exceptions} ha{'s' if org_policies.exceptions == 1 else 've'} exceptions below the scanned resource"
+        org_line = f"{org_line}; {clause}" if org_line else f"0 of {org_policies.total} organization policies differ from the recommendation, but {clause}"
     could_not_check = []
     for section in context.sections:
         for item in section.checks:
@@ -323,7 +326,7 @@ def action_plan_csv(card):
         writer.writerow([action.rank, action.check_name, action.category, action.status,
                          "" if action.projects is None else action.projects, action.findings,
                          FIX_IN_REPORT if action.fix_in_report else "", "", ""])
-    if card.org_line:
+    if card.org_line and not card.org_line.startswith("0 of "):  # the exceptions-only line is the Organization Policy Exceptions action's, already above
         differ = card.org_line.split(" of ")[0]
         writer.writerow(["", ORG_POLICIES_CHECK, STOPLIGHT_OF["Security & Identity"], "Action Required", "", differ, "", "", ""])
     return out.getvalue()
