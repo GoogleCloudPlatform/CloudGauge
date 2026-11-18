@@ -399,6 +399,7 @@ tools/deploy.sh          # Deploys or updates the two services (worker, web behi
 tools/iap_token.py       # A token that passes IAP, for curl, scripts and demo_gif.py (service-account signed JWT)
 tools/backfill_export.py # Loads the scans made before the BigQuery export existed, from their summaries and CSVs (v17)
 terraform/               # The same deployment declared in Terraform (v17.2): the two services, IAP, the account and its roles, the bucket, the queue, the export, the schedules; see Method 3
+VERSION                  # The release number — the one place it is written; app/config.py reads it, the image copies it (v20)
 Dockerfile               # Production image
 Dockerfile.test          # Runs the test suite inside the production image
 cloudbuild.yaml          # Cloud Build: build -> test -> push
@@ -1053,7 +1054,7 @@ DOCKER_BUILDKIT=1 docker build -f Dockerfile.test --build-arg APP_IMAGE=cloudgau
 docker run --rm cloudgauge-test
 ```
 
-**Cut a release.** Bump `VERSION` in `app/config.py` and add the release's `## vX — …` entry at the top of `RELEASE_NOTES.md`; `tests/test_packaging.py` checks that the two agree, because the report's footer shows that version and every scan summary records it (it is how a scan tells a check new to the release from one that had nothing to check). Nothing at runtime reads the release notes — the app image leaves out every `.md` file — and a checkout without them skips that check rather than failing.
+**Cut a release.** The release number is written in one file, `VERSION` at the repository root (v20): `app/config.py` reads it and the image copies it. Bump it, bump the same number in `terraform/versions.tf`'s `module_name` (a `provider_meta` block takes constants only, so it cannot read the file), and add the release's `## vX — …` entry at the top of `RELEASE_NOTES.md`; `tests/test_packaging.py` and `tests/test_terraform.py` check that the three agree, because the report's footer shows that version and every scan summary records it (it is how a scan tells a check new to the release from one that had nothing to check). Nothing at runtime reads the release notes — the app image leaves out every `.md` file — and a checkout without them skips that check rather than failing.
 
 `tests/legacy/` holds a frozen copy of the original single-file `cloudgauge.py`. The parity tests use it to check that the refactored routes, worker, and reports behave like the original.
 

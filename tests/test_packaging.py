@@ -201,7 +201,7 @@ def test_dockerfile_command():
     assert dockerfile_lines('ENTRYPOINT') == []  # `docker run IMAGE <command>` and Dockerfile.test can replace it
     dockerfile = (ROOT / 'Dockerfile').read_text()
     assert 'PORT=8080' in dockerfile  # the default for `docker run` without -e PORT (Cloud Run always sets it)
-    assert 'COPY app ./app' in dockerfile and 'COPY cloudgauge.py .' in dockerfile
+    assert 'COPY app ./app' in dockerfile and 'COPY cloudgauge.py .' in dockerfile and 'COPY VERSION .' in dockerfile  # v20
     assert 'COPY . .' not in dockerfile  # tests, run.py, and dev files stay out of the image
     assert '\nUSER cloudgauge\n' in dockerfile
 
@@ -283,7 +283,7 @@ def test_build_contexts():
     """The app image's context leaves out VCS, caches, venvs, tests and tools; the test image's keeps tests/ and tools/."""
     app_context = ignore_patterns('.dockerignore')
     assert {'.git/', '.venv/', '**/__pycache__/', 'tests/', 'tools/', 'run.py'} <= app_context
-    for needed in ('app/', 'app', 'cloudgauge.py', 'requirements.txt', 'Dockerfile'):
+    for needed in ('app/', 'app', 'cloudgauge.py', 'requirements.txt', 'Dockerfile', 'VERSION'):
         assert needed not in app_context
     test_context = ignore_patterns('Dockerfile.test.dockerignore')
     assert {'.git/', '.venv/', '**/__pycache__/'} <= test_context
@@ -312,9 +312,11 @@ def test_the_release_is_the_newest_entry_of_the_release_notes():
     """``app.config.VERSION`` is what the report's footer shows and what every scan summary records, so that the next
     scan can tell a check new to the release from one that had nothing to check (app.reporting.changes): it must be
     bumped with each release, and the release notes are where a release is declared (``## v15.5 — …``, newest first).
+    Since v20 the number is read from the ``VERSION`` file at the repository root — the one place it is written.
     Nothing at runtime reads the notes, so a checkout without them (a fork that keeps only the code) loses nothing
     but this guard: the test skips rather than fails."""
-    from app.config import VERSION
+    from app.config import VERSION, VERSION_FILE
+    assert VERSION_FILE == ROOT / 'VERSION' and VERSION_FILE.read_text(encoding='utf-8') == f'{VERSION}\n'  # one line, newline-terminated
     notes = ROOT / 'RELEASE_NOTES.md'
     if not notes.exists():
         pytest.skip('RELEASE_NOTES.md is not in this checkout; the release guard needs it (the app does not)')

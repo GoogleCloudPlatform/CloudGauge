@@ -245,7 +245,9 @@ def test_the_provider_module_name_is_the_release(tf):
     """v18.8.1: the Google provider appends ``provider_meta``'s module name to its user agent — the deploy-time counterpart of the
     services' client identifier; its release is app.config.VERSION, bumped with it."""
     from app.config import VERSION
-    match = re.search(r'provider_meta "google" \{\s*module_name = "([^"]+)"\s*\}', tf['versions.tf'])
+    # v20: the number is written here as well as in the VERSION file (a provider_meta block takes constants only, so it
+    # cannot read the file); the x-release-please-version annotation is what lets release-please bump the two together.
+    match = re.search(r'provider_meta "google" \{\s*module_name = "([^"]+)" # x-release-please-version\s*\}', tf['versions.tf'])
     assert match and match.group(1) == f'cloud-solutions/cloudgauge-deploy-v{VERSION}'
     assert re.fullmatch(r'[0-9A-Za-z._\-/]+', match.group(1))  # a product token: no space
 

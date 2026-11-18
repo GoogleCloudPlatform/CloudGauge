@@ -19,14 +19,18 @@ touches the network or creates clients.
 """
 import logging
 import os
+import pathlib
 import re
 from dataclasses import dataclass
 
 # --- Environment Variables & Constants ---
-# The release, as the image tag names it ("15.6" for v15.6; tests/test_packaging.py pins it to the newest entry
-# of RELEASE_NOTES.md). The report's footer shows it, and every scan summary records it so the next scan can tell
-# a check that is new to the release from one that merely had nothing to check last time (app.reporting.changes).
-VERSION = "19.3"
+# The release, as the image tag names it ("15.6" for v15.6), read from the VERSION file at the repository root — the one
+# place a release is written (v20; the image copies the file next to the package, terraform/versions.tf carries the same
+# number and tests/test_packaging.py pins both to the newest entry of RELEASE_NOTES.md). The report's footer shows it,
+# and every scan summary records it so the next scan can tell a check that is new to the release from one that merely
+# had nothing to check last time (app.reporting.changes).
+VERSION_FILE = pathlib.Path(__file__).resolve().parent.parent / "VERSION"
+VERSION = VERSION_FILE.read_text(encoding="utf-8").strip()
 # The policy table of the Organization Policies check (v18.1): by default the one shipped with the release
 # (assets/gcp_best_practices.csv, copied into the image), so a scan never depends on GitHub and the rules move only
 # with a release. BEST_PRACTICES_CSV_URL set to a gs:// object (read as the service account) or an https:// URL
