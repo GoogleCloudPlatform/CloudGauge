@@ -33,6 +33,7 @@ body { display: flex; min-height: 100vh; }
 /* Header: the title, a monospace definition list, and the CSV button. */
 .report-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 20px; }
 .report-header h1 { margin-bottom: 10px; }
+.header-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; flex-shrink: 0; }
 .report-meta { display: grid; grid-template-columns: max-content 1fr; gap: 3px 14px; margin: 0; font-family: var(--font-mono); font-size: 12px; color: var(--muted); }
 .report-meta dd { margin: 0; overflow-wrap: anywhere; }
 .report-meta .coverage .dot { width: 7px; height: 7px; margin-right: 8px; vertical-align: 1px; }
@@ -291,7 +292,16 @@ tr.row-new > td:first-child::before, .line-new::before { content: "New"; display
     body { display: block; background: white; }
     .sidebar, .report-toolbar, .btn, .table-controls, .section-footer button, .clamp-toggle, .gemini-card { display: none !important; }
     .main-content { margin: 0; padding: 0; max-width: none; }
-    .content-section { display: block !important; page-break-inside: avoid; }
+    /* Print or save as PDF (v20) prints the whole report: the header, then the Scorecard (the script moves it ahead of the
+       Overview for the print), then the Overview and each category on a fresh sheet; every accordion open (the script), its title kept with its
+       first rows; rows stay whole and a table that breaks repeats its header row. */
+    .content-section { display: block !important; break-inside: auto; page-break-inside: auto; }
+    body:not(.print-scorecard) .content-section ~ .content-section { break-before: page; page-break-before: always; }
+    details.check > summary { break-after: avoid; page-break-after: avoid; }
+    .check-content .details { overflow-x: visible; }  /* no scrollbar track on paper; a wide table shows whole */
+    .details-table thead { display: table-header-group; }
+    .details-table tr { break-inside: avoid; page-break-inside: avoid; }
+    .header-actions { display: none !important; }
     .card, .kpi { border: 1px solid var(--hairline); }
     .details-table th::after { content: none !important; }
     .details-table .clamp { display: block; -webkit-line-clamp: unset; }

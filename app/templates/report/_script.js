@@ -101,14 +101,33 @@ document.addEventListener("DOMContentLoaded", function() {
     });
 });
 
+// Printing. Every accordion opens for the print and closes again after it. Print or save as PDF (v20) prints the whole
+// report with the Scorecard first: the section is moved ahead of the Overview for the duration of the print and put back
+// afterwards (the Scorecard's own Print button prints that page alone and leaves the order as it is). The page breaks are
+// in _styles.css.
 let closedForPrint = [];
+let scorecardMoved = null;  // [the section, the element it stood before] while the Scorecard is moved for a print
+function printReport() {
+    window.print();
+}
 window.addEventListener('beforeprint', () => {
     closedForPrint = checkDetails().filter(details => !details.open);
     closedForPrint.forEach(details => { details.open = true; });
+    const scorecard = document.getElementById('scorecard-section');
+    const overview = document.getElementById('overview-section');
+    if (scorecard && overview && !document.body.classList.contains('print-scorecard')) {
+        scorecardMoved = [scorecard, scorecard.nextElementSibling];
+        overview.parentNode.insertBefore(scorecard, overview);
+    }
 });
 window.addEventListener('afterprint', () => {
     closedForPrint.forEach(details => { details.open = false; });
     closedForPrint = [];
+    if (scorecardMoved) {
+        const [scorecard, before] = scorecardMoved;
+        scorecard.parentNode.insertBefore(scorecard, before);
+        scorecardMoved = null;
+    }
 });
 
 // --- Long cells (see app/reporting/layouts.py) ---

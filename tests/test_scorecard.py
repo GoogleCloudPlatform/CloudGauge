@@ -434,3 +434,29 @@ def test_render_report_takes_the_scorecard_from_the_context_it_renders():
     html = render_report(context_)
     assert build_scorecard(context_) == scorecard_vars(context_)['scorecard']
     assert section(html).count('<tr>') - 1 == len(build_scorecard(context_).actions)  # the header row, then one per action
+
+
+def test_the_header_prints_the_whole_report_with_the_scorecard_first():
+    """v20 (plan item A3): Print or save as PDF on the report header prints every page — the header, then the Scorecard
+    (moved ahead of the Overview for the print and put back after it), then the Overview and each category on a fresh
+    sheet, every accordion open with its title kept with its first rows, rows whole, a table's header row repeated when it breaks.
+    The Scorecard's own Print button keeps printing that page alone, in place."""
+    html = generate_html_report(SCOPE, SCOPE_ID, 'job-42', total_projects=4, **samples.FINDINGS)
+    header = html.split('<header class="report-header">')[1].split('</header>')[0]
+    assert re.findall(r'<(?:a|button)[^>]*class="btn btn-outline btn-sm"[^>]*>([^<]+)</(?:a|button)>', header) == ['Download CSV', 'Print or save as PDF']
+    assert '<button type="button" class="btn btn-outline btn-sm" onclick="printReport()">Print or save as PDF</button>' in header
+    styles = html.split('</style>')[0]
+    printed = styles.split('@media print {')[1]
+    assert '.content-section { display: block !important; break-inside: auto; page-break-inside: auto; }' in printed
+    assert 'body:not(.print-scorecard) .content-section ~ .content-section { break-before: page; page-break-before: always; }' in printed
+    assert 'details.check > summary { break-after: avoid; page-break-after: avoid; }' in printed and '.check-content .details { overflow-x: visible; }' in printed
+    assert '.details-table thead { display: table-header-group; }' in printed and '.details-table tr { break-inside: avoid; page-break-inside: avoid; }' in printed
+    assert '.header-actions { display: none !important; }' in printed  # the buttons themselves do not print
+    script = html.split('<script>')[-1]
+    assert 'function printReport() {\n    window.print();\n}' in script
+    before = script.split("window.addEventListener('beforeprint'")[1].split("window.addEventListener('afterprint'")[0]
+    assert "closedForPrint.forEach(details => { details.open = true; });" in before  # every accordion opens
+    assert "!document.body.classList.contains('print-scorecard')" in before  # the Scorecard-alone print leaves the order
+    assert "scorecardMoved = [scorecard, scorecard.nextElementSibling];" in before and "overview.parentNode.insertBefore(scorecard, overview);" in before
+    after = script.split("window.addEventListener('afterprint'")[1].split('\n});')[0]
+    assert "closedForPrint.forEach(details => { details.open = false; });" in after and "scorecard.parentNode.insertBefore(scorecard, before);" in after
