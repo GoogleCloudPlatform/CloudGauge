@@ -323,7 +323,7 @@ def test_the_release_is_the_newest_entry_of_the_release_notes():
     text = notes.read_text()
     headings = re.findall(r'^## v(\S+) — ', text, re.M)
     assert headings[0] == VERSION, f'app.config.VERSION is {VERSION!r}; the newest release note is v{headings[0]}'
-    assert re.fullmatch(r'\d+(\.\d+)*', VERSION)  # as the image tag names it, without the "v"
+    assert re.fullmatch(r'\d+(\.\d+)*(-rc\.\d+)?', VERSION)  # as the tag names it, without the "v"; a release candidate is 20.0.0-rc.1 (v20)
     assert f'`v5` … `v{VERSION}`' in text  # the intro's tag range
 
 
