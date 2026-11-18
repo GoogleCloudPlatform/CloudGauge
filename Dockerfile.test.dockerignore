@@ -1,6 +1,7 @@
 # Build context for the test image (docker build -f Dockerfile.test, BuildKit).
 # Unlike .dockerignore, this keeps tests/ and the files the tests read.
 .git/
+.github/
 .venv/
 venv/
 **/__pycache__/

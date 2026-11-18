@@ -3,8 +3,9 @@
 # upload and out of the layer cache keys.
 # (Dockerfile.test uses Dockerfile.test.dockerignore instead, which keeps tests/.)
 
-# Version control
+# Version control and GitHub (workflows, templates)
 .git/
+.github/
 .gitignore
 
 # Local environments, bytecode, and tool caches

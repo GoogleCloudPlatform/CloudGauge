@@ -402,6 +402,7 @@ terraform/               # The same deployment declared in Terraform (v17.2): th
 Dockerfile               # Production image
 Dockerfile.test          # Runs the test suite inside the production image
 cloudbuild.yaml          # Cloud Build: build -> test -> push
+.github/workflows/ci.yml # GitHub Actions: the suite on Python 3.11 and 3.13, terraform validate, the container build — on every pull request (v20)
 requirements.txt         # Production dependencies (pinned)
 requirements-dev.txt     # Adds pytest and ruff
 ```
@@ -1040,6 +1041,8 @@ pytest tests/test_smoke.py     # quick pre-deploy smoke tests
 # Lint: errors, undefined names, and unused/redefined imports (tests/legacy is a frozen upstream copy)
 ruff check --extend-exclude tests/legacy --select E9,F63,F7,F82,F401,F811 app tests tools cloudgauge.py run.py
 ```
+
+**Continuous integration.** `.github/workflows/ci.yml` runs the same lint and suite on Python 3.11 (the image) and 3.13, `terraform fmt -check` / `init -backend=false` / `validate` on `terraform/`, and the container build below with the suite inside it, on every pull request and every push to `main`. The four jobs — `tests (3.11)`, `tests (3.13)`, `terraform`, `docker` — are the required status checks of `main`.
 
 **Test the container.** This is what the `test` step in `cloudbuild.yaml` runs:
 
