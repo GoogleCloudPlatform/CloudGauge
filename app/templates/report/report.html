@@ -83,7 +83,10 @@
 {% endif %}
                 </dl>
             </div>
-            <a class="btn btn-outline btn-sm" href="{{ csv_href }}">Download CSV</a>
+            <div class="header-actions">
+                <a class="btn btn-outline btn-sm" href="{{ csv_href }}">Download CSV</a>
+                <button type="button" class="btn btn-outline btn-sm" onclick="printReport()">Print or save as PDF</button>
+            </div>
         </header>
 {% if banner %}
         <div role="note" class="notice notice-amber report-banner">{{ banner }}</div>

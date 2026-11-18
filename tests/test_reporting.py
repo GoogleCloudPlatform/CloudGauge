@@ -237,7 +237,8 @@ def test_report_is_self_contained():
     assert '<script src=' not in html and 'rel="stylesheet"' in html  # the Google Fonts link, as before
     handlers = {'showSection', 'setAllChecks', 'getGeminiSuggestions', 'generateAiSummary', 'copySummary', 'copyFix', 'fetchInsights',
                 'renderTablePage',  # renderTablePage is in HTML built by the script; copyFix also in the fix blocks it builds
-                'printScorecard', 'downloadActionPlan', 'copyScorecardMarkdown'}  # the Scorecard's buttons (v15.1)
+                'printScorecard', 'downloadActionPlan', 'copyScorecardMarkdown',  # the Scorecard's buttons (v15.1)
+                'printReport'}  # the header's Print or save as PDF (v20)
     assert set(re.findall(r'onclick="(\w+)\(', html)) == handlers
     paging = {'showMoreRows', 'showAllRows'}  # only emitted under tables longer than one page
     long_table = {SECURITY: [{'Check': 'Public Buckets', 'Status': 'Action Required',

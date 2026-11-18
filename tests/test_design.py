@@ -56,7 +56,7 @@ STATUS_CLASSES = {'Action Required': 'action-required', 'Investigation Recommend
                   'Error': 'error', 'Informational': 'informational'}
 STATUS_HUES = {'action-required': 'rose', 'investigation': 'amber', 'compliant': 'emerald', 'error': 'zinc', 'informational': 'sky'}
 NEEDS_A_HUMAN = {'action-required', 'investigation', 'error'}  # open on load (accordion default B)
-PROPER_NOUNS = {'CloudGauge', 'Gemini', 'AI', 'CSV', 'Markdown'}  # keep their capitals inside a sentence-case heading or label
+PROPER_NOUNS = {'CloudGauge', 'Gemini', 'AI', 'CSV', 'PDF', 'Markdown'}  # keep their capitals inside a sentence-case heading or label
 
 
 AT_RULE_BLOCK = re.compile(r'@(?:media|keyframes)[^{]*\{(?:[^{}]*\{[^{}]*\})*[^{}]*\}', re.S)
@@ -274,7 +274,7 @@ def test_headings_are_sentence_case_and_status_names_keep_theirs(pages):
     assert {'Scan history', 'Scores over time', 'Scans', 'Start a scan'} <= set(ui_copy(pages['history']))
     assert {'CloudGauge report', 'Overview', 'Review scores', 'Suggested fixes', 'Powered by Gemini', 'Draft fixes', 'Download CSV',
             'Expand all', 'Collapse all', 'Copy', 'Scorecard', 'Top actions', 'Executive summary', 'Generate executive summary',
-            'Print', 'Download action plan (CSV)', 'Copy as Markdown'} <= set(ui_copy(pages['report']))
+            'Print', 'Download action plan (CSV)', 'Copy as Markdown', 'Print or save as PDF'} <= set(ui_copy(pages['report']))
     assert set(CATEGORY_ORDER) <= set(ui_copy(pages['report']))
     assert re.findall(r'<span class="status-badge pill pill-[\w-]+">([^<]+)</span>', pages['report'])
     assert set(re.findall(r'<span class="status-badge pill pill-[\w-]+">([^<]+)</span>', pages['report'])) <= set(STATUS_CLASSES)
