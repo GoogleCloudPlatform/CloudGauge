@@ -6,7 +6,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        Thanks. Before filing, the README's **Troubleshooting** section covers the common deployment errors.
+        Thanks. Before filing, `docs/operations.md` › **Troubleshooting** covers the common deployment errors.
         **Do not paste a report, a status file or a finding here** — they name your resources. Describe them instead.
         Security problems go through [SECURITY.md](../blob/main/SECURITY.md), not an issue.
   - type: input
@@ -35,7 +35,7 @@ body:
     id: logs
     attributes:
       label: Log lines
-      description: From the web or worker service (`gcloud logging read …`, README › Troubleshooting › Step 1), with the `[job id]` prefix if any. Resource names may be redacted.
+      description: From the web or worker service (`gcloud logging read …`, docs/operations.md › Troubleshooting › Step 1), with the `[job id]` prefix if any. Resource names may be redacted.
       render: text
   - type: dropdown
     id: method

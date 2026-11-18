@@ -15,7 +15,7 @@ terraform {
   }
 
   # API attribution (v18.8.1): the Google provider appends this module name to the user agent of the calls it makes while
-  # deploying, the way the services append cloud-solutions/cloudgauge-v<release> to theirs (README › Privacy & API Attribution).
+  # deploying, the way the services append cloud-solutions/cloudgauge-v<release> to theirs (docs/security.md › Privacy & API Attribution).
   # It names the solution and the release, nothing else. The release is the repository's VERSION file; a provider_meta
   # block takes constants only, so the number is written here as well — release-please bumps it with the file (the
   # annotation) and the test suite holds the two equal.

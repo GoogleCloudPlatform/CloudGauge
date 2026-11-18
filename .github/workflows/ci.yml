@@ -9,7 +9,7 @@
 #                  build, build-tests and test steps, so a green run here means the release build is green
 #
 # The suite needs no credentials and no network: GCS, Cloud Tasks and the Google APIs are in-memory fakes
-# (README › Local Development & Testing).
+# (docs/development.md › Local Development & Testing).
 name: CI
 
 on:

@@ -7,7 +7,7 @@ body:
     attributes:
       value: |
         A check is a rule with a verdict — **Action Required**, **Investigation Recommended**, **Compliant** or *Informational* — and a working `Fix` for every row.
-        The README's **Features** section lists what exists; the roadmap at the end of `RELEASE_NOTES.md` what is planned.
+        `docs/checks.md` lists what exists; `docs/roadmap.md` what is planned.
   - type: textarea
     id: rule
     attributes:

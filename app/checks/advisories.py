@@ -260,7 +260,7 @@ def setup_hint(error, permission):
         return f"{text} Enable the Advisory Notifications API in the CloudGauge project: gcloud services enable {ADVISORY_API}"
     if getattr(getattr(error, "resp", None), "status", None) == 403 or " 403 " in f" {text} " or text.startswith("403"):
         return (f"{text} The scanner's service account needs the {permission} permission on the scanned scope "
-                f"(see the CloudGauge Advisory Notifications Viewer custom role in the README).")
+                f"(see the CloudGauge Advisory Notifications Viewer custom role in docs/operations.md › Common Prerequisites).")
     return text
 
 

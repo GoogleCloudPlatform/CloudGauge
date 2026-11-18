@@ -30,6 +30,7 @@ cloudbuild.yaml
 
 # Docs and repository assets (the policy table ships with the image: v18.1)
 *.md
+docs/
 LICENSE
 assets/*
 !assets/gcp_best_practices.csv

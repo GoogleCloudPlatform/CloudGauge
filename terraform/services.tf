@@ -2,7 +2,7 @@
 # and 7), created once image_tag names an image that exists.
 #
 # Ownership: Terraform owns the services' shape — image, variables, resources, identity, ingress, IAP.
-# Traffic splits and tags (the canary runbook of README › Updating an Existing Deployment) belong to the
+# Traffic splits and tags (the canary runbook of docs/operations.md › Updating an Existing Deployment) belong to the
 # operator, so lifecycle.ignore_changes leaves them alone; a release is `terraform apply -var image_tag=<new>`.
 
 locals {

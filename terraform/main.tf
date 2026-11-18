@@ -1,5 +1,5 @@
 # terraform/main.tf — the foundation: what tools/deploy.sh's setup and export steps create, plus the
-# organization-level roles of README › Common Prerequisites when organization_id is set.
+# organization-level roles of docs/operations.md › Common Prerequisites when organization_id is set.
 #
 # The image is not built here (Terraform builds nothing): apply once without image_tag to create the
 # foundation, build with the command in the build_command output, then apply again with image_tag to
@@ -49,7 +49,7 @@ locals {
     local.export || local.spend ? ["roles/bigquery.jobUser"] : [],
   )
 
-  # Organization roles: README › Common Prerequisites, step 2 (1), all read-only. The Advisory Notifications
+  # Organization roles: docs/operations.md › Common Prerequisites, step 2 (1), all read-only. The Advisory Notifications
   # custom role (1b) is created below; roles granted on the organization are inherited by every folder and project.
   organization_roles = [
     "roles/browser",
@@ -194,7 +194,7 @@ resource "google_bigquery_dataset_access" "writer" {
 
 # --- 6b. The billing export (v18.8) -------------------------------------------------------------
 # READER on the billing export dataset alone (what roles/bigquery.dataViewer would grant project-wide), when the
-# dataset is in this project; a dataset in another project needs the same entry from its owner (README › Spend).
+# dataset is in this project; a dataset in another project needs the same entry from its owner (docs/history-and-export.md › Spend).
 # The export is read, never written, and nothing is read from the billing account.
 resource "google_bigquery_dataset_access" "billing_reader" {
   count = local.spend && local.billing_export_project == var.project_id ? 1 : 0
@@ -205,7 +205,7 @@ resource "google_bigquery_dataset_access" "billing_reader" {
   user_by_email = google_service_account.cloudgauge.email
 }
 
-# --- The organization (README › Common Prerequisites, step 2) -----------------------------------
+# --- The organization (docs/operations.md › Common Prerequisites, step 2) -----------------------------------
 
 resource "google_organization_iam_member" "organization_roles" {
   for_each = local.on_organization ? toset(local.organization_roles) : toset([])

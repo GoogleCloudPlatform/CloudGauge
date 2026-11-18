@@ -166,7 +166,7 @@ def build_coverage(manifest, markers):
 
 # What the user reads (status page, error rows, coverage line) speaks of projects
 # and "organization-level checks". Shards are how the scan is run; their IDs are
-# for the logs. README: "Scaling to Large Organizations".
+# for the logs. docs/architecture.md › Scaling to Large Organizations.
 
 def describe_projects(projects, max_ids=25):
     """``"20 projects (p-001, p-002, ...)"``: the subject of an error row a reader can act on.

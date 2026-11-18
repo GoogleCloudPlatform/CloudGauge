@@ -1,6 +1,6 @@
 # Security policy
 
-CloudGauge reads a Google Cloud organization's configuration with the roles listed in the README and writes its findings to a bucket the deployer owns. A vulnerability is anything that lets the deployed services be made to read or write beyond that — a request that bypasses Identity-Aware Proxy or the worker's caller verification, an identifier that reaches a bucket key or a command unvalidated, a report that executes what a resource name contains — or anything that leaks a finding to someone the deployer did not grant access to.
+CloudGauge reads a Google Cloud organization's configuration with the roles listed in [docs/stability.md](docs/stability.md#roles-and-apis) and writes its findings to a bucket the deployer owns. A vulnerability is anything that lets the deployed services be made to read or write beyond that — a request that bypasses Identity-Aware Proxy or the worker's caller verification, an identifier that reaches a bucket key or a command unvalidated, a report that executes what a resource name contains — or anything that leaks a finding to someone the deployer did not grant access to.
 
 ## Reporting a vulnerability
 
@@ -15,8 +15,8 @@ This project is not an officially supported Google product and is **not eligible
 
 ## Supported versions
 
-Fixes land on the newest release only; deploy from the latest tag (the README's *Updating an Existing Deployment* section says how).
+Fixes land on the newest release only; deploy from the latest tag ([docs/operations.md › *Updating an Existing Deployment*](docs/operations.md#updating-an-existing-deployment-zero-downtime) says how).
 
 ## What the deployment itself relies on
 
-The README's *Request hardening* section lists the request checks every deployment makes, and *Privacy & API Attribution* what the services read and never read. Dependencies are pinned in `requirements.txt`; Dependabot and the repository's secret and code scanning run on every pull request.
+[docs/security.md](docs/security.md)'s *Request hardening* section lists the request checks every deployment makes, and its *Privacy & API Attribution* what the services read and never read. Dependencies are pinned in `requirements.txt`; Dependabot and the repository's secret and code scanning run on every pull request.

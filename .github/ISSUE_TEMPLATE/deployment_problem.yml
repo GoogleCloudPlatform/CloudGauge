@@ -6,7 +6,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        The README's **Troubleshooting › Step 3: Resolve Common Errors** lists the errors seen so far with their fixes; please check it first.
+        `docs/operations.md` › **Troubleshooting › Step 3: Resolve Common Errors** lists the errors seen so far with their fixes; please check it first.
         Redact project IDs and account names if you prefer — the step and the error text are what matter.
   - type: dropdown
     id: method

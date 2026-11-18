@@ -3,14 +3,14 @@
 #
 # Two Cloud Run services from one image: the web service people open sits behind
 # Identity-Aware Proxy (IAP); the worker that runs the scans accepts Cloud Tasks only.
-# The same deployment, declared in Terraform: terraform/ (README › Method 3).
+# The same deployment, declared in Terraform: terraform/ (docs/operations.md › Method 3).
 #
 #   PROJECT_ID=my-project OPERATORS=group:cloud-team@example.com tools/deploy.sh
 #
 # Steps (each one is idempotent, so the same command updates a deployment):
 #   1. setup    enable the APIs, create the service account with its project roles, create the
 #               results bucket. The organization-level scan roles are a one-time manual step
-#               (README › Deployment Instructions › Common Prerequisites).
+#               (docs/operations.md › Common Prerequisites).
 #   2. build    cloudbuild.yaml builds the image, runs the test suite in it and pushes it only
 #               if every test passes. The build runs as the service account, not as the Compute
 #               Engine default account.
@@ -22,7 +22,7 @@
 #               lets a Google account sign in.
 #   6. export   with BIGQUERY_DATASET: create the dataset (in REGION) and let the service account load
 #               into it (WRITER on the dataset, roles/bigquery.jobUser on the project); every finished
-#               scan is then exported (README › History and analytics).
+#               scan is then exported (docs/history-and-export.md).
 #   6b. spend   with BILLING_EXPORT (v18.8): let the service account read the billing export dataset
 #               (READER on the dataset when it is in PROJECT_ID — the dataset owner's one grant otherwise
 #               — and roles/bigquery.jobUser on the project); Spend Briefing and Spend Anomalies then read it.
@@ -41,7 +41,7 @@
 #   TAG               image tag                                             [short git hash, else latest]
 #   OPERATORS         who may sign in, comma-separated: user:a@x.com, group:g@x.com, domain:x.com
 #   EXTRA_ENV         more variables for both services, comma-separated KEY=VALUE pairs
-#                     (README › Configuration Reference), e.g. GEMINI_MODEL=gemini-2.5-flash,SCAN_SHARD_SIZE=10
+#                     (docs/stability.md › Configuration Reference), e.g. GEMINI_MODEL=gemini-2.5-flash,SCAN_SHARD_SIZE=10
 #   BIGQUERY_DATASET  export every finished scan to this BigQuery dataset (created in REGION if missing)
 #   COST_ALLOCATION_LABELS
 #                     the label keys every project must carry, comma-separated (cost-center,environment,owner);
@@ -321,7 +321,7 @@ PY
   fi
   # Load jobs run as the service account, in the project: Job User, nothing wider.
   g projects add-iam-policy-binding "$PROJECT_ID" --member="serviceAccount:${SA_EMAIL}" --role=roles/bigquery.jobUser --condition=None >/dev/null
-  note "Every finished scan loads into ${BIGQUERY_DATASET}.scans and ${BIGQUERY_DATASET}.findings (README › History and analytics)."
+  note "Every finished scan loads into ${BIGQUERY_DATASET}.scans and ${BIGQUERY_DATASET}.findings (docs/history-and-export.md)."
   note "Earlier scans: python tools/backfill_export.py --project ${PROJECT_ID} --location ${REGION} --bucket ${BUCKET} --dataset ${BIGQUERY_DATASET}"
 fi
 
@@ -395,7 +395,7 @@ else
   note "    --service=${SERVICE} --member=group:cloud-team@example.com --role=roles/iap.httpsResourceAccessor"
 fi
 note "IAM changes take up to a minute: a 403 right after a grant goes away on reload."
-note "Scans need the organization-level roles of README › Common Prerequisites, granted once to ${SA_EMAIL}."
+note "Scans need the organization-level roles of docs/operations.md › Common Prerequisites, granted once to ${SA_EMAIL}."
 if [[ ${#SCHEDULE_NAMES[@]} -gt 0 ]]; then
   note "Scheduled scans   ${SCHEDULE_NAMES[*]} (gcloud scheduler jobs run NAME --location=${REGION} starts one now)"
 fi

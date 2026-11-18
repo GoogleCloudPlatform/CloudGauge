@@ -9,7 +9,7 @@
 # This workflow checks that the tag names the commit's VERSION and that the commit is on main, takes the release's
 # section of RELEASE_NOTES.md as the body (tools/release_notes.py) and creates the GitHub Release — a pre-release when
 # the tag carries a suffix (v20.0.0-rc.1). Nothing is built here: every deployment method builds the image in the
-# deployer's own project from the tagged source (README › Deployment Instructions).
+# deployer's own project from the tagged source (docs/operations.md › Deployment Instructions).
 name: Release
 
 on:
@@ -48,7 +48,7 @@ jobs:
           tag="$GITHUB_REF_NAME"
           {
             python3 tools/release_notes.py "$tag"
-            printf '\n---\n**Deploy this release:** `git fetch --tags && git checkout %s`, then `TAG=%s tools/deploy.sh` (Method 1), the Console steps (Method 2) or Terraform with `?ref=%s` (Method 3) — README › Deployment Instructions. An existing deployment follows *Updating an Existing Deployment (Zero-Downtime)*.\n' "$tag" "$tag" "$tag"
+            printf '\n---\n**Deploy this release:** `git fetch --tags && git checkout %s`, then `TAG=%s tools/deploy.sh` (Method 1), the Console steps (Method 2) or Terraform with `?ref=%s` (Method 3) — docs/operations.md › Deployment Instructions. An existing deployment follows *Updating an Existing Deployment (Zero-Downtime)*.\n' "$tag" "$tag" "$tag"
           } > "$RUNNER_TEMP/notes.md"
           cat "$RUNNER_TEMP/notes.md"
       - name: Publish
