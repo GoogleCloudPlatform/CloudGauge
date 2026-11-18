@@ -12,6 +12,8 @@ venv/
 !RELEASE_NOTES.md
 !README.md
 !terraform/README.md
+# *.md matches the root only; said explicitly: the tests read docs/ (test_terraform.py, since v20).
+!docs/*.md
 LICENSE
 assets/*
 !assets/gcp_best_practices.csv

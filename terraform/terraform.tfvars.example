@@ -8,10 +8,10 @@ region     = "asia-south1"
 operators = ["group:cloud-team@example.com", "user:alice@example.com"]
 
 # Set it to let Terraform grant the organization-level scan roles (needs an account that can grant roles
-# on the organization); leave it out to do README › Common Prerequisites, step 2, by hand.
+# on the organization); leave it out to do docs/operations.md › Common Prerequisites, step 2, by hand.
 # organization_id = "123456789012"
 
-# Export every finished scan to BigQuery (README › History and analytics).
+# Export every finished scan to BigQuery (docs/history-and-export.md).
 # bigquery_dataset = "cloudgauge"
 
 # The label keys every project must carry (the Cost Allocation Labels check).
@@ -20,7 +20,7 @@ operators = ["group:cloud-team@example.com", "user:alice@example.com"]
 # Domains besides the organization's primary one that the External Principals check counts as the organization's (v18.5).
 # trusted_domains = ["partner.example"]
 
-# The BigQuery dataset the billing account exports to (README › Spend, v18.8): Spend Briefing and Spend Anomalies read it.
+# The BigQuery dataset the billing account exports to (docs/history-and-export.md › Spend, v18.8): Spend Briefing and Spend Anomalies read it.
 # billing_export = "my-project.billing"
 # spend_anomaly_floor = "50"
 
@@ -29,7 +29,7 @@ operators = ["group:cloud-team@example.com", "user:alice@example.com"]
 #   weekly-org = { scope = "organization", scope_id = "123456789012", cron = "30 0 * * 1" }
 # }
 
-# More settings for both services (README › Configuration Reference).
+# More settings for both services (docs/stability.md › Configuration Reference).
 # extra_env = { GEMINI_MODEL = "gemini-2.5-flash" }
 
 # The image: leave image_tag out for the first apply (foundation only), then set it to the tag you built.

@@ -65,7 +65,7 @@ variable "operators" {
 }
 
 variable "extra_env" {
-  description = "More settings for both services (README › Configuration Reference), e.g. { GEMINI_MODEL = \"gemini-2.5-flash\", SCAN_SHARD_SIZE = \"10\" }."
+  description = "More settings for both services (docs/stability.md › Configuration Reference), e.g. { GEMINI_MODEL = \"gemini-2.5-flash\", SCAN_SHARD_SIZE = \"10\" }."
   type        = map(string)
   default     = {}
 }
@@ -131,7 +131,7 @@ variable "schedules" {
 }
 
 variable "organization_id" {
-  description = "Set it to grant the service account the organization-level scan roles and create the Advisory Notifications custom role there (needs an account that can grant roles on the organization). Empty: README › Common Prerequisites, step 2, stays the manual step."
+  description = "Set it to grant the service account the organization-level scan roles and create the Advisory Notifications custom role there (needs an account that can grant roles on the organization). Empty: docs/operations.md › Common Prerequisites, step 2, stays the manual step."
   type        = string
   default     = ""
 

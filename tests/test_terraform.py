@@ -3,7 +3,7 @@
 ``terraform/`` is a second description of the deployment — the APIs, the roles, the variables both
 services get, the limits of the services and the queue, the scheduler job — and a second description
 rots unless something ties it to the first. These tests read the files (no Terraform binary needed)
-and hold ``terraform/`` to the script, the README's prerequisites and the app's own constants.
+and hold ``terraform/`` to the script, the prerequisites of docs/operations.md and the app's own constants.
 """
 import pathlib
 import re
@@ -45,8 +45,9 @@ def script():
 
 
 @pytest.fixture(scope='module')
-def readme():
-    return (ROOT / 'README.md').read_text(encoding='utf-8')
+def operations():
+    """docs/operations.md — where the Common Prerequisites (APIs, roles, the custom role) are written out since v20."""
+    return (ROOT / 'docs' / 'operations.md').read_text(encoding='utf-8')
 
 
 def hcl_list(text, name):
@@ -78,26 +79,26 @@ def enabled_apis(text):
 
 # --- what is enabled and granted -----------------------------------------------------------------
 
-def test_the_apis_are_the_scripts_and_the_readmes(tf, script, readme):
+def test_the_apis_are_the_scripts_and_the_docs(tf, script, operations):
     terraform = hcl_list(tf['main.tf'], 'apis')
     assert len(terraform) == len(set(terraform)) == 27  # v19: + securitycentermanagement; v19.2: + cloudsupport
     assert set(terraform) == enabled_apis(script), 'terraform/main.tf and tools/deploy.sh enable different APIs'
-    assert set(terraform) == enabled_apis(readme), 'terraform/main.tf and README › Common Prerequisites enable different APIs'
+    assert set(terraform) == enabled_apis(operations), 'terraform/main.tf and docs/operations.md › Common Prerequisites enable different APIs'
     assert 'disable_on_destroy = false' in tf['main.tf']  # other things in the project may use them
 
 
-def test_the_organization_roles_are_the_readmes(tf, readme):
-    """README › Common Prerequisites, step 2 (1): the roles granted on the organization, all read-only."""
+def test_the_organization_roles_are_the_docs(tf, operations):
+    """docs/operations.md › Common Prerequisites, step 2 (1): the roles granted on the organization, all read-only."""
     terraform = hcl_list(tf['main.tf'], 'organization_roles')
-    documented = re.findall(r'gcloud organizations add-iam-policy-binding \$\{ORG_ID\} .*--role="(roles/[^"]+)"', readme)
+    documented = re.findall(r'gcloud organizations add-iam-policy-binding \$\{ORG_ID\} .*--role="(roles/[^"]+)"', operations)
     assert len(terraform) == len(set(terraform)) == 12
     assert set(terraform) == set(documented)
     assert all(role.endswith(('Viewer', 'viewer', 'browser', 'securityReviewer', 'settingsViewer')) for role in terraform)
 
 
-def test_the_advisory_role_is_the_readmes(tf, readme):
-    """README › Common Prerequisites, step 2 (1b): the custom role, its ID, title, description and permissions."""
-    create = re.search(r'gcloud iam roles create (\w+) --organization=\$\{ORG_ID\} \\\n(.*?)--stage=GA', readme, re.S).group
+def test_the_advisory_role_is_the_docs(tf, operations):
+    """docs/operations.md › Common Prerequisites, step 2 (1b): the custom role, its ID, title, description and permissions."""
+    create = re.search(r'gcloud iam roles create (\w+) --organization=\$\{ORG_ID\} \\\n(.*?)--stage=GA', operations, re.S).group
     assert f'default     = "{create(1)}"' in hcl_block(tf['variables.tf'], 'variable "advisory_role_id"')
     role = hcl_block(tf['main.tf'], 'resource "google_organization_iam_custom_role" "advisory_viewer"')
     assert re.search(r'--title="([^"]+)"', create(2)).group(1) in role
@@ -116,9 +117,9 @@ def test_the_project_roles_are_the_scripts(tf, script):
     assert '--role=roles/bigquery.jobUser' in script
 
 
-def test_every_role_the_script_grants_is_granted_and_nothing_wider(tf, script, readme):
-    """Terraform grants the script's roles plus the README's organization roles — no role from anywhere else."""
-    organization = set(re.findall(r'gcloud organizations add-iam-policy-binding \$\{ORG_ID\} .*--role="(roles/[^"]+)"', readme))
+def test_every_role_the_script_grants_is_granted_and_nothing_wider(tf, script, operations):
+    """Terraform grants the script's roles plus the documented organization roles — no role from anywhere else."""
+    organization = set(re.findall(r'gcloud organizations add-iam-policy-binding \$\{ORG_ID\} .*--role="(roles/[^"]+)"', operations))
     assert set(ROLE.findall(tf['all'])) == set(ROLE.findall(script)) | organization
     assert 'roles/owner' not in tf['all'] and 'roles/editor' not in tf['all']
 
@@ -183,7 +184,7 @@ def test_the_worker_url_is_the_deterministic_one(tf, script):
 
 
 def test_releases_and_canaries_do_not_fight_terraform(tf):
-    """Terraform owns the image and the variables; traffic and tags belong to the operator (README's runbook)."""
+    """Terraform owns the image and the variables; traffic and tags belong to the operator (the runbook of docs/operations.md)."""
     for header in ('"google_cloud_run_v2_service" "worker"', '"google_cloud_run_v2_service" "web"'):
         block = hcl_block(tf['services.tf'], header)
         assert 'ignore_changes = [client, client_version, traffic]' in block
@@ -275,22 +276,25 @@ def test_every_variable_is_described_and_the_example_names_declared_ones_only(tf
     assert 'default     = true' in safe[0] and 'default     = false' in safe[1]
 
 
-def test_the_folder_is_documented_and_kept_out_of_the_build(readme):
-    assert '### **Method 3: Deploy with Terraform**' in readme
-    assert '[Method 3: Deploy with Terraform](#method-3-deploy-with-terraform)' in readme
-    assert re.search(r'^terraform/\s+#', readme, re.M), 'Project Structure does not list terraform/'
+def test_the_folder_is_documented_and_kept_out_of_the_build(operations):
+    """v20: the walkthrough is docs/operations.md › Method 3, the structure tree docs/architecture.md; the landing README links to them."""
+    readme = (ROOT / 'README.md').read_text(encoding='utf-8')
+    architecture = (ROOT / 'docs' / 'architecture.md').read_text(encoding='utf-8')
+    assert '### Method 3: Deploy with Terraform' in operations
+    assert '](docs/operations.md#method-3-deploy-with-terraform)' in readme and '](docs/operations.md)' in readme
+    assert re.search(r'^terraform/\s+#', architecture, re.M), 'Project Structure does not list terraform/'
     assert (TERRAFORM / 'README.md').exists() and (TERRAFORM / '.terraform.lock.hcl').exists()
     app_context = (ROOT / '.dockerignore').read_text(encoding='utf-8').splitlines()
-    assert 'terraform/' in app_context, 'the application image does not need terraform/'
+    assert 'terraform/' in app_context and 'docs/' in app_context, 'the application image needs neither terraform/ nor docs/'
     for name in ('.gcloudignore', 'Dockerfile.test.dockerignore'):  # the test image reads the folder, so the upload and its context keep it
         lines = (ROOT / name).read_text(encoding='utf-8').splitlines()
-        assert 'terraform/' not in lines and {'terraform/.terraform/', 'terraform/terraform.tfvars', '*.tfstate'} <= set(lines), name
+        assert 'terraform/' not in lines and 'docs/' not in lines and {'terraform/.terraform/', 'terraform/terraform.tfvars', '*.tfstate'} <= set(lines), name
     test_context = (ROOT / 'Dockerfile.test.dockerignore').read_text(encoding='utf-8').splitlines()
-    assert {'!README.md', '!terraform/README.md'} <= set(test_context)
+    assert {'!README.md', '!terraform/README.md', '!docs/*.md'} <= set(test_context)
     dockerfile_test = (ROOT / 'Dockerfile.test').read_text(encoding='utf-8')
     copied = re.search(r'^COPY (.+) \./$', dockerfile_test, re.M).group(1).split()
     assert {'README.md', '.gcloudignore', '.gitignore', 'RELEASE_NOTES.md'} <= set(copied)
-    assert 'COPY terraform ./terraform' in dockerfile_test
+    assert 'COPY terraform ./terraform' in dockerfile_test and 'COPY docs ./docs' in dockerfile_test
     ignored = (ROOT / '.gitignore').read_text(encoding='utf-8')
     assert all(entry in ignored for entry in ('.terraform/', '*.tfstate', 'terraform.tfvars'))
     assert 'Terraform' in (ROOT / 'RELEASE_NOTES.md').read_text(encoding='utf-8')

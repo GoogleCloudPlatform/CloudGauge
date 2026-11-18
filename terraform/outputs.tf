@@ -23,7 +23,7 @@ output "build_command" {
 output "next_step" {
   description = "What to do now."
   value = local.deploy_services ? (
-    length(var.operators) > 0 ? "Open ${local.web_url} (IAM changes take up to a minute). Scans need the organization-level roles of README › Common Prerequisites${local.on_organization ? " — granted here" : ", granted once to ${google_service_account.cloudgauge.email}"}." :
+    length(var.operators) > 0 ? "Open ${local.web_url} (IAM changes take up to a minute). Scans need the organization-level roles of docs/operations.md › Common Prerequisites${local.on_organization ? " — granted here" : ", granted once to ${google_service_account.cloudgauge.email}"}." :
     "Nobody can sign in yet: add principals to operators and apply again, or grant roles/iap.httpsResourceAccessor on ${var.service_name} in the console (Security › Identity-Aware Proxy)."
     ) : (
     "Foundation created. Build the image with the build_command output (from the repository root), then: terraform apply -var image_tag=$(git rev-parse --short HEAD)"

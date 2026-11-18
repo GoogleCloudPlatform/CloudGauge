@@ -204,7 +204,7 @@ def test_org_check_reports_the_permission_or_api_to_fix(api):
     briefing, settings = records['Advisory_Notifications'], records['Advisory_Notifications_Settings']
     assert briefing['Status'] == settings['Status'] == 'Error'
     assert briefing['Finding'] == [{'Error': f'403 {DENIED} The scanner\'s service account needs the advisorynotifications.notifications.list '
-                                             'permission on the scanned scope (see the CloudGauge Advisory Notifications Viewer custom role in the README).'}]
+                                             'permission on the scanned scope (see the CloudGauge Advisory Notifications Viewer custom role in docs/operations.md › Common Prerequisites).'}]
     (row,) = settings['Finding']
     assert row['Error'].startswith('403 Advisory Notifications API has not been used in project cloudgauge-host')
     assert row['Error'].endswith('Enable the Advisory Notifications API in the CloudGauge project: gcloud services enable advisorynotifications.googleapis.com')
