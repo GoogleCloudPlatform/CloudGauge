@@ -9,8 +9,7 @@
 #                  build, build-tests and test steps, so a green run here means the release build is green
 #
 # The suite needs no credentials and no network: GCS, Cloud Tasks and the Google APIs are in-memory fakes
-# (README › Local Development & Testing). tests/legacy/ is a frozen copy of the pre-refactor code, not a test
-# directory; the parity tests import it themselves.
+# (README › Local Development & Testing).
 name: CI
 
 on:
@@ -51,9 +50,9 @@ jobs:
       - name: Install
         run: python -m pip install -r requirements-dev.txt
       - name: Lint (errors, undefined names, unused and redefined imports)
-        run: ruff check --extend-exclude tests/legacy --select E9,F63,F7,F82,F401,F811 app tests tools cloudgauge.py run.py
+        run: ruff check --select E9,F63,F7,F82,F401,F811 app tests tools cloudgauge.py run.py
       - name: Test
-        run: python -m pytest -p no:cacheprovider -q --no-header -rfE --ignore=tests/legacy
+        run: python -m pytest -p no:cacheprovider -q --no-header -rfE
 
   terraform:
     name: terraform

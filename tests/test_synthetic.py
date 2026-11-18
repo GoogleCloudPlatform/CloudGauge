@@ -339,10 +339,15 @@ def test_denied_projects_and_quota_errors_do_not_break_the_scan(gcp):
     assert html.count('<strong>Projects not checked</strong>') == 4  # one item on each category page
     assert 'Not assessed — no' not in html  # the item above makes each page a listed page, not an empty one
     rows = [row for row in csv.reader(io.StringIO(store.read_report('syn-job', scope_id, 'csv'))) if row[:2] == ['Projects not checked', 'Error']]
-    # Every project, by ID. A v18.4 check whose scope-level policy or resource search drew a 429 records the scanned scope itself
+    # Every project. A v18.4 check whose scope-level policy or resource search drew a 429 records the scanned scope itself
     # (it has no project list), so the scope's own name may appear beside the projects; v18.7's Folder Primitive Roles names a folder
-    # whose policy read drew one.
-    assert {row[2] for row in rows if not row[2].startswith(('organizations/', 'folders/'))} == {p.project_id for p in provider.world.projects()}
+    # whose policy read drew one. Which calls draw the 429s depends on the order the threads consume the provider's random draws,
+    # and a check whose call that maps project numbers to IDs drew one names the project by number (v20, plan item A4: the
+    # intermittent failure of this test was exactly that) — the same project, so the numbers are read back as IDs here.
+    projects = list(provider.world.projects())
+    by_number = {str(p.project_number): p.project_id for p in projects}
+    named = {row[2] for row in rows if not row[2].startswith(('organizations/', 'folders/'))}
+    assert {by_number.get(name, name) for name in named} == {p.project_id for p in projects}
     # Location discovery fails for every project too, so no zone or region is found and the cost
     # recommenders are never queried: the project is reported with the discovery error rather
     # than passing as compliant. Network Insights always queries 'global', so its queries fail.

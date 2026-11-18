@@ -13,21 +13,16 @@
 # limitations under the License.
 """The Cloud Tasks worker (``/run-scan``) and the concurrent check runner.
 
-The worker tests post the same task to the legacy module and to the new app
-and compare the response, the status updates the UI polls, the objects written
-to and deleted from the bucket, and the reports. The checks are replaced by
-the same scripted scan in both, so the comparison covers the job around them.
-
-One difference is intended: the legacy CSV listed the categories in an order
-that changed between processes (it came from a ``set``). The new CSV uses
-``CATEGORY_ORDER``, so CSVs are compared section by section.
+The worker tests post a task to the app and pin the response, the status
+updates the UI polls, the objects written to and deleted from the bucket, and
+the reports. The checks are replaced by a scripted scan, so the tests cover the
+job around them; ``test_scan_job_with_the_real_runner`` runs the real runner
+over a two-check plan. The check plan itself is pinned by name
+(``test_the_check_plan_is_pinned``).
 """
-import ast
 import functools
-import inspect
 import json
 import re
-import textwrap
 import threading
 from types import SimpleNamespace
 
@@ -44,7 +39,7 @@ from app.extensions import EXTENSION_KEY
 from app.services import org_policies
 from app.synthetic.world import BEST_PRACTICES_CSV
 from app.utils import ThrottledProgressReporter
-from helpers import assert_same_csv_tables, assert_same_response, comparable, csv_sections, report_facts
+from helpers import csv_sections, report_facts
 
 SCOPE, SCOPE_ID, JOB_ID = 'organization', '123456789', '42424242-4242-4242-8242-424242424242'
 JOB_1, JOB_2 = '11111111-1111-4111-8111-111111111111', '22222222-2222-4222-8222-222222222222'  # v18.6.1: a job ID is a UUID
@@ -65,78 +60,60 @@ def without_uuids(names):
     return [UUID_SUFFIX.sub('_<uuid>.json', name) if name.startswith('intermediate/') else name for name in names]
 
 
-def stop_clocks(monkeypatch, legacy):
-    """Both progress throttles see the same frozen time."""
-    monkeypatch.setattr(legacy, 'time', SimpleNamespace(time=lambda: 1000.0))
-    monkeypatch.setattr(scan_job, 'ThrottledProgressReporter', functools.partial(ThrottledProgressReporter, clock=lambda: 1000.0))
-
-
-def run_both(legacy_client, client, bucket, **request):
-    """Posts the task to legacy, then to the new app, emptying the bucket in between.
+def run_one(client, bucket, **request):
+    """Posts the task to the app and returns a record of the run.
 
     ``request`` holds the test-client arguments (default: ``json=PAYLOAD``).
-    Returns one record per app: the response, the objects left in the bucket,
-    the status updates, and the names of the objects uploaded and deleted.
+    The record: the response, the objects left in the bucket, the status
+    updates, and the names of the objects uploaded and deleted.
     """
     request = request or {'json': PAYLOAD}
-    runs = []
-    for http in (legacy_client, client):
-        response = http.post('/run-scan', **request)
-        runs.append(SimpleNamespace(
-            response=response,
-            objects=dict(bucket.objects),
-            statuses=[(doc['progress'], doc['current_task'], doc['status'], content_type)
-                      for doc, content_type in bucket.status_updates(JOB_ID, SCOPE_ID)],
-            uploads=without_uuids(name for name, _, _ in bucket.uploads),
-            deleted=sorted(without_uuids(bucket.deleted)),  # deleted in parallel: the order is not part of the contract
-        ))
-        bucket.objects.clear()
-        bucket.uploads.clear()
-        bucket.deleted.clear()
-    return runs
+    response = client.post('/run-scan', **request)
+    return SimpleNamespace(
+        response=response,
+        objects=dict(bucket.objects),
+        statuses=[(doc['progress'], doc['current_task'], doc['status'], content_type)
+                  for doc, content_type in bucket.status_updates(JOB_ID, SCOPE_ID)],
+        uploads=without_uuids(name for name, _, _ in bucket.uploads),
+        deleted=sorted(without_uuids(bucket.deleted)),  # deleted in parallel: the order is not part of the contract
+    )
 
 
 @pytest.fixture
-def scripted_scan(legacy, monkeypatch):
-    """Replaces ``run_all_checks`` in both implementations with the same scripted scan.
+def scripted_scan(monkeypatch):
+    """Replaces ``run_all_checks`` with a scripted scan, and stops the progress throttle's clock.
 
     The scan writes the org policies and ``findings`` (default: samples.FINDINGS)
     the way checks do, reports PROGRESS, then raises ``error`` if one is set.
     """
     scan = SimpleNamespace(findings=samples.all_findings(), error=None, calls=[])
 
-    def run(write_finding, write_org_policies, scope, scope_id, job_id, progress_callback):
+    def run_all_checks(scope, scope_id, job_id, progress_callback=None, *, sink, projects=None):
         scan.calls.append((scope, scope_id, job_id))
-        write_org_policies(job_id, samples.BEST_PRACTICES, samples.CURRENT_POLICIES)
+        sink.write_org_policies(job_id, samples.BEST_PRACTICES, samples.CURRENT_POLICIES)
         for finding in scan.findings:
-            write_finding(job_id, finding['Check'].replace(' ', '_'), finding)
+            sink.write_finding(job_id, finding['Check'].replace(' ', '_'), finding)
             if scan.error:
                 raise scan.error
         for progress, task in PROGRESS:
             progress_callback(progress=progress, current_task=task)
         return True
 
-    def legacy_run_all_checks(scope, scope_id, job_id, progress_callback=None):
-        return run(legacy._write_finding_to_gcs, legacy._write_org_policies_to_gcs, scope, scope_id, job_id, progress_callback)
-
-    def new_run_all_checks(scope, scope_id, job_id, progress_callback=None, *, sink, projects=None):
-        return run(sink.write_finding, sink.write_org_policies, scope, scope_id, job_id, progress_callback)
-
-    monkeypatch.setattr(legacy, 'run_all_checks', legacy_run_all_checks)
-    monkeypatch.setattr(scan_job, 'run_all_checks', new_run_all_checks)
-    stop_clocks(monkeypatch, legacy)
+    monkeypatch.setattr(scan_job, 'run_all_checks', run_all_checks)
+    monkeypatch.setattr(scan_job, 'ThrottledProgressReporter', functools.partial(ThrottledProgressReporter, clock=lambda: 1000.0))
     return scan
 
 
 # --- /run-scan ---
 
-def test_scan_job_matches_legacy(legacy_client, client, gcp, scripted_scan):
-    legacy_run, run = run_both(legacy_client, client, gcp.bucket)
-    assert_same_response(legacy_run.response, run.response)
+def test_scan_job_writes_the_status_the_reports_and_the_summary(client, gcp, scripted_scan):
+    """A completed scan: the status documents in order (the throttle lets the first scripted update through, the final
+    flush the last), the HTML and CSV reports, then the scan summary (v15) once the reports are up; every intermediate
+    finding file deleted afterwards."""
+    run = run_one(client, gcp.bucket)
     assert (run.response.status_code, run.response.get_data(as_text=True)) == (200, 'Scan completed and reports uploaded.')
-    assert scripted_scan.calls == [(SCOPE, SCOPE_ID, JOB_ID)] * 2
+    assert scripted_scan.calls == [(SCOPE, SCOPE_ID, JOB_ID)]
 
-    assert run.statuses == legacy_run.statuses
     assert run.statuses == [
         (5, 'Initializing scan and listing resources...', 'running', 'application/json'),
         (35, '(5/14) Finished: GKE Hygiene', 'running', 'application/json'),
@@ -144,53 +121,57 @@ def test_scan_job_matches_legacy(legacy_client, client, gcp, scripted_scan):
         (98, 'Generating final HTML and CSV reports...', 'running', 'application/json'),
         (100, 'Scan complete!', 'completed', 'application/json'),
     ]
-    # Same writes in the same order, plus the scan summary (v15) once the reports are up; every intermediate file deleted afterwards.
     summaries = [name for name in run.uploads if name.startswith('scopes/')]
     assert len(summaries) == 1 and re.fullmatch(rf'scopes/{SCOPE}/{SCOPE_ID}/\d{{8}}T\d{{6}}Z_{JOB_ID}\.json', summaries[0])
     assert run.uploads.index(summaries[0]) > run.uploads.index(REPORT_CSV)
-    assert [name for name in run.uploads if name not in summaries] == legacy_run.uploads
-    assert run.deleted == legacy_run.deleted
-    assert len(run.deleted) == len(scripted_scan.findings) + 2  # plus the two org-policy files
+    # The writes in order: the status, the org-policy pair and one file per finding (intermediate), the statuses as the
+    # scan progresses, the two reports, the summary, the final status.
+    intermediate = [name for name in run.uploads if name.startswith('intermediate/')]
+    assert len(intermediate) == len(scripted_scan.findings) + 2
+    assert run.uploads.index(REPORT_HTML) < run.uploads.index(REPORT_CSV) < run.uploads.index(summaries[0])
+    assert run.uploads[0] == STATUS and run.uploads[-1] == STATUS
+    assert run.deleted == sorted(intermediate)
     assert all(name.startswith(f'intermediate/{JOB_ID}/') for name in run.deleted)
 
-    assert sorted(run.objects) == sorted([*legacy_run.objects, *summaries]) == sorted([REPORT_HTML, REPORT_CSV, STATUS, *summaries])
+    assert sorted(run.objects) == sorted([REPORT_HTML, REPORT_CSV, STATUS, *summaries])
     summary = json.loads(run.objects[summaries[0]][0])
     assert (summary['version'], summary['release'], summary['job_id'], summary['scope'], summary['scope_id']) == (3, VERSION, JOB_ID, SCOPE, SCOPE_ID)
     assert {finding['Check'] for finding in scripted_scan.findings} <= set(summary['checks'])
-    (html, html_type), (legacy_html, legacy_html_type) = run.objects[REPORT_HTML], legacy_run.objects[REPORT_HTML]
-    assert html_type == legacy_html_type == 'text/html'
-    assert comparable(report_facts(html)) == comparable(report_facts(legacy_html))  # same findings; the layout and the scores differ (plan item 6b, v15.2)
+    html, html_type = run.objects[REPORT_HTML]
+    assert html_type == 'text/html'
+    facts = report_facts(html)
+    assert facts['title'] == 'CloudGauge Report: Organization 123456789' and facts['header'] == ('Organization', SCOPE_ID, JOB_ID)
+    assert {finding['Check'] for finding in scripted_scan.findings} | {'Organization Policies'} <= {name for name, *_ in facts['items']}
+    assert facts['sections'] == ['security-identity', 'cost-optimization', 'reliability-resilience', 'operational-excellence-observability']
     assert 'none — first scan of this organization' in html  # the bucket was empty: nothing to compare with
-    (csv_text, csv_type), (legacy_csv, legacy_csv_type) = run.objects[REPORT_CSV], legacy_run.objects[REPORT_CSV]
-    assert csv_type == legacy_csv_type == 'text/csv'
-    assert_same_csv_tables(csv_text, legacy_csv)  # same tables; ours in page order, the legacy writer's in arrival order (v15.1)
-    assert list(csv_sections(csv_text)) == ['Organization Policies', *CATEGORY_ORDER]  # new: always this order
+    csv_text, csv_type = run.objects[REPORT_CSV]
+    assert csv_type == 'text/csv'
+    assert list(csv_sections(csv_text)) == ['Organization Policies', *CATEGORY_ORDER]  # always this order
     assert csv_sections(csv_text)['Organization Policies'] == [['Category', 'Policy', 'Expected Value', 'Current Value', 'Status'],
                                                                *samples.ORG_POLICY_CSV_ROWS]
+    assert {finding['Check'] for finding in scripted_scan.findings} <= {row[0] for rows in csv_sections(csv_text).values() for row in rows if row}
 
 
-def test_failing_scan_matches_legacy(legacy_client, client, gcp, scripted_scan):
+def test_a_failing_scan_reports_the_error_and_cleans_up(client, gcp, scripted_scan):
     scripted_scan.error = RuntimeError('429 Quota exceeded for compute.googleapis.com')
-    legacy_run, run = run_both(legacy_client, client, gcp.bucket)
-    assert_same_response(legacy_run.response, run.response)
+    run = run_one(client, gcp.bucket)
     assert (run.response.status_code, run.response.get_data(as_text=True)) == (500, 'Internal Server Error')
-    assert run.statuses == legacy_run.statuses
+    assert run.statuses[0] == (5, 'Initializing scan and listing resources...', 'running', 'application/json')
     assert run.statuses[-1] == (100, 'A critical error occurred: 429 Quota exceeded for compute.googleapis.com', 'error', 'application/json')
-    assert run.uploads == legacy_run.uploads
-    assert run.deleted == legacy_run.deleted and len(run.deleted) == 3  # org policies and the one finding written
-    assert list(run.objects) == list(legacy_run.objects) == [STATUS]
+    assert len(run.deleted) == 3  # org policies and the one finding written
+    assert list(run.objects) == [STATUS]
 
 
-def test_report_generation_error_matches_legacy(legacy_client, client, gcp, scripted_scan):
-    """Table details mixing dicts and strings: the HTML report falls back to text, the CSV report raises."""
+def test_a_report_generation_error_is_reported(client, gcp, scripted_scan):
+    """Table details mixing dicts and strings: the HTML report falls back to text, the CSV report raises — the status
+    says so and the intermediate files are still cleaned up."""
     scripted_scan.findings = [{'Check': 'VM Rightsizing', 'Status': 'Investigation Recommended',
                                'Finding': [{'Project': 'web-prod', 'VM': 'big-vm'}, 'n2-standard-8 is enough']}]
-    legacy_run, run = run_both(legacy_client, client, gcp.bucket)
-    assert_same_response(legacy_run.response, run.response)
+    run = run_one(client, gcp.bucket)
     assert run.response.status_code == 500
-    assert run.statuses == legacy_run.statuses
     assert run.statuses[-1][1:3] == ("A critical error occurred: 'str' object has no attribute 'values'", 'error')
-    assert run.deleted == legacy_run.deleted
+    assert len(run.deleted) == 3  # org policies and the one finding
+    assert REPORT_CSV not in run.objects
 
 
 def test_a_second_scan_of_the_scope_compares_with_the_first(client, gcp, scripted_scan):
@@ -233,14 +214,13 @@ def test_a_second_scan_of_the_scope_compares_with_the_first(client, gcp, scripte
     {'data': '{"scope": ', 'content_type': 'application/json'},  # invalid JSON: 400 before the job starts
     {'data': 'scope=project', 'content_type': 'text/plain'},  # force=True parses any content type
 ])
-def test_malformed_tasks_are_refused_before_any_work(kwargs, legacy_client, client, gcp, scripted_scan):
-    """Legacy answered 400 or 500 (a KeyError inside the job); since v18.6.1 the new app validates the body first and
-    answers 400 with the reason (Cloud Tasks retries either status the same bounded way). Neither writes anything."""
-    legacy_run, run = run_both(legacy_client, client, gcp.bucket, **kwargs)
-    assert legacy_run.response.status_code in (400, 500)
+def test_malformed_tasks_are_refused_before_any_work(kwargs, client, gcp, scripted_scan):
+    """Since v18.6.1 the body is validated first: 400 with the reason (Cloud Tasks retries either status the same
+    bounded way; the pre-refactor worker answered 400 or 500 from a KeyError inside the job). Nothing is written."""
+    run = run_one(client, gcp.bucket, **kwargs)
     assert run.response.status_code == 400 and set(run.response.get_json()) == {'error'}
-    assert run.uploads == legacy_run.uploads == []
-    assert run.deleted == legacy_run.deleted == []
+    assert run.uploads == []
+    assert run.deleted == []
     assert scripted_scan.calls == []
 
 
@@ -251,34 +231,29 @@ def test_malformed_tasks_are_refused_before_any_work(kwargs, legacy_client, clie
     ({**PAYLOAD, 'requested_by': 'x' * 400}, 'requested_by must be a short, printable name.'),
 ])
 def test_tasks_with_identifiers_that_are_not_ones_are_refused(body, message, client, gcp, scripted_scan):
-    """v18.6.1, the new app alone (legacy ran whatever it was given): a job ID that is not a UUID, a scope ID or scope
+    """v18.6.1 (the pre-refactor worker ran whatever it was given): a job ID that is not a UUID, a scope ID or scope
     that is not one — 400 naming the field, nothing written, no check run."""
     response = client.post('/run-scan', json=body)
     assert (response.status_code, response.get_json()) == (400, {'error': message})
     assert gcp.bucket.uploads == [] and scripted_scan.calls == []
 
 
-def test_scan_without_projects_runs_the_scope_level_checks(legacy_client, client, gcp, legacy, monkeypatch):
-    """The real runners find no projects. Legacy stopped there and uploaded an empty report; since v15.3 the
-    new app runs the checks that look at the scope itself (an organization's eight here, a folder's Organization
-    Policies) and reports them, so an empty folder's policies are still evaluated. Both report success."""
-    for module in (legacy, runner):
-        monkeypatch.setattr(module, 'list_projects_for_scope', lambda scope, scope_id: [])
-    # The best-practices CSV comes from GitHub: served here, so the test needs no network (the legacy run downloads
-    # on its own and reports nothing for the policies either way).
+def test_scan_without_projects_runs_the_scope_level_checks(client, gcp, monkeypatch):
+    """The real runner finds no projects. Since v15.3 the scan still runs the checks that look at the scope itself (an
+    organization's own checks here, a folder's Organization Policies) and reports them, so an empty folder's policies
+    are still evaluated (the pre-refactor worker stopped there and uploaded an empty report). The scan succeeds."""
+    monkeypatch.setattr(runner, 'list_projects_for_scope', lambda scope, scope_id: [])
+    # The best-practices CSV comes from GitHub: served here, so the test needs no network.
     monkeypatch.setattr(org_policies.gcp, 'http_get', lambda url, **kwargs: SimpleNamespace(status_code=200, text=BEST_PRACTICES_CSV, raise_for_status=lambda: None))
     # One policy set on the organization: what the Organization Policies check evaluates with no project to list.
     gcp.discovery.apis['cloudresourcemanager'] = fakes.FakeResourceManager({f'organizations/{SCOPE_ID}': {'compute.requireOsLogin': True}})
-    legacy_run, run = run_both(legacy_client, client, gcp.bucket)
-    assert_same_response(legacy_run.response, run.response)
-    assert run.response.status_code == 200
-    assert [status[0] for status in legacy_run.statuses] == [5, 98, 100]
+    run = run_one(client, gcp.bucket)
+    assert (run.response.status_code, run.response.get_data(as_text=True)) == (200, 'Scan completed and reports uploaded.')
     assert (run.statuses[0][0], run.statuses[-1][:2]) == (5, (100, 'Scan complete!'))
     assert any('Finished: ' in status[1] for status in run.statuses)  # the scope-level checks ran (progress is throttled)
-    legacy_html, html = legacy_run.objects[REPORT_HTML][0], run.objects[REPORT_HTML][0]
+    html = run.objects[REPORT_HTML][0]
     assert '0 of 0 projects · organization-level checks completed' in html
     assert 'Organization Policies' in html and 'policies as recommended' in html
-    assert 'Organization Policies' not in legacy_html
 
 
 def test_scan_job_with_the_real_runner(client, prod_app, gcp, monkeypatch):
@@ -334,165 +309,51 @@ def one_project(monkeypatch):
     monkeypatch.setattr(runner, 'get_active_compute_locations', lambda all_projects, on_error=None: ([], ['global']))
 
 
-BETA_V1_CHECKS = ['check_cloud_sql_security', 'check_vpc_configuration', 'check_storage_ubla', 'check_vm_external_ips']
-# v14: added to the plan after beta v1's checks (Service Health Incidents everywhere; Advisory Notifications
-# read from the organization in an organization scan, per project otherwise) ...
-V14_CHECKS = {'check_service_health_incidents', 'check_org_advisories', 'check_project_advisories'}
-# ... and beta v1's organization-level Personalized Service Health probe, which the per-project check replaces.
-RETIRED_CHECKS = {'check_service_health_status'}
-# v15: GKE Supported Versions, after Service Health Incidents in the common list.
-V15_CHECKS = {'check_gke_supported_versions'}
-# v15.6: Resilience of Critical Assets, organization-only in beta v1, runs under every scope after GKE Supported
-# Versions with the scope in its arguments, so it leaves the beta v1 comparison on both sides.
-V15_6_CHECKS = {'check_resilience_assets'}
-# v17: FinOps, capacity, quota and IAM, after Resilience of Critical Assets in the common list.
-V17_COMMON_CHECKS = ['check_cost_allocation_labels', 'check_storage_lifecycle', 'check_snapshot_sprawl', 'check_cloud_sql_versions',
-                     'check_capacity_commitments', 'check_capacity_signals', 'check_quota_recommendations', 'check_iam_recommendations']
-# v17.1: the SSRF-chain checks, scope-level, after IAM Least Privilege in the common list.
-V17_1_CHECKS = ['check_gke_security', 'check_service_account_impersonation', 'check_vpc_sc_coverage']
-V17_CHECKS = set(V17_COMMON_CHECKS) | set(V17_1_CHECKS)
-# v18.1: Essential Contacts runs in every scope (it leaves beta v1's organization-only list) and Data Access Audit Logs is new;
-# both scope-level, after the SSRF-chain checks in the common list.
-V18_1_CHECKS = ['check_essential_contacts', 'check_data_access_audit_logs']
-# v18.2: GKE Upgrade Readiness and GKE Observability (one function, two records), scope-level, after the v18.1 pair.
-V18_2_CHECKS = ['check_gke_operations']
-# v18.3: the network edge, five scope-level checks after GKE Upgrade Readiness.
-V18_3_CHECKS = ['check_hybrid_connectivity', 'check_load_balancer_edge', 'check_dns_posture', 'check_flow_logs', 'check_peering_and_nat']
-# v18.4: data governance, five scope-level checks after the network edge.
-V18_4_CHECKS = ['check_bigquery_governance', 'check_sql_flags', 'check_alloydb_posture', 'check_kms_keys', 'check_api_keys']
-# v18.5: VM hardening & identities — two scope-level functions of two records each, and the per-project unused-accounts check.
-V18_5_CHECKS = ['check_vm_posture', 'check_identity_hygiene', 'check_unused_service_accounts']
-V18_6_CHECKS = ['check_serverless_posture', 'check_edge_security', 'check_container_scanning']
-# v18.7: folders, keys and privileged grants — two scope-level functions (the second with two records) and two split checks.
-V18_7_CHECKS = ['check_folder_roles', 'check_privileged_grants', 'check_secret_posture', 'check_custom_roles']
-# v18.8: forecasts, budgets and spend — the spend check (scope-level, two records), the per-project log cost levers, the scope-level serverless cost check.
-V18_8_CHECKS = ['check_spend', 'check_log_cost', 'check_serverless_cost']
-# v18.9: logging pipeline and alerting hygiene — three scope-level checks (the scope's sinks; the aggregated sinks under it; the load balancers, services
-# and clusters) and two per-project ones (the _Default sink, bucket and view; the alert policies and their channels).
-V18_9_CHECKS = ['check_audit_pipeline', 'check_duplicate_routing', 'check_project_routing', 'check_alert_channels', 'check_synthetic_coverage']
-# v19: findings and vulnerabilities — SCC's findings under the scope (scope-level), the detector services per project, VM Manager's reports per project,
-# the exposed-privileged-VM join (scope-level).
-V19_CHECKS = ['check_scc_findings', 'check_detector_coverage', 'check_os_vulnerabilities', 'check_exposed_vms']
-# v19.1: footprint and detection — the inventory briefing under the scope and the two Admin Activity log reads (all three scope-level).
-V19_1_CHECKS = ['check_platform_footprint', 'check_gke_activity', 'check_sa_signals']
-# v19.2: the open support cases under the scope — one search, two records (Support Cases, Case Hygiene); scope-level.
-V19_2_CHECKS = ['check_support_cases']
-# v19.3: the guardrails weakened below the scanned resource (one listing of the policies set under it + the hierarchy); who could tell who read a bucket.
-V19_3_CHECKS = ['check_org_policy_exceptions', 'check_bucket_logging']
-LATER_CHECKS = (V14_CHECKS | V15_CHECKS | V15_6_CHECKS | V17_CHECKS | set(V18_1_CHECKS) | set(V18_2_CHECKS) | set(V18_3_CHECKS) | set(V18_4_CHECKS)
-                | set(V18_5_CHECKS) | set(V18_6_CHECKS) | set(V18_7_CHECKS) | set(V18_8_CHECKS) | set(V18_9_CHECKS) | set(V19_CHECKS) | set(V19_1_CHECKS) | set(V19_2_CHECKS) | set(V19_3_CHECKS))
+# The check plan by function name, per scope: the stability contract of the check names. A change here is a release
+# note (RELEASE_NOTES.md), never an incidental edit: the scan summary records these names, and a later scan tells a
+# check new to the release from one that had nothing to check by them (app.changes). Order is the plan's order.
+COMMON_CHECKS = [
+    'check_organization_policies', 'check_project_iam_policy', 'check_sa_key_rotation', 'check_public_buckets',
+    'check_open_firewall_rules', 'run_cost_recommendations', 'check_storage_versioning', 'check_gke_hygiene',
+    'check_os_config_coverage', 'check_monitoring_coverage', 'check_standalone_vms', 'run_network_insights',
+    'run_miscellaneous_checks_refactored', 'run_service_limit_checks_refactored',
+    'check_cloud_sql_security', 'check_vpc_configuration', 'check_storage_ubla', 'check_vm_external_ips',  # beta v1
+    'check_service_health_incidents',  # v14
+    'check_gke_supported_versions',  # v15
+    'check_resilience_assets',  # v15.6
+    'check_cost_allocation_labels', 'check_storage_lifecycle', 'check_snapshot_sprawl', 'check_cloud_sql_versions',  # v17
+    'check_capacity_commitments', 'check_capacity_signals', 'check_quota_recommendations', 'check_iam_recommendations',
+    'check_gke_security', 'check_service_account_impersonation', 'check_vpc_sc_coverage',  # v17.1
+    'check_essential_contacts', 'check_data_access_audit_logs',  # v18.1
+    'check_gke_operations',  # v18.2
+    'check_hybrid_connectivity', 'check_load_balancer_edge', 'check_dns_posture', 'check_flow_logs', 'check_peering_and_nat',  # v18.3
+    'check_bigquery_governance', 'check_sql_flags', 'check_alloydb_posture', 'check_kms_keys', 'check_api_keys',  # v18.4
+    'check_vm_posture', 'check_identity_hygiene', 'check_unused_service_accounts',  # v18.5
+    'check_serverless_posture', 'check_edge_security', 'check_container_scanning',  # v18.6
+    'check_folder_roles', 'check_privileged_grants', 'check_secret_posture', 'check_custom_roles',  # v18.7
+    'check_spend', 'check_log_cost', 'check_serverless_cost',  # v18.8
+    'check_audit_pipeline', 'check_duplicate_routing', 'check_project_routing', 'check_alert_channels', 'check_synthetic_coverage',  # v18.9
+    'check_scc_findings', 'check_detector_coverage', 'check_os_vulnerabilities', 'check_exposed_vms',  # v19
+    'check_platform_footprint', 'check_gke_activity', 'check_sa_signals',  # v19.1
+    'check_support_cases',  # v19.2
+    'check_org_policy_exceptions', 'check_bucket_logging',  # v19.3
+]
+PINNED_CHECK_PLAN = {
+    # An organization scan adds the organization's own checks, and reads Advisory Notifications from the organization.
+    'organization': COMMON_CHECKS + ['check_org_iam_policy', 'check_scc_status', 'check_audit_logging', 'check_org_advisories'],
+    # A folder or project scan reads Advisory Notifications per project.
+    'folder': COMMON_CHECKS + ['check_project_advisories'],
+    'project': COMMON_CHECKS + ['check_project_advisories'],
+}
 
 
-def finished_checks(progress_updates):
-    return {p['current_task'].split(' Finished: ')[1] for p in progress_updates}
-
-
-@pytest.mark.parametrize('scope, scope_id', [('organization', '123456789'), ('folder', '42'), ('project', 'web-prod')])
-def test_runner_runs_the_beta_v1_check_plan(scope, scope_id, beta, monkeypatch):
-    """Both runners call the same check functions with the same arguments and report the same progress.
-
-    The reference is upstream beta v1's ``run_all_checks``: the legacy plan plus four Security checks.
-    The v14, v15 and v15.6 checks come after them in the plan, and beta's retired probe is left out of the comparison.
-    """
-    zones, regions = ['us-central1-a'], ['us-central1', 'global']
-    specs = registry.build_check_plan(scope, scope_id, JOB_ID, PROJECTS, zones, regions)
-    names = [spec.func.__name__ for spec in specs]
-    v17_names = {spec.name for spec in specs if spec.func.__name__ in V17_CHECKS}
-    assert len(names) == (77 if scope == 'organization' else 74)
-    # Same order as beta v1's plan lists, which append the four checks after "Service Quota Limits".
-    beta_plan = ast.parse(textwrap.dedent(inspect.getsource(beta.run_all_checks)))
-    beta_lists = [[entry.elts[2].id for entry in node.elts if isinstance(entry, ast.Tuple)]
-                  for node in ast.walk(beta_plan) if isinstance(node, ast.List)]
-    beta_common, beta_org_only = [plan for plan in beta_lists if plan]
-    beta_names = beta_common + (beta_org_only if scope == 'organization' else [])
-    shared = [name for name in names if name not in LATER_CHECKS]
-    assert shared == [name for name in beta_names if name not in RETIRED_CHECKS | V15_6_CHECKS | set(V18_1_CHECKS)]
-    assert names[14:18] == BETA_V1_CHECKS
-    assert names[18:21] == ['check_service_health_incidents', 'check_gke_supported_versions', 'check_resilience_assets']
-    assert names[21:29] == V17_COMMON_CHECKS
-    assert names[29:32] == V17_1_CHECKS
-    assert names[32:34] == V18_1_CHECKS
-    assert names[34:35] == V18_2_CHECKS
-    assert names[35:40] == V18_3_CHECKS
-    assert names[40:45] == V18_4_CHECKS
-    assert names[45:48] == V18_5_CHECKS
-    assert names[48:51] == V18_6_CHECKS
-    assert names[51:55] == V18_7_CHECKS
-    assert names[55:58] == V18_8_CHECKS
-    assert names[58:63] == V18_9_CHECKS
-    assert names[63:67] == V19_CHECKS
-    assert names[67:70] == V19_1_CHECKS
-    assert names[70:71] == V19_2_CHECKS
-    assert names[71:73] == V19_3_CHECKS
-    assert names[-2:] == (['check_audit_logging', 'check_org_advisories'] if scope == 'organization' else ['check_bucket_logging', 'check_project_advisories'])
-    calls = {'beta': {}, 'new': {}}
-    sink = RecordingSink()
-
-    def recorder(implementation, name):
-        def check(*args, **kwargs):
-            calls[implementation][name] = (args, kwargs)
-        return check
-
-    for name in beta_common + beta_org_only:
-        monkeypatch.setattr(beta, name, recorder('beta', name))
-    for name in names:
-        monkeypatch.setattr(registry, name, recorder('new', name))
-    for module in (beta, runner):
-        monkeypatch.setattr(module, 'list_projects_for_scope', lambda scope, scope_id: PROJECTS)
-        monkeypatch.setattr(module, 'get_active_compute_locations', lambda all_projects, on_error=None: (zones, regions))
-
-    beta_progress, progress = [], []
-    assert beta.run_all_checks(scope, scope_id, JOB_ID, progress_callback=lambda **kw: beta_progress.append(kw)) is True
-    assert runner.run_all_checks(scope, scope_id, JOB_ID, progress_callback=lambda **kw: progress.append(kw), sink=sink) is True
-
-    assert set(calls['new']) == set(names)
-    assert set(calls['beta']) == set(beta_names)
-    # The two location-based checks take one argument more than in beta v1: the projects whose
-    # locations could not be discovered (none here), which they report as not checked. Cloud Storage Versioning
-    # (v18.1) takes the scope first: it lists the scope's log sinks once.
-    for name in shared:
-        beta_args, beta_kwargs = calls['beta'][name]
-        args, kwargs = calls['new'][name]
-        if name in ('check_storage_versioning', 'check_open_firewall_rules'):  # v18.1 / v18.3: the scope first (one listing of the scope's sinks / firewall policies)
-            assert (args, beta_args, kwargs) == ((scope, scope_id, PROJECTS, JOB_ID), (scope_id, PROJECTS, JOB_ID), {'sink': sink})
-            continue
-        assert (args[:len(beta_args)], beta_kwargs, kwargs) == (beta_args, {}, {'sink': sink}), name
-        assert args[len(beta_args):] == (({},) if name in ('run_cost_recommendations', 'run_network_insights') else ()), name
-    for name in names:
-        if name in LATER_CHECKS:
-            assert calls['new'][name][1] == {'sink': sink}, name
-    assert calls['new']['check_resilience_assets'][0] == (scope, scope_id, JOB_ID)  # v15.6: the scope, not the organization
-    # Checks finish in any order, so compare progress as sets of messages; both runners end their checks at 95%.
-    assert len(progress) == len(names) and len(beta_progress) == len(beta_names)
-    assert progress[-1]['progress'] == beta_progress[-1]['progress'] == 95
-    later = {registry.SERVICE_HEALTH_CHECK, registry.GKE_VERSIONS_CHECK, registry.ADVISORIES_CHECK, registry.RESILIENCE_CHECK} | v17_names
-    later |= {'Essential Contacts', registry.DATA_ACCESS_CHECK, registry.UPGRADE_READINESS_CHECK,  # v18.1 and v18.2: every scope, so out of the comparison on both sides
-              registry.HYBRID_CHECK, registry.EDGE_CHECK, registry.DNS_CHECK, registry.FLOW_LOGS_CHECK, registry.PEERING_NAT_CHECK,  # v18.3
-              registry.BIGQUERY_CHECK, registry.SQL_FLAGS_CHECK, registry.ALLOYDB_CHECK, registry.KMS_CHECK, registry.API_KEYS_CHECK,  # v18.4
-              registry.VM_SA_CHECK, registry.SA_PRIVILEGES_CHECK, registry.UNUSED_SA_CHECK,  # v18.5
-              registry.EXPOSURE_CHECK, registry.ARMOR_CHECK, registry.SCANNING_CHECK,  # v18.6
-              registry.FOLDER_ROLES_CHECK, registry.PRIVILEGED_GRANTS_CHECK, registry.SECRET_SCOPE_CHECK, registry.CUSTOM_ROLES_CHECK,  # v18.7
-              registry.SPEND_BRIEFING, registry.LOG_COST_CHECK, registry.SERVERLESS_COST_CHECK,  # v18.8
-              registry.AUDIT_PIPELINE_CHECK, registry.DUPLICATE_ROUTING_CHECK, registry.PROJECT_ROUTING_CHECK, registry.CHANNELS_CHECK, registry.SYNTHETIC_CHECK,  # v18.9
-              registry.SCC_FINDINGS_CHECK, registry.DETECTOR_CHECK, registry.OS_VULN_CHECK, registry.EXPOSED_VM_CHECK,  # v19
-              registry.FOOTPRINT_CHECK, registry.GKE_ACTIVITY_CHECK, registry.SA_SIGNALS_CHECK,  # v19.1
-              registry.SUPPORT_BRIEFING,  # v19.2
-              registry.ORG_POLICY_EXCEPTIONS_CHECK, registry.BUCKET_LOGGING_CHECK}  # v19.3
-    assert finished_checks(progress) - later == finished_checks(beta_progress) - {'Personalized Service Health', registry.RESILIENCE_CHECK, 'Essential Contacts'}
-    assert sink.findings == []
-
-
-@pytest.mark.parametrize('scope', ['organization', 'project'])
-def test_check_plan_is_the_legacy_plan_plus_the_beta_v1_checks(scope, legacy):
-    """No legacy check was dropped: the plan is the checks legacy ``run_all_checks`` names, plus the four
-    beta v1 checks and the v14 and v15 checks (legacy's Personalized Service Health probe is retired)."""
-    names = [spec.func.__name__ for spec in registry.build_check_plan(scope, SCOPE_ID, JOB_ID, PROJECTS, [], ['global'])]
-    legacy_names = set(legacy.run_all_checks.__code__.co_names)
-    advisories = 'check_org_advisories' if scope == 'organization' else 'check_project_advisories'
-    assert [name for name in names if name not in legacy_names] == \
-           BETA_V1_CHECKS + ['check_service_health_incidents', 'check_gke_supported_versions'] + V17_COMMON_CHECKS + V17_1_CHECKS + ['check_data_access_audit_logs', 'check_gke_operations'] + V18_3_CHECKS + V18_4_CHECKS + V18_5_CHECKS + V18_6_CHECKS + V18_7_CHECKS + V18_8_CHECKS + V18_9_CHECKS + V19_CHECKS + V19_1_CHECKS + V19_2_CHECKS + V19_3_CHECKS + [advisories]
-    if scope == 'organization':  # the one legacy check the plan no longer runs
-        assert {name for name in legacy_names if name.startswith('check_')} - set(names) == RETIRED_CHECKS
+@pytest.mark.parametrize('scope, scope_id', [('organization', SCOPE_ID), ('folder', '42'), ('project', 'web-prod')])
+def test_the_check_plan_is_pinned(scope, scope_id):
+    """The plan runs exactly these check functions, in this order (``PINNED_CHECK_PLAN``): 77 for an organization,
+    74 for a folder or a project. Adding, renaming or retiring a check changes this list and is a release note."""
+    names = [spec.func.__name__ for spec in registry.build_check_plan(scope, scope_id, JOB_ID, PROJECTS, [], ['global'])]
+    assert names == PINNED_CHECK_PLAN[scope]
+    assert len(names) == len(set(names)) == (77 if scope == 'organization' else 74)
 
 
 def test_runner_passes_location_discovery_failures_to_the_plan(monkeypatch):

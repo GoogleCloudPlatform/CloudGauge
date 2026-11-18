@@ -14,8 +14,8 @@
 """In-memory stand-ins for the GCP clients the app uses. No network, no credentials.
 
 ``FakeGcp`` holds one of each and patches them in where the libraries are looked
-up at call time. The legacy module and the new package reach GCP through
-different import styles, and this way both talk to the same fakes.
+up at call time; the fixtures in conftest.py re-point what the app binds at
+import time (the Gemini client factory).
 """
 import copy
 import io
@@ -94,7 +94,7 @@ class FakeBlob:
         return io.BytesIO(self._bytes())
 
     def generate_signed_url(self, **kwargs):
-        """Only the legacy app signs (the status page's CSV link until v16.1); the parity suite still renders it."""
+        """Records the request: nothing in the app signs a URL since v16.1 (the status page links the CSV route), and the tests assert so."""
         if self.bucket.signing_error:
             raise self.bucket.signing_error
         self.bucket.signed_url_requests.append((self.name, kwargs))
@@ -107,7 +107,7 @@ class FakeBlob:
 
 
 class FakeBucket:
-    """Objects are listed in upload order, so both implementations read findings in the same order."""
+    """Objects are listed in upload order, so the worker reads findings in the order they were written."""
 
     def __init__(self, name):
         self.name = name
@@ -402,12 +402,11 @@ class FakeResourceManager:
 
 
 class FakeGemini:
-    """Stands in for Gemini in both implementations; records every prompt as ``(model, prompt)``.
+    """Stands in for Gemini; records every prompt as ``(model, prompt)``.
 
-    - Legacy: ``vertexai.init`` (``init``) and ``GenerativeModel`` (``model_class``).
-    - New: ``app.services.gemini.get_client`` (``client``), a google-genai client
-      whose ``models.list()`` returns ``models`` and ``models.generate_content()``
-      replies like the legacy model does.
+    ``client`` replaces ``app.services.gemini.get_client``: a google-genai client
+    whose ``models.list()`` returns ``models`` and ``models.generate_content()``
+    answers ``reply`` (a string, or a function of the prompt) or raises ``error``.
     """
 
     # What Vertex AI lists, in its order: old and preview models, Lite and specialized variants.
@@ -418,9 +417,8 @@ class FakeGemini:
 
     def __init__(self):
         self.reply = 'gcloud compute firewall-rules delete allow-all --project=test-project'
-        self.error = None  # raised by both implementations
-        self.genai_error = None  # raised by the google-genai client instead of ``error``, when set
-        self.inits = []  # legacy vertexai.init() calls: (project, location)
+        self.error = None  # raised by generate_content()
+        self.genai_error = None  # raised instead of ``error``, when set (a google-genai ClientError, e.g. a 429)
         self.clients = []  # google-genai clients requested: (project, location)
         self.prompts = []
         self.models = [f'publishers/google/models/{model}' for model in self.MODELS]
@@ -434,22 +432,6 @@ class FakeGemini:
             raise error
         reply = self.reply(prompt) if callable(self.reply) else self.reply
         return SimpleNamespace(text=reply)
-
-    def init(self, project=None, location=None, **kwargs):
-        self.inits.append((project, location))
-
-    @property
-    def model_class(self):
-        gemini = self
-
-        class FakeGenerativeModel:
-            def __init__(self, model_name):
-                self.model_name = model_name
-
-            def generate_content(self, prompt):
-                return gemini._generate(self.model_name, prompt, gemini.error)
-
-        return FakeGenerativeModel
 
     def client(self, project, location):
         self.clients.append((project, location))
@@ -623,12 +605,10 @@ class FakeGcp:
         return self.credentials, TEST_ENV['PROJECT_ID']
 
     def install(self, monkeypatch):
-        """Patches the library attributes that both implementations read at call time.
+        """Patches the library attributes the app reads at call time.
 
-        Names bound at import time are not covered: the legacy module's
-        ``google_auth_default``, ``google_api_build``, ``vertexai``,
-        ``GenerativeModel`` and its two clients, and
-        ``app.services.gemini.get_client``. The fixtures in conftest.py re-point those.
+        A name bound at import time is not covered: ``app.services.gemini.get_client``
+        is re-pointed by the ``gcp`` fixture in conftest.py.
         """
         import google.auth
         from google.cloud import asset_v1, recommender_v1, storage, tasks_v2

@@ -11,17 +11,16 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""The reports: the Jinja HTML report and the CSV match the legacy generators.
+"""The reports: the Jinja HTML report and the CSV.
 
-Both generators get the same categorized results. The HTML reports are compared
-on what they say (``helpers.report_facts``: title, overview counts, scores, and
-every check item with its status, details and remediation placeholder) rather
-than line by line: the enterprise layout (plan item 6b) orders checks by
-severity, adds summary lines and paging, and so on, but must not lose or alter
-a finding. Entities are decoded in the comparison: the new report escapes the
-values it inserts (plan item B3), the legacy one didn't. The CSVs are compared
-byte for byte. No Flask app or request context is involved: reports are
-rendered by the worker, outside any request for a page.
+Both generators get the same categorized results, as the worker passes them.
+The HTML report is read through ``helpers.report_facts`` (title, overview
+counts, scores, and every check item with its status, details and remediation
+placeholder) where a test cares what it says rather than how: the enterprise
+layout (plan item 6b) orders checks by severity, adds summary lines and paging,
+and so on, but must not lose or alter a finding. The report escapes the values
+it inserts (plan item B3). No Flask app or request context is involved: reports
+are rendered by the worker, outside any request for a page.
 """
 import json
 import re
@@ -35,7 +34,7 @@ from app.config import VERSION
 from app.reporting.context import MAX_ROWS_PER_CHECK, ROWS_PER_PAGE
 from app.reporting.csv_report import generate_csv_data
 from app.reporting.html_report import generate_html_report, report_environment
-from helpers import assert_same_csv_tables, comparable, csv_sections, csv_tables, report_facts
+from helpers import csv_sections, csv_tables, report_facts
 
 SECURITY, COST, RELIABILITY, OPERATIONS = ('Security & Identity', 'Cost Optimization', 'Reliability & Resilience',
                                            'Operational Excellence & Observability')
@@ -87,47 +86,36 @@ SCENARIOS = {
 }
 
 
-@pytest.fixture
-def legacy_reports(legacy):
-    """The legacy report generators (from the module imported once per session)."""
-    return legacy
-
-
 @pytest.mark.parametrize('name', SCENARIOS)
-def test_html_report_matches_legacy(name, legacy_reports):
-    """Same findings, statuses and details as the legacy report; the scores and counts diverged by design (helpers.SCORED_FACTS)."""
+def test_html_report_renders_every_scenario(name):
+    """Every scenario renders, and its facts can be read back: a report with findings lists each check once, under its
+    name and with a status badge."""
     results = SCENARIOS[name]
-    html = generate_html_report('organization', '123456789', 'job-42', **results)
-    assert comparable(report_facts(html)) == comparable(report_facts(legacy_reports.generate_html_report('organization', '123456789', 'job-42', **results)))
+    facts = report_facts(generate_html_report('organization', '123456789', 'job-42', **results))
+    assert facts['title'] == 'CloudGauge Report: Organization 123456789'
+    assert facts['header'] == ('Organization', '123456789', 'job-42')
+    listed = {check['Check'] for category, findings in results.items() if category not in ('Organization Policies', 'Uncategorized') for check in findings}
+    names = [name for name, *_ in facts['items']]
+    assert len(names) == len(set(names))
+    assert listed <= set(names)
+    assert all(badge for _, badge, *_ in facts['items'])
 
 
 @pytest.mark.parametrize('scope, scope_id', [('organization', '123456789'), ('folder', '42'), ('project', 'web-prod')])
-def test_html_report_matches_legacy_for_each_scope(scope, scope_id, legacy_reports):
+def test_html_report_names_the_scope(scope, scope_id):
     """The title and header use the scope; the Security section's console link is for organizations only."""
-    results = SCENARIOS['sample scan']
-    html = generate_html_report(scope, scope_id, 'job-42', **results)
-    assert comparable(report_facts(html)) == comparable(report_facts(legacy_reports.generate_html_report(scope, scope_id, 'job-42', **results)))
+    html = generate_html_report(scope, scope_id, 'job-42', **SCENARIOS['sample scan'])
     assert f'<title>CloudGauge Report: {scope.capitalize()} {scope_id}</title>' in html
+    assert report_facts(html)['header'] == (scope.capitalize(), scope_id, 'job-42')
     assert ('active-assist/list/security/recommendations?organizationId=' in html) is (scope == 'organization')
 
 
-@pytest.mark.parametrize('name', [name for name in SCENARIOS if name != 'mixed detail types'])
-def test_csv_report_matches_legacy(name, legacy_reports):
-    """Same sections, same tables, same rows as the legacy CSV. The tables of a
-    category may come in a different order: since v15.1 they are listed as the
-    page lists its checks, where the legacy writer kept arrival order."""
-    results = SCENARIOS[name]
-    assert_same_csv_tables(generate_csv_data(results), legacy_reports.generate_csv_data(results))
-
-
-def test_csv_report_raises_like_legacy_on_mixed_detail_types(legacy_reports):
-    """Details mixing dicts and strings: the HTML report falls back to text, but the CSV raises (in both)."""
+def test_csv_report_raises_on_mixed_detail_types():
+    """Details mixing dicts and strings: the HTML report falls back to text, but the CSV raises."""
     results = SCENARIOS['mixed detail types']
-    with pytest.raises(AttributeError) as legacy_error:
-        legacy_reports.generate_csv_data(results)
-    with pytest.raises(AttributeError) as error:
+    assert 'n2-standard-8 is enough' in generate_html_report('organization', '123456789', 'job-42', **results)
+    with pytest.raises(AttributeError):
         generate_csv_data(results)
-    assert str(error.value) == str(legacy_error.value)
 
 
 def test_csv_report_rows():
@@ -487,20 +475,8 @@ def test_a_page_whose_checks_the_filter_hides_says_so():
     assert 'class="empty-state filter-empty"' not in html and html.count('Not assessed — no') == 4
 
 
-def test_parity_helper_ignores_the_pages_the_legacy_report_left_out(legacy_reports):
-    """report_facts compares the pages that list checks; the new report's empty pages are not a difference,
-    and neither are the scores (SCORED_FACTS): the legacy report gave an empty category 100%, the new one no score."""
-    results = SCENARIOS['mixed detail types']
-    facts = report_facts(generate_html_report('organization', '123456789', 'job-42', **results))
-    assert facts['sections'] == ['cost-optimization'] and facts['section_scores'] == [('cost-optimization', 'low', '0')]
-    assert facts['scores'] == [('low', '0')]  # the Review scores table: only Cost has a number, the other three are not assessed
-    legacy_facts = report_facts(legacy_reports.generate_html_report('organization', '123456789', 'job-42', **results))
-    assert legacy_facts['scores'] == [('high', '100'), ('low', '0'), ('high', '100'), ('high', '100')]
-    assert facts != legacy_facts and comparable(facts) == comparable(legacy_facts)
-
-
 def test_finding_text_is_escaped():
-    """Plan item B3: finding text is inserted as text (the legacy report inserted it as raw HTML)."""
+    """Plan item B3: finding text is inserted as text, never as raw HTML."""
     html = generate_html_report('organization', '123456789', 'job-42', **SCENARIOS['html in findings'])
     assert 'Rule &lt;b&gt;allow-all&lt;/b&gt; &amp; &#34;default&#34; open to 0.0.0.0/0' in html
     assert ('<td class="nowrap code"><code class="chip">&lt;script&gt;alert(1)&lt;/script&gt;</code></td>'

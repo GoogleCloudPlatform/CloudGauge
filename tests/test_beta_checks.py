@@ -11,10 +11,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""The four Security checks ported from upstream beta v1 (``tests/legacy/cloudgauge_beta_v1.py``).
+"""The four Security checks ported from the upstream beta v1 branch.
 
-Until v18 each ran in the frozen beta v1 module and in ``app.checks.security`` against the same fakes and had to
-write the same finding — which froze beta v1's defects along with its behaviour. All four have since left the parity
+Until v18 each ran in a frozen copy of beta v1 and in ``app.checks.security`` against the same fakes and had to
+write the same finding — which froze beta v1's defects along with its behaviour. All four have since left that parity
 by design: Cloud SQL Security and VM External IPs in v18 (``requireSsl``, access-config presence), VPC Configuration and
 Uniform Bucket-Level Access in v18.1 (subnet purposes and the aggregated listing; a ``Fix`` column). Their rules are tested
 in ``tests/test_revalidated_checks.py`` and ``tests/test_loose_rules.py``; this module keeps what the four still share

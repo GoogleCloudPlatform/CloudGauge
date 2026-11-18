@@ -361,7 +361,7 @@ def test_no_internal_reference_is_in_the_repository():
     offences = []
     for name in repository_files():
         path = ROOT / name
-        if path.suffix not in TEXT_SUFFIXES or not path.is_file() or name.startswith('tests/legacy/'):
+        if path.suffix not in TEXT_SUFFIXES or not path.is_file():
             continue
         try:
             text = path.read_text(encoding='utf-8')
@@ -372,3 +372,31 @@ def test_no_internal_reference_is_in_the_repository():
                 if pattern.search(line) and name != 'tests/test_packaging.py':
                     offences.append(f'{name}:{line_number}: {what}: {line.strip()[:120]}')
     assert offences == [], 'the repository is public; move these to an internal document:\n' + '\n'.join(offences)
+
+
+# v20 (plan item A5): the frozen copies of the pre-refactor application (``tests/legacy/``) and the fixtures built on them
+# are gone; the route, worker and report tests pin the contract themselves. Nothing may grow back onto them.
+FROZEN_MODULE_TERMS = ('cloudgauge_legacy', 'cloudgauge_beta_v1', 'tests/legacy', 'legacy_client', 'legacy_import', 'beta_import')
+# Where a term may still appear: this module (the terms themselves) and the release notes (history).
+FROZEN_MODULE_TERM_ALLOWANCES = {
+    *(('tests/test_packaging.py', term) for term in FROZEN_MODULE_TERMS),
+    *(('RELEASE_NOTES.md', term) for term in FROZEN_MODULE_TERMS),
+}
+
+
+def test_nothing_refers_to_the_frozen_modules():
+    offences = []
+    for name in repository_files():
+        path = ROOT / name
+        if path.suffix not in TEXT_SUFFIXES or not path.is_file():
+            continue
+        try:
+            text = path.read_text(encoding='utf-8')
+        except (UnicodeDecodeError, OSError):
+            continue
+        for line_number, line in enumerate(text.splitlines(), start=1):
+            for term in FROZEN_MODULE_TERMS:
+                if term in line and (name, term) not in FROZEN_MODULE_TERM_ALLOWANCES:
+                    offences.append(f'{name}:{line_number}: {term}: {line.strip()[:120]}')
+    assert not (ROOT / 'tests' / 'legacy').exists()
+    assert offences == [], 'the frozen pre-refactor modules were removed in v20; the tests pin the contract:\n' + '\n'.join(offences)

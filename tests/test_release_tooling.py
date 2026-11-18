@@ -136,8 +136,8 @@ def test_the_release_workflow_holds_the_tag_to_the_version_and_to_main():
 def test_ci_runs_the_suite_on_both_interpreters_and_inside_the_image():
     ci = workflow('ci.yml')
     assert "python: ['3.11', '3.13']" in ci
-    assert 'python -m pytest -p no:cacheprovider -q --no-header -rfE --ignore=tests/legacy' in ci
-    assert 'ruff check --extend-exclude tests/legacy --select E9,F63,F7,F82,F401,F811 app tests tools cloudgauge.py run.py' in ci
+    assert 'python -m pytest -p no:cacheprovider -q --no-header -rfE' in ci
+    assert 'ruff check --select E9,F63,F7,F82,F401,F811 app tests tools cloudgauge.py run.py' in ci
     assert 'docker build -f Dockerfile.test --build-arg APP_IMAGE=cloudgauge -t cloudgauge-test .' in ci and 'docker run --rm cloudgauge-test' in ci
     assert 'terraform fmt -check -recursive -diff' in ci and 'terraform init -backend=false -input=false' in ci and 'terraform validate' in ci
     for job in ('name: tests (${{ matrix.python }})', 'name: terraform', 'name: docker'):
