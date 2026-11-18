@@ -398,13 +398,14 @@ tools/demo_gif.py        # Records the README's demo GIF from a scan on a deploy
 tools/deploy.sh          # Deploys or updates the two services (worker, web behind IAP), the export dataset and the schedules, and grants access; see Deployment
 tools/iap_token.py       # A token that passes IAP, for curl, scripts and demo_gif.py (service-account signed JWT)
 tools/backfill_export.py # Loads the scans made before the BigQuery export existed, from their summaries and CSVs (v17)
+tools/release_notes.py   # The release's section of RELEASE_NOTES.md — the body of its GitHub Release (v20)
 terraform/               # The same deployment declared in Terraform (v17.2): the two services, IAP, the account and its roles, the bucket, the queue, the export, the schedules; see Method 3
 VERSION                  # The release number — the one place it is written; app/config.py reads it, the image copies it (v20)
 Dockerfile               # Production image
 Dockerfile.test          # Runs the test suite inside the production image
 cloudbuild.yaml          # Cloud Build: build -> test -> push
-.github/                 # workflows/ci.yml (the suite on Python 3.11 and 3.13, terraform validate, the container build — every pull request), dependabot.yml,
-                         # CODEOWNERS, the issue and pull-request templates, rulesets/main.json (the branch rules of main, as exported) (v20)
+.github/                 # workflows/ci.yml (the suite on Python 3.11 and 3.13, terraform validate, the container build — every pull request), workflows/release.yml
+                         # (a tag publishes the GitHub Release), dependabot.yml, CODEOWNERS, the issue and pull-request templates, rulesets/main.json (the branch rules of main) (v20)
 SECURITY.md              # How to report a vulnerability — privately
 requirements.txt         # Production dependencies (pinned)
 requirements-dev.txt     # Adds pytest and ruff
@@ -1056,7 +1057,7 @@ DOCKER_BUILDKIT=1 docker build -f Dockerfile.test --build-arg APP_IMAGE=cloudgau
 docker run --rm cloudgauge-test
 ```
 
-**Cut a release.** The release number is written in one file, `VERSION` at the repository root (v20): `app/config.py` reads it and the image copies it. Bump it, bump the same number in `terraform/versions.tf`'s `module_name` (a `provider_meta` block takes constants only, so it cannot read the file), and add the release's `## vX — …` entry at the top of `RELEASE_NOTES.md`; `tests/test_packaging.py` and `tests/test_terraform.py` check that the three agree, because the report's footer shows that version and every scan summary records it (it is how a scan tells a check new to the release from one that had nothing to check). Nothing at runtime reads the release notes — the app image leaves out every `.md` file — and a checkout without them skips that check rather than failing.
+**Cut a release.** The release number is written in one file, `VERSION` at the repository root (v20): `app/config.py` reads it and the image copies it. A release is one pull request that bumps it, bumps the same number in `terraform/versions.tf`'s `module_name` (a `provider_meta` block takes constants only, so it cannot read the file), and adds the release's `## vX — …` section at the top of `RELEASE_NOTES.md`; `tests/test_packaging.py` and `tests/test_terraform.py` check that the three agree, because the report's footer shows that version and every scan summary records it (it is how a scan tells a check new to the release from one that had nothing to check). Once it is merged, the tag publishes the release: `git fetch origin main && git tag -a v20.0.0 origin/main -m "v20.0.0" && git push origin v20.0.0` — `.github/workflows/release.yml` checks that the tag names that commit's `VERSION` and that the commit is on `main`, takes the release's section of the notes as the body (`tools/release_notes.py`) and creates the GitHub Release, a pre-release when the tag carries a suffix (`v20.0.0-rc.1`). Nothing is built by the release: every deployment method builds the image in the deployer's project from the tagged source. Nothing at runtime reads the release notes — the app image leaves out every `.md` file — and a checkout without them skips that check rather than failing. Pull-request titles are [Conventional Commits](https://www.conventionalcommits.org/) (`feat:`, `fix:`, `docs:`, `ci:`, `build:`, `chore:`; `feat!:` for a change to the stability surface): the squash commit carries the title, so `git log main` reads as a changelog between two tags.
 
 `tests/legacy/` holds a frozen copy of the original single-file `cloudgauge.py`. The parity tests use it to check that the refactored routes, worker, and reports behave like the original.
 
