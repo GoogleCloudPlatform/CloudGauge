@@ -1043,8 +1043,8 @@ Scans are always executed through Cloud Tasks, which must reach a public worker 
 ```
 pytest                         # full suite
 pytest tests/test_smoke.py     # quick pre-deploy smoke tests
-# Lint: errors, undefined names, and unused/redefined imports (tests/legacy is a frozen upstream copy)
-ruff check --extend-exclude tests/legacy --select E9,F63,F7,F82,F401,F811 app tests tools cloudgauge.py run.py
+# Lint: errors, undefined names, and unused/redefined imports
+ruff check --select E9,F63,F7,F82,F401,F811 app tests tools cloudgauge.py run.py
 ```
 
 **Continuous integration.** `.github/workflows/ci.yml` runs the same lint and suite on Python 3.11 (the image) and 3.13, `terraform fmt -check` / `init -backend=false` / `validate` on `terraform/`, and the container build below with the suite inside it, on every pull request and every push to `main`. The four jobs — `tests (3.11)`, `tests (3.13)`, `terraform`, `docker` — are the required status checks of `main`.
@@ -1058,8 +1058,6 @@ docker run --rm cloudgauge-test
 ```
 
 **Cut a release.** The release number is written in one file, `VERSION` at the repository root (v20): `app/config.py` reads it and the image copies it. A release is one pull request that bumps it, bumps the same number in `terraform/versions.tf`'s `module_name` (a `provider_meta` block takes constants only, so it cannot read the file), and adds the release's `## vX — …` section at the top of `RELEASE_NOTES.md`; `tests/test_packaging.py` and `tests/test_terraform.py` check that the three agree, because the report's footer shows that version and every scan summary records it (it is how a scan tells a check new to the release from one that had nothing to check). Once it is merged, the tag publishes the release: `git fetch origin main && git tag -a v20.0.0 origin/main -m "v20.0.0" && git push origin v20.0.0` — `.github/workflows/release.yml` checks that the tag names that commit's `VERSION` and that the commit is on `main`, takes the release's section of the notes as the body (`tools/release_notes.py`) and creates the GitHub Release, a pre-release when the tag carries a suffix (`v20.0.0-rc.1`). Nothing is built by the release: every deployment method builds the image in the deployer's project from the tagged source. Nothing at runtime reads the release notes — the app image leaves out every `.md` file — and a checkout without them skips that check rather than failing. Pull-request titles are [Conventional Commits](https://www.conventionalcommits.org/) (`feat:`, `fix:`, `docs:`, `ci:`, `build:`, `chore:`; `feat!:` for a change to the stability surface): the squash commit carries the title, so `git log main` reads as a changelog between two tags.
-
-`tests/legacy/` holds a frozen copy of the original single-file `cloudgauge.py`. The parity tests use it to check that the refactored routes, worker, and reports behave like the original.
 
 ## **Load Testing with a Synthetic Organization**
 

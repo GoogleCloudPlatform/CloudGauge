@@ -16,8 +16,8 @@
 A fast pre-deploy gate (``pytest tests/test_smoke.py``). The app is built the
 way gunicorn builds it (``create_app()``, production profile, deployed
 environment), with Cloud Storage and Cloud Tasks replaced by the in-memory
-fakes in ``fakes.py``; ``unittest.mock`` injects failures. The parity suites
-(test_api_parity.py, test_worker.py, ...) cover behavior in depth.
+fakes in ``fakes.py``; ``unittest.mock`` injects failures. The contract suites
+(test_api_contract.py, test_worker.py, test_routes.py, ...) cover behavior in depth.
 
 Route note: status is keyed by job *and* scope, since the worker writes
 ``{job_id}/{scope_id}_status.json``. The polling endpoint is therefore

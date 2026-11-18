@@ -13,10 +13,10 @@
 # limitations under the License.
 """create_app(): profiles, the production startup sequence, and per-app services.
 
-In production, create_app() runs the startup that the legacy module ran at import
-time, and fails the same way (same exception, same message) when the deployment
-is misconfigured. One difference is intended: the environment is validated
-before any GCP call, where the legacy module looked up its URL first.
+In production, create_app() checks its dependencies before it serves — the
+environment first (before any GCP call), then the worker URL, then the task
+queue — and fails startup with the exception and message pinned here when the
+deployment is misconfigured.
 """
 import json
 import logging
@@ -30,13 +30,12 @@ from app import create_app
 from app.extensions import EXTENSION_KEY, Services
 from app.services import gcp as gcp_clients
 from app.services.results_store import GcsResultsStore
-from helpers import import_legacy, make_settings, set_env
+from helpers import make_settings, set_env
 
 REQUIRED = tuple(fakes.TEST_ENV)
 REGION = 'projects/test-project/locations/us-central1'
-QUEUE_CREATED = (REGION, {'name': f'{REGION}/queues/test-queue'})
-# New: the queue is created with the limits sharded scans rely on (the legacy code created it with defaults:
-# 1,000 concurrent dispatches and 100 attempts, i.e. a crashed scan was retried for hours).
+# The queue is created with the limits sharded scans rely on (created with the defaults — 1,000 concurrent dispatches
+# and 100 attempts — a crashed scan was retried for hours).
 QUEUE_CREATED_WITH_LIMITS = (REGION, {
     'name': f'{REGION}/queues/test-queue',
     'rate_limits': {'max_concurrent_dispatches': 25},
@@ -47,13 +46,6 @@ RUN_SERVICE = f'{REGION}/services/{fakes.K_SERVICE}'
 
 def services_of(app):
     return app.extensions[EXTENSION_KEY]
-
-
-def legacy_startup_error(expected_type):
-    """Imports a fresh copy of the legacy module, whose startup must fail with ``expected_type``."""
-    with pytest.raises(expected_type) as error:
-        import_legacy('cloudgauge_legacy_startup')
-    return error.value
 
 
 @pytest.mark.parametrize('profile', ['testing', 'development'])
@@ -81,54 +73,53 @@ def test_testing_profile_resolves_the_worker_url_once_on_first_use(testing_app, 
     assert [task['http_request']['url'] for _, task in gcp.tasks.tasks] == [f'{fakes.WORKER_URL}/run-scan'] * 2
 
 
-def test_production_startup_matches_legacy(legacy_import, gcp, env):
+def test_production_startup_checks_its_dependencies(gcp, env):
+    """The production profile: one Cloud Run API lookup of the service's URL (the worker URL), one task queue created
+    with its limits, no task — and the app serves with the URL it found."""
     app = create_app()
     assert not app.testing
     assert app.config['CLOUDGAUGE_PROFILE'] == 'production'
-    startup = legacy_import.startup
-    assert gcp.discovery.run_services == startup.discovery.run_services == [RUN_SERVICE]
-    assert startup.tasks.queues == [QUEUE_CREATED]
+    assert gcp.discovery.calls == [('run', 'v1')]
+    assert gcp.discovery.run_services == [RUN_SERVICE]
+    assert gcp.auth_scopes == [['https://www.googleapis.com/auth/cloud-platform']]
     assert gcp.tasks.queues == [QUEUE_CREATED_WITH_LIMITS]
-    assert services_of(app).worker_url == legacy_import.module.WORKER_URL == fakes.WORKER_URL
+    assert gcp.tasks.tasks == []
+    assert services_of(app).worker_url == fakes.WORKER_URL
 
 
 @pytest.mark.parametrize('missing', [(name,) for name in REQUIRED] + [('PROJECT_ID', 'TASK_QUEUE'), REQUIRED])
-def test_missing_env_vars_fail_startup_like_legacy(missing, gcp, env, monkeypatch):
+def test_missing_env_vars_fail_startup(missing, gcp, env, monkeypatch):
     for name in missing:
         monkeypatch.delenv(name)
     with pytest.raises(RuntimeError) as error:
         create_app()
     assert gcp.discovery.calls == [] and gcp.tasks.queues == []  # failed before any GCP call
-    assert str(error.value) == str(legacy_startup_error(RuntimeError))
     assert str(error.value) == f"FATAL: Missing required environment variables: {', '.join(missing)}"
 
 
-def test_empty_env_var_counts_as_missing_like_legacy(gcp, env, monkeypatch):
+def test_empty_env_var_counts_as_missing(gcp, env, monkeypatch):
     monkeypatch.setenv('RESULTS_BUCKET', '')
     with pytest.raises(RuntimeError) as error:
         create_app()
-    assert str(error.value) == str(legacy_startup_error(RuntimeError))
     assert str(error.value) == 'FATAL: Missing required environment variables: RESULTS_BUCKET'
 
 
-def test_missing_k_service_fails_startup_like_legacy(gcp, env, monkeypatch):
+def test_missing_k_service_fails_startup(gcp, env, monkeypatch):
     monkeypatch.delenv('K_SERVICE')
     with pytest.raises(RuntimeError) as error:
         create_app()
-    assert str(error.value) == str(legacy_startup_error(RuntimeError))
     assert str(error.value).startswith('K_SERVICE environment variable not found.')
 
 
-def test_worker_url_lookup_failure_fails_startup_like_legacy(gcp, env):
+def test_worker_url_lookup_failure_fails_startup(gcp, env):
     gcp.discovery.worker_url = None  # the Cloud Run API response has no URL
     with pytest.raises(RuntimeError) as error:
         create_app()
-    assert str(error.value) == str(legacy_startup_error(RuntimeError))
     assert str(error.value) == f'Could not find URL in API response for service {fakes.K_SERVICE}.'
 
 
 def test_worker_url_setting_replaces_the_lookup(gcp, env, monkeypatch):
-    """New behavior (plan B5): the legacy code told users to set WORKER_URL but never read it."""
+    """Plan B5: WORKER_URL replaces the Cloud Run API lookup (the pre-refactor app told users to set it but never read it)."""
     monkeypatch.delenv('K_SERVICE')
     monkeypatch.setenv('WORKER_URL', 'https://worker.example/')
     app = create_app()
@@ -182,12 +173,12 @@ def test_unreadable_queue_limits_do_not_fail_startup(gcp, env, caplog):
 
 
 @pytest.mark.parametrize('error', [PermissionDenied('The caller lacks cloudtasks.queues.create'), RuntimeError('Cloud Tasks unavailable')])
-def test_queue_errors_fail_startup_like_legacy(error, gcp, env):
+def test_queue_errors_fail_startup(error, gcp, env):
+    """A queue creation error other than AlreadyExists fails startup with that very exception."""
     gcp.tasks.create_queue_error = error
     with pytest.raises(type(error)) as raised:
         create_app()
     assert raised.value is error
-    assert legacy_startup_error(type(error)) is error
 
 
 def test_unknown_profile_is_rejected(gcp, env, monkeypatch):

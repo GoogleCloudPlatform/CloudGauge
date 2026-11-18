@@ -778,8 +778,8 @@ def check_open_firewall_rules(scope, scope_id, all_projects, job_id, *, sink, po
 
 
 # --- Checks added in upstream beta v1 ---
-# Ported from the upstream beta branch (cloudgauge_beta_v1.py) with the same
-# mechanical changes as the checks above; v18 revalidated Cloud SQL Security and VM External IPs.
+# Ported from the single-file application's upstream beta branch with the same mechanical changes
+# as the checks above; v18 revalidated Cloud SQL Security and VM External IPs.
 
 # Cloud SQL Security (v18): TLS by ``sslMode`` (the field that replaced ``requireSsl``), the authorized networks, the public IP.
 SQL_CHECK = "Cloud SQL Security"
