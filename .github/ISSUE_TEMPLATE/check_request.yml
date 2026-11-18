@@ -1,0 +1,32 @@
+name: Check request
+description: A configuration CloudGauge should look at, or a verdict it gets wrong.
+title: "check: "
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        A check is a rule with a verdict — **Action Required**, **Investigation Recommended**, **Compliant** or *Informational* — and a working `Fix` for every row.
+        The README's **Features** section lists what exists; the roadmap at the end of `RELEASE_NOTES.md` what is planned.
+  - type: textarea
+    id: rule
+    attributes:
+      label: The rule
+      description: What configuration, what makes it a finding, and which verdict. If a Security Command Center detector or an organization policy covers it, name it.
+    validations:
+      required: true
+  - type: textarea
+    id: source
+    attributes:
+      label: Where the data is
+      description: The API or Cloud Asset Inventory asset type that exposes it (`gcloud … describe` output is a good pointer), and the role it needs — CloudGauge adds no organization-level role or API without a reason.
+  - type: textarea
+    id: fix
+    attributes:
+      label: The fix
+      description: The `gcloud` line (or Terraform) that remediates one finding.
+  - type: dropdown
+    id: existing
+    attributes:
+      label: Is this a change to an existing check?
+      options: ["No, a new check", "Yes — a wrong verdict", "Yes — a missing row or column", "Yes — a wrong Fix"]

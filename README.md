@@ -403,7 +403,9 @@ VERSION                  # The release number — the one place it is written; a
 Dockerfile               # Production image
 Dockerfile.test          # Runs the test suite inside the production image
 cloudbuild.yaml          # Cloud Build: build -> test -> push
-.github/workflows/ci.yml # GitHub Actions: the suite on Python 3.11 and 3.13, terraform validate, the container build — on every pull request (v20)
+.github/                 # workflows/ci.yml (the suite on Python 3.11 and 3.13, terraform validate, the container build — every pull request), dependabot.yml,
+                         # CODEOWNERS, the issue and pull-request templates, rulesets/main.json (the branch rules of main, as exported) (v20)
+SECURITY.md              # How to report a vulnerability — privately
 requirements.txt         # Production dependencies (pinned)
 requirements-dev.txt     # Adds pytest and ruff
 ```
@@ -1421,4 +1423,4 @@ This is not an officially supported Google product. This project is not eligible
 
 This project is licensed under the Apache 2.0 License. See the `LICENSE` file for details.
 
-For issues or feature requests, please file an issue on the project's GitHub page.
+For issues or feature requests, please file an issue on the project's GitHub page — there are templates for a bug, a check request and a deployment problem. A **security problem** goes through [SECURITY.md](SECURITY.md) (g.co/vulnz or the repository's private vulnerability reporting), never through an issue.
