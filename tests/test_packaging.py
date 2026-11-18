@@ -43,7 +43,7 @@ from helpers import make_settings
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 TEMPLATES = ['_design.css', 'history.html', 'index.html', 'report/_macros.html', 'report/_scorecard.html', 'report/_script.js', 'report/_styles.css',
-             'report/report.html', 'scan_running.html', 'status.html']
+             'report/report.html', 'scan_not_queued.html', 'scan_running.html', 'status.html']
 WEB_MODULES = ['app.extensions', 'app.identity', 'app.routes', 'app.routes.api', 'app.routes.guards', 'app.routes.ui', 'app.routes.worker']
 
 # Makes any network connection or GCP client creation raise.

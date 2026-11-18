@@ -30,11 +30,18 @@ noted job counts as running while its status file says so; a job with no status
 file yet counts as running for ``PENDING_MAX_AGE`` only (a task that never
 dispatched must not block its scope), and any note older than ``LOCK_MAX_AGE`` is
 stale (the sweeper finishes dead jobs well before).
+
+When Cloud Tasks will not take the task — after ``app.services.tasks.ENQUEUE_RETRY``
+(v20) — nothing was started and nothing is noted: ``POST /scan`` answers **503** with
+a page that says so, ``/scheduled-scan`` 503 with the same words (Cloud Scheduler
+retries the job as configured), both with ``Retry-After``.
 """
 import logging
 import re
 import uuid
 from datetime import timedelta
+
+from google.api_core.exceptions import GoogleAPIError, RetryError
 
 from app import validation
 from app.services import tasks
@@ -48,6 +55,20 @@ LOCK_MAX_AGE = timedelta(hours=36)
 # seconds; a task that never arrives must not block its scope for LOCK_MAX_AGE).
 PENDING_MAX_AGE = timedelta(minutes=10)
 FINISHED_STATUSES = ("completed", "error")
+# v20: what both entry points say when Cloud Tasks would not take the task, and the Retry-After they send with it.
+NOT_QUEUED_MESSAGE = "The scan could not be queued: Cloud Tasks did not take the task. Nothing was started; try again in a minute."
+RETRY_AFTER_SECONDS = 60
+
+
+def not_queued_answer(error):
+    """One line on what Cloud Tasks answered, for the log, the page and the JSON: the last answer behind a ``RetryError``
+    (``"retried for 30 s: 503 Stream removed"``) or the answer itself (``"403 ..."``), without a traceback."""
+    if isinstance(error, RetryError) and error.cause is not None:
+        return f"retried for {tasks.ENQUEUE_RETRY.timeout:.0f} s: {not_queued_answer(error.cause)}"
+    code = getattr(error, "code", None)
+    text = getattr(error, "message", None) or str(error)
+    text = " ".join(str(text).split())[:200]
+    return f"{code} {text}" if code and not text.startswith(str(code)) else text
 
 
 class ScanInProgress(Exception):
@@ -137,7 +158,8 @@ def start_scheduled_scan(services, data, now=None):
     """Starts the scan a Cloud Scheduler body asks for; returns ``(response dict, HTTP status)``.
 
     202 with the job ID when the scan was enqueued (the body carries the status page's path);
-    400 when the body is malformed; 409 when the scope's previous scan is still running.
+    400 when the body is malformed; 409 when the scope's previous scan is still running; 503 when
+    Cloud Tasks would not take the task (v20) — nothing was started.
     """
     try:
         scope, scope_id, name = validate(data)
@@ -149,5 +171,9 @@ def start_scheduled_scan(services, data, now=None):
         lock = e.lock
         return {"error": f"A scan of {scope} {scope_id} is still running (job {lock['job_id']}, started {lock.get('started_at')}); "
                          f"nothing was started.", "job_id": lock["job_id"], "schedule": name}, 409
+    except GoogleAPIError as e:  # v20: Cloud Tasks did not take the task within the retry; Cloud Scheduler retries the job
+        answer = not_queued_answer(e)
+        logging.error(f"The scheduled scan '{name}' of {scope} {scope_id} could not be queued on {services.settings.task_queue}: {answer}")
+        return {"error": NOT_QUEUED_MESSAGE, "schedule": name, "queue": services.settings.task_queue, "answer": answer}, 503
     return {"job_id": note["job_id"], "scope": scope, "scope_id": scope_id, "schedule": name, "requested_by": note["requested_by"],
             "status_path": f"/status/{note['job_id']}/{scope}/{scope_id}"}, 202

@@ -110,6 +110,7 @@ def sweep_worker():
 @bp.route('/scheduled-scan', methods=['POST'])
 def scheduled_scan():
     """Starts the scan a Cloud Scheduler job asks for (v17): 202 with the job ID, 400 for a malformed body, 409 while
-    the scope's previous scan is still running."""
+    the scope's previous scan is still running, 503 (with Retry-After) when Cloud Tasks would not take the task (v20)."""
     response, status = schedules.start_scheduled_scan(get_services(), body())
-    return jsonify(response), status
+    headers = {"Retry-After": str(schedules.RETRY_AFTER_SECONDS)} if status == 503 else {}
+    return jsonify(response), status, headers

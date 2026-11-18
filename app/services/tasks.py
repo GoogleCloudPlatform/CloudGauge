@@ -19,16 +19,28 @@ scans (``app.fanout``) add tasks for ``/scan-shard``, ``/run-aggregation`` and
 ``/sweep`` with the same body plus ``shard_id``/``sweep``; those are **named**
 tasks, so creating the same one twice is a no-op (``AlreadyExists``), which is
 what makes retries of the dispatcher and the fan-in trigger idempotent.
+Since v20 the scan task is named too (``scan-{job_id}``), so that
+:data:`ENQUEUE_RETRY` — the retry of a transient Cloud Tasks answer — can never
+start a scan twice.
 """
 import json
 import logging
 from datetime import datetime, timedelta, timezone
 
-from google.api_core.exceptions import AlreadyExists, NotFound, PermissionDenied
+from google.api_core.exceptions import AlreadyExists, DeadlineExceeded, InternalServerError, NotFound, PermissionDenied, ServiceUnavailable
+from google.api_core.retry import Retry, if_exception_type
 from google.cloud import tasks_v2
 
 from app.config import QUEUE_MAX_BACKOFF_SECONDS, QUEUE_MIN_BACKOFF_SECONDS
 from app.services import gcp
+
+# v20: the retry of ``create_task``. The client retries nothing on it by itself (a create is not idempotent in general;
+# ours are, every task being named), so one transient answer — UNAVAILABLE ("Stream removed" has been seen in
+# production), DEADLINE_EXCEEDED, INTERNAL — used to reach the person as a 500. Now: exponential backoff from one second,
+# capped at eight, for up to thirty seconds in all; what is still failing then raises ``RetryError`` (the last answer is
+# its cause) and the callers say that the scan could not be queued (``POST /scan``: 503, nothing started).
+TRANSIENT_ERRORS = (ServiceUnavailable, DeadlineExceeded, InternalServerError)
+ENQUEUE_RETRY = Retry(predicate=if_exception_type(*TRANSIENT_ERRORS), initial=1.0, maximum=8.0, multiplier=2.0, timeout=30.0)
 
 
 # --- Startup Functions ---
@@ -193,14 +205,29 @@ def build_scan_task(worker_url, service_account_email, scope, scope_id, job_id, 
                       service_account_email, audience=audience, dispatch_deadline_seconds=dispatch_deadline_seconds)
 
 
+def scan_task_id(job_id):
+    """The name of a job's scan task on the queue (v20): a job ID is a UUID, which is a valid task ID as it is."""
+    return f"scan-{job_id}"
+
+
 def enqueue_scan(settings, worker_url, scope, scope_id, job_id, client=None, requested_by=None):
-    """Creates the scan task on the configured queue and returns the created task."""
+    """Creates the scan task on the configured queue and returns the created task.
+
+    The task is named after the job (v20), so a retry after a lost answer (:data:`ENQUEUE_RETRY`) meets
+    ``AlreadyExists`` instead of starting the scan twice; that answer counts as created and returns ``None``.
+    Anything else Cloud Tasks still answers after the retry propagates: nothing was started.
+    """
     client = client or gcp.tasks_client()
     task = build_scan_task(worker_url, settings.service_account_email, scope, scope_id, job_id,
                            audience=settings.worker_audience, dispatch_deadline_seconds=settings.task_dispatch_deadline_seconds,
                            requested_by=requested_by)
     parent = client.queue_path(settings.project_id, settings.location, settings.task_queue)
-    return client.create_task(parent=parent, task=task)
+    task["name"] = f"{parent}/tasks/{scan_task_id(job_id)}"
+    try:
+        return client.create_task(parent=parent, task=task, retry=ENQUEUE_RETRY)
+    except AlreadyExists:
+        logging.info(f"[{job_id}] The scan task already exists; not created again.")
+        return None
 
 
 def task_name(settings, client, task_id):
@@ -222,7 +249,7 @@ def enqueue_task(settings, worker_url, path, body, *, task_id, schedule_delay_se
                       name=f"{parent}/tasks/{task_id}", dispatch_deadline_seconds=settings.task_dispatch_deadline_seconds,
                       schedule_delay_seconds=schedule_delay_seconds)
     try:
-        client.create_task(parent=parent, task=task)
+        client.create_task(parent=parent, task=task, retry=ENQUEUE_RETRY)
         return True
     except AlreadyExists:
         logging.info(f"Task '{task_id}' already exists; not created again.")
