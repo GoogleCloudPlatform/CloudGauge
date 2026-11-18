@@ -22,6 +22,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 # cloudgauge.py entrypoint shim. Tests, run.py, and dev files stay out of the image.
 COPY app ./app
 COPY cloudgauge.py .
+# The release number app.config reads (v20): one file, next to the package as in the repository.
+COPY VERSION .
 # The policy table of the Organization Policies check ships with the release (v18.1).
 COPY assets/gcp_best_practices.csv ./assets/gcp_best_practices.csv
 # The Cloud Armor ruleset generations of the Cloud Armor Policy Content check ship with the release (v18.6).
