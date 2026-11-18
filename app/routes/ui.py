@@ -15,9 +15,14 @@
 
 Every identifier a URL or the form carries goes through ``app.validation`` first (v18.6.1): a malformed one is a 400 before
 anything is read or written. ``POST /scan`` is also same-origin only (``app.routes.guards``) and starts nothing while the
-scope's previous scan is still running (409, ``app.services.schedules``).
+scope's previous scan is still running (409, ``app.services.schedules``). When Cloud Tasks will not take the scan task —
+after the retry in ``app.services.tasks`` (v20) — it answers 503 with a page that says so and offers to try again; nothing
+was started then either.
 """
+import logging
+
 from flask import Blueprint, Response, jsonify, redirect, render_template, request, stream_with_context, url_for
+from google.api_core.exceptions import GoogleAPIError
 from werkzeug.utils import secure_filename
 
 from app import identity, validation
@@ -58,15 +63,25 @@ def create_scan_task():
     scope_id = validation.clean_scope_id(scope, request.form.get('scope_id'))
     requested_by = identity.current_user_email()  # None unless the request came through Identity-Aware Proxy
 
+    services = get_services()
+    wants_json = request.accept_mimetypes.best_match(("text/html", "application/json")) == "application/json"
     try:
-        note = schedules.start_scan(get_services(), scope, scope_id, requested_by=requested_by)
+        note = schedules.start_scan(services, scope, scope_id, requested_by=requested_by)
     except schedules.ScanInProgress as running:
         lock = running.lock
         status_path = url_for('ui.get_status', job_id=lock['job_id'], scope_id=scope_id, scope=scope)
-        if request.accept_mimetypes.best_match(("text/html", "application/json")) == "application/json":
+        if wants_json:
             return jsonify({"error": str(running), "job_id": lock["job_id"], "started_at": lock.get("started_at"),
                             "requested_by": lock.get("requested_by"), "status_path": status_path}), 409
         return render_template("scan_running.html", scope=scope, scope_id=scope_id, lock=lock, status_path=status_path), 409
+    except GoogleAPIError as error:  # v20: Cloud Tasks did not take the task within the retry; nothing was started
+        answer = schedules.not_queued_answer(error)
+        logging.error(f"The scan of {scope} {scope_id} could not be queued on {services.settings.task_queue}: {answer}")
+        headers = {"Retry-After": str(schedules.RETRY_AFTER_SECONDS)}
+        if wants_json:
+            return jsonify({"error": schedules.NOT_QUEUED_MESSAGE, "queue": services.settings.task_queue, "answer": answer}), 503, headers
+        return render_template("scan_not_queued.html", scope=scope, scope_id=scope_id, queue=services.settings.task_queue,
+                               answer=answer), 503, headers
 
     # NEW: Pass both IDs to the status page
     return redirect(url_for('ui.get_status', job_id=note['job_id'], scope_id=scope_id, scope=scope))

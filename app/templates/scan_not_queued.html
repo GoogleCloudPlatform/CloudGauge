@@ -1,0 +1,71 @@
+{#
+  Copyright 2025 Google LLC
+
+  Licensed under the Apache License, Version 2.0 (the "License");
+  you may not use this file except in compliance with the License.
+  You may obtain a copy of the License at
+
+      https://www.apache.org/licenses/LICENSE-2.0
+
+  Unless required by applicable law or agreed to in writing, software
+  distributed under the License is distributed on an "AS IS" BASIS,
+  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+  See the License for the specific language governing permissions and
+  limitations under the License.
+#}
+{#
+  POST /scan when Cloud Tasks would not take the scan task, after the retry in
+  app.services.tasks (v20, HTTP 503): one centred card in the status page's design
+  — the 409 page's shape — naming the queue and what it answered, with a button that
+  submits the same scan again and a link back to the form. Nothing was started.
+#}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Scan not queued</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+    <style>
+{% include "_design.css" %}
+        body { min-height: 100vh; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px; padding: 24px; }
+        .status-card { width: 100%; max-width: 448px; padding: 32px; }
+        .notice { width: 100%; max-width: 448px; }
+        .brand { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; margin-bottom: 28px; font-size: 13px; font-weight: 600; letter-spacing: -0.01em; color: var(--ink); }
+        .signed-in { font-weight: 400; letter-spacing: 0; font-size: 12px; color: var(--muted); overflow-wrap: anywhere; text-align: right; }
+        .status-card h1 { font-size: 22px; margin-bottom: 6px; }
+        .scope-line { margin-bottom: 20px; font-family: var(--font-mono); font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
+        .lede { margin-bottom: 8px; color: var(--muted); }
+        .answer { margin: 0 0 4px; padding: 10px 12px; border: 1px solid var(--hairline); border-radius: var(--radius-control); background: var(--canvas); font-size: 13px; color: var(--body); overflow-wrap: anywhere; }
+        .answer dt { display: inline; color: var(--muted); }
+        .answer dd { display: inline; margin: 0; font-family: var(--font-mono); font-size: 12px; }
+        .answer div + div { margin-top: 4px; }
+        .button-group { display: flex; flex-direction: column; gap: 10px; margin-top: 24px; }
+        .button-group .btn { padding: 11px 14px; }
+        .button-group form { display: contents; }
+    </style>
+</head>
+<body class="dotgrid">
+    {% if banner %}<div role="note" class="notice notice-amber">{{ banner }}</div>{% endif %}
+    <main class="card status-card">
+        <div class="brand">CloudGauge{% if current_user %}<span class="signed-in">Signed in as {{ current_user }}</span>{% endif %}</div>
+        <h1>Scan not queued</h1>
+        <p class="scope-line">{{ scope }} {{ scope_id }}</p>
+        <p class="lede">Cloud Tasks did not take the scan task, so nothing was started. This is usually momentary: try again in a minute. If it keeps happening, the queue's region or the service account's <code>cloudtasks.enqueuer</code> role is the place to look.</p>
+        <dl class="answer">
+            <div><dt>Queue</dt> <dd>{{ queue }}</dd></div>
+            <div><dt>Answer</dt> <dd>{{ answer }}</dd></div>
+        </dl>
+        <div class="button-group">
+            <form method="post" action="/scan">
+                <input type="hidden" name="scope" value="{{ scope }}">
+                <input type="hidden" name="scope_id" value="{{ scope_id }}">
+                <button type="submit" class="btn btn-primary">Try again</button>
+            </form>
+            <a href="/" class="btn btn-outline">Back to the form</a>
+        </div>
+    </main>
+</body>
+</html>

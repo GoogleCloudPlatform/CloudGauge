@@ -86,8 +86,10 @@ def test_scan_enqueues_the_legacy_task(legacy_client, client, gcp, monkeypatch):
 
     (legacy_parent, legacy_task), (parent, task) = gcp.tasks.tasks
     # New: the task has a dispatch deadline (the legacy task had none, so Cloud Tasks
-    # retried a scan still running after 10 minutes). Everything else is the legacy task.
+    # retried a scan still running after 10 minutes) and a name (v20: the retry of a
+    # transient Cloud Tasks answer cannot start the scan twice). Everything else is the legacy task.
     assert task.pop('dispatch_deadline') == timedelta(minutes=30)
+    assert task.pop('name') == f'{parent}/tasks/scan-{job_id}'
     assert (parent, task) == (legacy_parent, legacy_task)
     assert parent == 'projects/test-project/locations/us-central1/queues/test-queue'
     request = task['http_request']

@@ -123,10 +123,12 @@ def test_scan_validates_its_form(client, gcp):
     assert gcp.tasks.tasks == []
 
 
-def test_cloud_tasks_failure_is_a_500_and_the_app_keeps_serving(client, gcp):
+def test_cloud_tasks_failure_is_a_503_page_and_the_app_keeps_serving(client, gcp):
+    """v20: a Cloud Tasks answer that survives the retry is the "Scan not queued" page (503), not Flask's 500."""
     with mock.patch.object(gcp.tasks, 'create_task', side_effect=ServiceUnavailable('Cloud Tasks unavailable')):
         response = client.post('/scan', data={'scope': SCOPE, 'scope_id': SCOPE_ID})
-    assert response.status_code == 500  # handled by Flask; no traceback leaks to the client
+    assert response.status_code == 503 and response.headers['Retry-After'] == '60'
+    assert b'Scan not queued' in response.data and b'Cloud Tasks unavailable' in response.data
     assert b'Traceback' not in response.data
     assert client.get('/').status_code == 200
 

@@ -197,13 +197,26 @@ class FakeTasksClient:
         self.queue_limits = None  # what get_queue reports; None: the limits the app expects
         self.get_queue_error = None
         self.deliveries = []  # (path, body, retry_count, status_code) for every drain() delivery
+        self.create_task_errors = []  # raised by the next create_task attempts, one each, before the call succeeds (v20)
+        self.create_task_attempts = 0  # every attempt, including the ones answered from create_task_errors
+        self.retries = []  # the ``retry`` each create_task call carried (v20: app.services.tasks.ENQUEUE_RETRY)
         self._lock = threading.Lock()
 
     def queue_path(self, project, location, queue):
         return f'projects/{project}/locations/{location}/queues/{queue}'
 
-    def create_task(self, parent, task):
+    def create_task(self, parent, task, retry=None, timeout=None):
+        """Like the client's: ``retry`` (a ``google.api_core.retry.Retry``) wraps the attempt, so its predicate and
+        backoff are what the tests exercise; ``create_task_errors`` are the answers of the first attempts."""
+        self.retries.append(retry)
+        attempt = retry(self._create_task) if retry is not None else self._create_task
+        return attempt(parent, task)
+
+    def _create_task(self, parent, task):
         with self._lock:
+            self.create_task_attempts += 1
+            if self.create_task_errors:
+                raise self.create_task_errors.pop(0)
             name = task.get('name')
             if name:
                 if name in self.names:
