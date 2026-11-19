@@ -20,7 +20,7 @@ Each job posts `{"scope", "scope_id", "name"}` to the worker's `/scheduled-scan`
 
 ## The history page
 
-`/history/<scope>/<scope id>` — from the report header's **History** row, the status page's **View history**, or the setup page once a resource is chosen — shows the newest 52 scans of a scope: the four pillar scores as lines over time and one row per scan with its scores, its four Overview counts, who asked and the checks whose status changed since the scan before, each linking to its report. It reads the summaries, so it covers every scan since v15 and needs nothing configured.
+`/history/<scope>/<scope id>` — from the report header's **History** row, the status page's **View history**, or the setup page once a resource is chosen — shows the newest 52 scans of a scope: the four pillar scores as lines over time and one row per scan with its scores, its four Overview counts, who asked and the checks whose status changed since the scan before, each linking to its report. It reads the summaries, so it covers every scan since v15 and needs nothing configured. Every scan opens its report from the page (v20): the scan's date is the link, the **Report** column next to the counts holds **Open report · CSV**, each dot of the chart opens the scan it stands for, and **Open latest report** in the page head is the newest one in one click.
 
 ## The BigQuery export
 

@@ -241,7 +241,7 @@ def test_tables_have_no_vertical_rules_quiet_headers_and_a_row_hover(pages):
         assert all('data-table' in attributes for attributes in re.findall(r'<table\b([^>]*)>', page)), name
     # v17: the history page's chart is monochrome ink on hairlines, its table the same quiet table.
     assert rule(HISTORY_PAGE, '.chart .line')['stroke'] == 'var(--ink)' and rule(HISTORY_PAGE, '.chart .grid')['stroke'] == 'var(--hairline)'
-    assert rule(HISTORY_PAGE, '.score')['font-family'] == 'var(--font-mono)' and rule(HISTORY_PAGE, '.page')['max-width'] == '1040px'
+    assert rule(HISTORY_PAGE, '.score')['font-family'] == 'var(--font-mono)' and rule(HISTORY_PAGE, '.page')['max-width'] == '1200px'  # v20: eight columns fit a laptop
 
 
 def test_findings_are_accordions_that_open_what_needs_a_human():

@@ -83,7 +83,7 @@ class ChartLine:
     last_y: float | None
     last_text: str  # "80%" or "—"
     label_y: float | None = None  # where the label is drawn: last_y, nudged apart from the labels of lines that end together
-    markers: tuple = ()  # (x, y, title) per scan the pillar was assessed in: a dot with a native tooltip, no script
+    markers: tuple = ()  # (x, y, title, job_id) per scan the pillar was assessed in: a dot with a native tooltip that links to the report (v20), no script
 
 
 @dataclass(frozen=True)
@@ -204,7 +204,7 @@ def build_chart(entries):
                 continue
             x, y = round(x_of(index), 1), round(y_of(score), 1)
             points.append(f"{x},{y}")
-            markers.append((x, y, f"{entry.generated_at} \u00b7 {pillar} {score:.0f}%"))
+            markers.append((x, y, f"{entry.generated_at} \u00b7 {pillar} {score:.0f}%", entry.job_id))
             last = (x, y, f"{score:.0f}%")
         lines.append(ChartLine(pillar=pillar, dash=DASHES.get(pillar, ""), points=" ".join(points), markers=tuple(markers),
                                last_x=last[0] if last else None, last_y=last[1] if last else None, last_text=last[2] if last else "\u2014"))
