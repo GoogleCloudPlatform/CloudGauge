@@ -17,7 +17,6 @@ on:
   push:
     branches:
       - main
-      - refactor/modular-factory  # the release branch until the v20 cutover; remove afterwards
   workflow_dispatch:
 
 permissions:
