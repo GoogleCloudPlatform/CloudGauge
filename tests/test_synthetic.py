@@ -1,0 +1,458 @@
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+"""The synthetic load mode (``app.synthetic``): settings, the generated
+organization, the provider, a full scan against it, and the app in the
+``synthetic`` profile.
+
+The scans here run with zero simulated latency, so the whole module takes a
+few seconds. The provider is installed in the process-wide seam
+(``app.services.gcp``); the ``gcp`` fixture resets it after every test.
+"""
+import csv
+import io
+import json
+import logging
+
+import google.auth.exceptions
+import pytest
+from google.api_core import exceptions as core_exceptions
+from google.cloud import recommender_v1
+from googleapiclient.errors import HttpError
+
+import fakes
+from app import create_app, scan_job
+from app.checks.reliability import RESILIENCE_CHECKS
+from app.config import Settings
+from app.extensions import EXTENSION_KEY
+from app.reporting.html_report import generate_html_report
+from app.services import gcp as gcp_clients
+from app.synthetic import SyntheticGcp, SyntheticOrg, banner_for, build_provider
+from app.synthetic.memory_store import memory_results_store
+from app.synthetic.world import FOLDER_IDS, HOST_PROJECT, ORG_ID, REGIONS
+from helpers import DEPLOYED_ENV, make_settings, set_env
+
+BANNER_MARK = 'SYNTHETIC LOAD TEST'
+SECTION_IDS = ('security-identity', 'cost-optimization', 'reliability-resilience', 'operational-excellence-observability')
+
+
+def synthetic_settings(**overrides):
+    return make_settings('synthetic', **{'SYNTHETIC_PROJECTS': '12', **overrides})
+
+
+def scan(provider, scope='organization', job_id='syn-job'):
+    """Runs one scan job against ``provider`` with an in-memory bucket; returns (ok, store, scope_id)."""
+    gcp_clients.install_provider(provider)
+    store = memory_results_store()
+    world = provider.world
+    scope_id = {'organization': world.org_id, 'folder': world.folder_ids[0], 'project': world.project_id(0)}[scope]
+    ok = scan_job.execute_scan_job({'scope': scope, 'scope_id': scope_id, 'job_id': job_id},
+                                   store=store, banner=banner_for(provider))
+    return ok, store, scope_id
+
+
+# --- Settings ---
+
+def test_synthetic_profile_requires_a_project_count():
+    with pytest.raises(ValueError, match='SYNTHETIC_PROJECTS'):
+        make_settings('synthetic')
+    with pytest.raises(ValueError, match='SYNTHETIC_PROJECTS'):
+        make_settings('synthetic', SYNTHETIC_PROJECTS='0')
+
+
+def test_synthetic_settings_are_read_and_validated():
+    settings = synthetic_settings(SYNTHETIC_SEED='7', SYNTHETIC_LATENCY_MS='0', SYNTHETIC_ERROR_RATE='0.05', SYNTHETIC_DENIED_FRACTION='0')
+    assert settings.is_synthetic and settings.startup_checks_enabled and not settings.is_production
+    assert (settings.synthetic_projects, settings.synthetic_seed, settings.synthetic_latency_ms,
+            settings.synthetic_error_rate, settings.synthetic_denied_fraction) == (12, 7, 0.0, 0.05, 0.0)
+    for name, value in (('SYNTHETIC_ERROR_RATE', '2'), ('SYNTHETIC_PROJECTS', '-1'), ('SYNTHETIC_LATENCY_MS', 'fast')):
+        with pytest.raises(ValueError, match=name):
+            synthetic_settings(**{name: value})
+
+
+def test_production_profile_ignores_synthetic_variables():
+    settings = make_settings('production', SYNTHETIC_PROJECTS='500')
+    assert settings.is_production and not settings.is_synthetic and settings.startup_checks_enabled
+    assert Settings.from_env(dict(DEPLOYED_ENV)).synthetic_projects == 0
+
+
+# --- The generated organization ---
+
+def test_world_is_deterministic_per_seed():
+    a, b = SyntheticOrg(40, seed=7), SyntheticOrg(40, seed=7)
+    assert a.projects() == b.projects()
+    assert a.projects()[3] == a.project(a.project_id(3))  # cached and rebuilt alike
+    other = SyntheticOrg(40, seed=8)
+    assert [p.project_id for p in other.projects()] != [p.project_id for p in a.projects()]
+    assert [p.vms for p in other.projects()] != [p.vms for p in a.projects()]
+
+
+def test_world_identity_and_folders():
+    org = SyntheticOrg(25, seed=1)
+    assert org.org_id == ORG_ID and org.folder_ids == FOLDER_IDS
+    assert org.project_id(4) == 'syn-1-00004' and org.index_of('syn-1-00004') == 4
+    assert org.project('syn-1-00025') is None and org.project('other') is None and org.project(None) is None
+    by_folder = [p.project_id for folder in org.folder_ids for p in org.projects(folder)]
+    assert sorted(by_folder) == [p.project_id for p in org.projects()]
+    assert org.org_policies(f'organizations/{ORG_ID}') and org.unattended_project_ids() == ['syn-1-00000']
+
+
+def test_world_denied_fraction():
+    assert not any(p.denied for p in SyntheticOrg(200, denied_fraction=0).projects())
+    assert all(p.denied for p in SyntheticOrg(50, denied_fraction=1).projects())
+    half = sum(p.denied for p in SyntheticOrg(400, denied_fraction=0.5).projects())
+    assert 150 < half < 250
+
+
+# --- The provider ---
+
+def test_denied_and_unknown_projects_raise_like_the_apis(gcp):
+    provider = SyntheticGcp(50, latency_ms=0, denied_fraction=1.0)
+    denied = provider.world.project_id(0)
+    with pytest.raises(core_exceptions.PermissionDenied):
+        provider.recommender_client().list_recommendations(parent=f'projects/{denied}/locations/global/recommenders/x')
+    with pytest.raises(HttpError) as http_error:
+        provider.api_build('compute', 'v1').firewalls().list(project=denied).execute()
+    assert http_error.value.resp.status == 403
+    with pytest.raises(HttpError) as not_found:
+        provider.api_build('compute', 'v1').firewalls().list(project='syn-42-99999').execute()
+    assert not_found.value.resp.status == 404
+    assert provider.metrics.snapshot()['errors'] == {'recommender:403': 1, 'compute:403': 1, 'compute:404': 1}
+
+
+def test_injected_quota_errors_and_latency(gcp):
+    failing = SyntheticGcp(5, latency_ms=0, error_rate=1.0, denied_fraction=0)
+    with pytest.raises(core_exceptions.ResourceExhausted):
+        failing.asset_client().list_assets(request={'parent': f'projects/{failing.world.project_id(1)}', 'asset_types': []})
+    assert failing.metrics.snapshot()['errors'] == {'asset:429': 1}
+
+    quick = SyntheticGcp(5, latency_ms=0, denied_fraction=0)
+    quick.api_build('compute', 'v1').regions().list(project=quick.world.project_id(0)).execute()
+    assert quick.metrics.snapshot()['simulated_wait_seconds'] == 0
+
+    slow = SyntheticGcp(5, latency_ms=20, denied_fraction=0)
+    slow.api_build('compute', 'v1').regions().list(project=slow.world.project_id(0)).execute()
+    assert slow.metrics.snapshot()['simulated_wait_seconds'] > 0
+
+
+def test_discovery_stub_answers_the_calls_the_checks_make(gcp, caplog):
+    provider = SyntheticGcp(5, latency_ms=0, denied_fraction=0)
+    compute = provider.api_build('compute', 'v1')
+    project = provider.world.project_id(0)
+    regions = compute.regions().list(project=project).execute()
+    assert [r['name'] for r in regions['items']] == REGIONS
+    assert compute.regions().list_next(previous_request=None, previous_response=regions) is None
+    assert compute.instances().aggregatedList_next(previous_request=None, previous_response={}) is None
+    clusters = provider.api_build('container', 'v1').projects().locations().clusters().list(parent=f'projects/{project}/locations/-').execute()
+    assert 'clusters' in clusters  # the project comes from ``parent``
+    ancestry = provider.api_build('cloudresourcemanager', 'v1').projects().getAncestry(projectId=DEPLOYED_ENV['PROJECT_ID'], body={}).execute()
+    assert ancestry['ancestor'][-1] == {'resourceId': {'type': 'organization', 'id': ORG_ID}}
+    with caplog.at_level(logging.WARNING):
+        assert compute.disks().list(project=project).execute() == {}
+        assert compute.disks().list(project=project).execute() == {}
+    assert [r.message for r in caplog.records].count('Synthetic provider: no handler for compute.disks.list; answering {}') == 1
+    assert provider.metrics.snapshot()['by_method']['compute.disks.list?'] == 2
+
+
+def test_infrastructure_calls_pass_through(gcp):
+    """The Cloud Run Admin API and credentials are real: only scan data is synthetic."""
+    provider = SyntheticGcp(5, latency_ms=0)
+    run = provider.api_build('run', 'v1', credentials=gcp.credentials)
+    assert gcp.discovery.calls == [('run', 'v1')]  # the library's discovery.build (patched to the fake), not a stub
+    assert run.projects().locations().services().get(name='x').execute() == {'status': {'url': fakes.WORKER_URL}}
+    assert provider.metrics.snapshot()['total_calls'] == 0
+    credentials, project = provider.auth_default(scopes=['s'])
+    assert credentials is gcp.credentials and project == HOST_PROJECT
+    provider.auth_default(scopes=['s'])
+    assert gcp.auth_scopes == [['s']]  # resolved once
+
+
+def test_without_adc_the_provider_uses_synthetic_credentials(monkeypatch):
+    def no_adc(**kwargs):
+        raise google.auth.exceptions.DefaultCredentialsError('none')
+
+    monkeypatch.setattr(google.auth, 'default', no_adc)
+    credentials, _ = SyntheticGcp(1).auth_default()
+    assert credentials.token == 'synthetic-access-token'
+
+
+def test_recommender_answers_are_real_protos(gcp):
+    """network.py calls ``Insight.to_dict`` and cost.py reads ``primary_impact.cost_projection``: dicts won't do."""
+    from app.checks.cost import COST_RECOMMENDERS
+    from app.checks.network import NETWORK_INSIGHT_TYPES
+
+    provider = SyntheticGcp(60, latency_ms=0, denied_fraction=0)
+    client = provider.recommender_client()
+    ip_insight, rightsizing = NETWORK_INSIGHT_TYPES['VPC IP Address Utilization'], COST_RECOMMENDERS['VM Rightsizing'][0]
+    insights = [i for p in provider.world.projects() for region in {'-'.join(z.split('-')[:-1]) for z in p.zones}
+                for i in client.list_insights(parent=f'projects/{p.project_id}/locations/{region}/insightTypes/{ip_insight}')]
+    assert insights and all(isinstance(i, recommender_v1.Insight) for i in insights)
+    assert recommender_v1.Insight.to_dict(insights[0])['content']['ipUtilizationSummaryInfo']
+    recos = [r for p in provider.world.projects() for zone in p.zones
+             for r in client.list_recommendations(parent=f'projects/{p.project_id}/locations/{zone}/recommenders/{rightsizing}')]
+    assert recos and recos[0].primary_impact.cost_projection.cost.units < 0
+    unattended = client.list_recommendations(parent=f'organizations/{ORG_ID}/locations/global/recommenders/google.resourcemanager.projectUtilization.Recommender')
+    assert [r.recommender_subtype for r in unattended] == ['CLEANUP_PROJECT', 'CLEANUP_PROJECT']
+
+
+# --- A whole scan ---
+
+# What differs by scope in the report of the 12-project organization (6 folders, projects spread round-robin).
+COVERAGE = {'organization': '12 of 12 projects · organization-level checks completed',
+            'folder': '2 of 2 projects · folder-level checks completed',
+            'project': '1 project'}
+ORG_ONLY_CHECKS = ('Critical Org-Level Roles', 'Security Command Center Status', 'Organization Log Sink')
+EVERY_SCOPE_CHECKS = ('Essential Contacts', 'Data Access Audit Logs')  # v18.1: a folder's or a project's effective contacts and audit configuration
+
+
+@pytest.mark.parametrize('scope', ['organization', 'folder', 'project'])
+def test_scan_completes_against_the_synthetic_organization(gcp, scope):
+    provider = SyntheticGcp(12, latency_ms=0, denied_fraction=0)
+    ok, store, scope_id = scan(provider, scope)
+    assert ok is True
+    status = store.read_status('syn-job', scope_id)
+    assert (status['status'], status['progress']) == ('completed', 100)
+    html = store.read_report('syn-job', scope_id, 'html')
+    csv = store.read_report('syn-job', scope_id, 'csv')
+    assert BANNER_MARK in html and 'generated organization of 12 projects' in html
+    assert 'status-badge">Error<' not in html  # no check crashed on the synthetic answers
+    assert 'Category,Policy,Expected Value,Current Value,Status' in csv and csv.count('\n') > 20
+    # The scope shows: in the title and the coverage line, in the checks that look at the organization
+    # alone, and in Organization Policies walking the folder's or the project's ancestry (v15.3).
+    assert f'<title>CloudGauge Report: {scope.capitalize()} {scope_id}</title>' in html
+    assert COVERAGE[scope] in html
+    assert all((check in html) is (scope == 'organization') for check in ORG_ONLY_CHECKS)
+    assert all(check in html for check in EVERY_SCOPE_CHECKS)
+    assert 'Organization Policies' in html and 'policies as recommended' in html
+    assert 'Advisory Notifications' in html  # read from the organization, or per project
+    # v15.6: Resilience of Critical Assets runs under every scope (its listings under the scope, not the organization),
+    # and each of its six checks reaches a verdict.
+    for check in RESILIENCE_CHECKS:
+        assert check in html, check
+    metrics = provider.metrics.snapshot()
+    by_method = metrics['by_method']
+    # Three resilience listings, two for Snapshot Sprawl and one for Cloud SQL Extended Support (v17), one for the clusters
+    # (v17.1), all under the scope; the perimeters (v17.1) come from the Access Context Manager API.
+    # ... and the log sinks of the scope (v18.1: Cloud Storage Versioning's sink-destination rule); v18.2: the clusters again and
+    # their PodDisruptionBudgets (GKE Upgrade Readiness).
+    # v18.3: the five network-edge listings (and Open Firewall Rules' firewall-policy listing).
+    # v18.6: two more (the serverless workloads; the edge policies and certificates) — Container Scanning Enabled searches instead.
+    # v18.8: one more (Serverless Cost Hygiene's workloads and connectors; the connectors come from the search, the workloads from the listing).
+    # v18.9: one more (Synthetic and SLO Coverage's load balancers, services and clusters); Audit Log Pipeline lists destinations only for a
+    # sink into a dataset, bucket or topic in scope, and the synthetic organization's own sink writes outside it.
+    # v19: one more (Exposed Privileged VMs' instances, firewall rules and policies); SCC's findings and services come through REST.
+    # v19.3: four more (Organization Policy Exceptions' policies and hierarchy; Bucket Logging's buckets and projects — its IAM policies are the iamPolicy listing).
+    assert by_method.get('asset.listAssets(org)', 0) == (31 if scope == 'organization' else 0)  # v18.5: the identity checks search instead
+    assert by_method.get('asset.listAssets(folder)', 0) == (31 if scope == 'folder' else 0)
+    assert by_method.get('asset.listAssets(iamPolicy)', 0) == (1 if scope == 'organization' else 2)  # v19.3: a folder or project scan reads the containers above it too
+    assert by_method.get('accesscontextmanager.servicePerimeters.list', 0) == 1
+    metrics = provider.metrics.snapshot()
+    assert metrics['total_calls'] > 50 and metrics['errors'] == {}
+    # v15.4: a folder scan compares Asset Inventory's projects with Resource Manager's direct children (one call);
+    # the synthetic world answers both from the same list, so the report has nothing to say about membership.
+    assert metrics['by_method'].get('cloudresourcemanager.projects.list', 0) == (1 if scope == 'folder' else 0)
+    assert 'Folder membership' not in html
+    assert store.client.bucket(store.bucket_name).object_names('intermediate/') == []  # cleaned up
+    assert store.client.stats()['writes'] > 20
+
+
+def test_an_empty_folder_is_still_checked_as_a_folder(gcp):
+    """v15.3: a folder with no project gets its scope-level checks - its organization policies - so the
+    header's "folder-level checks completed" is true and Security has a verdict; the categories that need a
+    project stay Not assessed. (The scan used to stop before any check and report every category not assessed.)
+    v15.6: Resilience of Critical Assets is scope-level too, so Stability has a verdict as well: its listings
+    answered and flagged nothing."""
+    provider = SyntheticGcp(3, latency_ms=0, denied_fraction=0)  # three projects over six folders: the last three are empty
+    gcp_clients.install_provider(provider)
+    folder = provider.world.folder_ids[-1]
+    assert provider.world.projects(folder) == []
+    store = memory_results_store()
+    ok = scan_job.execute_scan_job({'scope': 'folder', 'scope_id': folder, 'job_id': 'syn-job'}, store=store, banner=banner_for(provider))
+    assert ok is True and store.read_status('syn-job', folder)['status'] == 'completed'
+    html = store.read_report('syn-job', folder, 'html')
+    assert '0 of 0 projects · folder-level checks completed' in html
+    assert 'Organization Policies' in html and 'policies as recommended' in html
+    assert 'status-badge">Error<' not in html
+    # v17: Snapshot Sprawl is scope-level too, so Efficiency has a verdict as well. v18.1: Data Access Audit Logs reads the
+    # folder's own audit configuration, so Operations has one too — no category is left unassessed.
+    assert html.count('Not assessed — no ') == 0 and 'Data Access Audit Logs' in html and 'Essential Contacts' in html
+    assert 'Not assessed — no Security' not in html and 'Not assessed — no Cost' not in html
+    assert 'Not assessed — no Reliability' not in html and 'No single-region disk snapshots found.' in html
+    assert 'No snapshots older than 90 days or without a source disk found.' in html
+    assert 'Organization Policies' in store.read_report('syn-job', folder, 'csv')
+    assert provider.metrics.snapshot()['errors'] == {}
+
+
+def test_organization_scan_covers_every_section_and_org_check(gcp):
+    _, store, scope_id = scan(SyntheticGcp(40, latency_ms=0, denied_fraction=0))
+    html = store.read_report('syn-job', scope_id, 'html')
+    for section_id in SECTION_IDS:
+        assert f'id="{section_id}-section"' in html
+    for check in ('Organization Policies', 'Critical Org-Level Roles', 'Security Command Center Status', 'Organization Log Sink',
+                  'Essential Contacts', 'MIG Resilience (Zonal)', 'Unattended Projects',
+                  'VM Rightsizing', 'VPC IP Address Utilization', 'Quota Utilization (&gt;80%)', 'OS Config Agent Coverage',
+                  # v14: the briefings and the scored checks behind them
+                  'Service Health Incidents', 'Personalized Service Health API Coverage',
+                  'Advisory Notifications', 'Advisory Notifications Settings',
+                  # v15
+                  'GKE Supported Versions',
+                  # v17: FinOps, capacity, quota and IAM
+                  'Cost Allocation Labels', 'Cloud Storage Lifecycle', 'Snapshot Sprawl',
+                  'Resource-Based Commitment Recommendations', 'Idle Images', 'Cloud SQL Extended Support', 'Capacity Commitments',
+                  'Reservation Coverage', 'Commitments Expiring', 'Capacity Signals', 'Quota Increase Recommendations', 'IAM Least Privilege',
+                  # v17.3: the derived check and the fifth GKE record
+                  'Incident Exposure', 'GKE Cluster Resilience'):
+        assert check in html, check
+    assert 'Action Required' in html and 'Compliant' in html and 'Informational' in html
+    # The v17 facts the synthetic world draws reach the report: a saving total on the Scorecard, an unconfigured
+    # label check that stays Informational, the accelerator family in the quota table.
+    assert 'USD/month in identified savings' in html
+    assert 'Not configured: set COST_ALLOCATION_LABELS' in html
+    assert 'Accelerator' in html and 'Headroom' in html
+    # Every cell is text (v17.2.1): a list left in a row reaches the page and the CSV as Python's repr — "['a', 'b']"
+    # in the chips, "[]" for an empty one. The CSV is the raw cells, so it is where such a slip shows first.
+    # v18.8: whole cells (a lifecycle fix carries JSON with commas inside one quoted cell).
+    cells = [cell for row in csv.reader(io.StringIO(store.read_report('syn-job', scope_id, 'csv'))) for cell in row]
+    reprs = [cell for cell in cells if cell.strip().startswith(("['", '["', '[]', "('", '{"', "{'"))]
+    assert reprs == [], reprs[:5]
+
+
+def test_denied_projects_and_quota_errors_do_not_break_the_scan(gcp):
+    """Every project answers 403 and 5% of calls answer 429: the scan still completes with a report,
+    and the report says which projects its checks could not cover instead of calling them compliant."""
+    provider = SyntheticGcp(8, latency_ms=0, denied_fraction=1.0, error_rate=0.05)
+    ok, store, scope_id = scan(provider)
+    assert ok is True
+    assert store.read_status('syn-job', scope_id)['status'] == 'completed'
+    html = store.read_report('syn-job', scope_id, 'html')
+    assert BANNER_MARK in html
+    assert html.count('<strong>Projects not checked</strong>') == 4  # one item on each category page
+    assert 'Not assessed — no' not in html  # the item above makes each page a listed page, not an empty one
+    rows = [row for row in csv.reader(io.StringIO(store.read_report('syn-job', scope_id, 'csv'))) if row[:2] == ['Projects not checked', 'Error']]
+    # Every project. A v18.4 check whose scope-level policy or resource search drew a 429 records the scanned scope itself
+    # (it has no project list), so the scope's own name may appear beside the projects; v18.7's Folder Primitive Roles names a folder
+    # whose policy read drew one. Which calls draw the 429s depends on the order the threads consume the provider's random draws,
+    # and a check whose call that maps project numbers to IDs drew one names the project by number (v20, plan item A4: the
+    # intermittent failure of this test was exactly that) — the same project, so the numbers are read back as IDs here.
+    projects = list(provider.world.projects())
+    by_number = {str(p.project_number): p.project_id for p in projects}
+    named = {row[2] for row in rows if not row[2].startswith(('organizations/', 'folders/'))}
+    assert {by_number.get(name, name) for name in named} == {p.project_id for p in projects}
+    # Location discovery fails for every project too, so no zone or region is found and the cost
+    # recommenders are never queried: the project is reported with the discovery error rather
+    # than passing as compliant. Network Insights always queries 'global', so its queries fail.
+    assert {'Open Firewall Rules', 'GKE Hygiene', 'Network Insights (all 8 insight types)', 'Quota Utilization (>80%)',
+            # v17: the global and BigQuery recommenders are asked regardless of discovered locations, and fail on their own
+            'Cost-Saving Recommendations (11 of 14 recommenders: Idle Cloud SQL Instances, Low Utilization VMs, VM Rightsizing, Unassociated IPs, '
+            'Idle Persistent Disks, MIG Rightsizing, Underutilized Reservations, Idle Reservations, Resource-Based Commitment Recommendations, '
+            'Overprovisioned Cloud SQL Instances, Cloud Run Cost: no zones or regions were discovered to query)',
+            'Cost-Saving Recommendations (3 of 14 recommenders: BigQuery Slot Commitments, Idle Images, Cloud Storage Soft Delete)',
+            'Reservation Coverage', 'Commitments Expiring', 'Capacity Signals', 'Cloud Storage Lifecycle', 'IAM Least Privilege',
+            'Quota Increase Recommendations'} <= {row[3] for row in rows}
+    assert all('(synthetic)' in row[4] for row in rows)  # the reason is the API's message
+
+
+def test_report_banner_is_optional_and_escaped():
+    plain = generate_html_report('project', 'p', 'j')
+    assert 'report-banner' not in plain
+    marked = generate_html_report('project', 'p', 'j', banner='Synthetic <b>data</b>')
+    assert ('<div role="note" class="notice notice-amber report-banner">Synthetic &lt;b&gt;data&lt;/b&gt;</div>' in marked
+            and '<b>data</b>' not in marked)
+
+
+# --- The app in the synthetic profile ---
+
+@pytest.fixture
+def synthetic_app(gcp, monkeypatch):
+    set_env(monkeypatch, {**DEPLOYED_ENV, 'CLOUDGAUGE_ENV': 'synthetic', 'SYNTHETIC_PROJECTS': '8', 'SYNTHETIC_LATENCY_MS': '0',
+                          'SYNTHETIC_DENIED_FRACTION': '0'})
+    return create_app()
+
+
+def test_synthetic_app_runs_the_production_startup_against_real_infrastructure(synthetic_app, gcp):
+    assert synthetic_app.config['CLOUDGAUGE_PROFILE'] == 'synthetic'
+    provider = gcp_clients.current_provider()
+    assert isinstance(provider, SyntheticGcp) and provider.describe()['projects'] == 8
+    services = synthetic_app.extensions[EXTENSION_KEY]
+    assert services.worker_url == fakes.WORKER_URL  # discovered through the (pass-through) Cloud Run Admin API
+    assert gcp.discovery.run_services  # the fake run service was asked
+    assert gcp.tasks.queues  # and the queue ensured, both real infrastructure
+    assert BANNER_MARK in services.report_banner
+
+
+def test_synthetic_app_lists_and_scans_the_generated_organization(synthetic_app, gcp):
+    client = synthetic_app.test_client()
+    assert BANNER_MARK in client.get('/').get_data(as_text=True)
+
+    projects = client.get('/api/list-resources?scope=project').get_json()
+    assert [p['id'] for p in projects] == [f'syn-42-{i:05d}' for i in range(8)]
+    assert [f['id'] for f in client.get('/api/list-resources?scope=folder').get_json()] == FOLDER_IDS
+    assert client.get('/api/list-resources?scope=organization').get_json() == [{'id': ORG_ID, 'name': f'Organization {ORG_ID}'}]
+
+    job_id = '11111111-1111-4111-8111-111111111111'  # v18.6.1: the routes take UUID job IDs
+    response = client.post('/run-scan', data=json.dumps({'scope': 'project', 'scope_id': 'syn-42-00001', 'job_id': job_id}),
+                           content_type='application/json')
+    assert response.status_code == 200
+    report = gcp.bucket.blob(f'{job_id}/syn-42-00001_report.html').download_as_text()  # the real results store, fake bucket
+    assert BANNER_MARK in report and 'syn-42-00001' in report
+    assert json.loads(gcp.bucket.blob(f'{job_id}/syn-42-00001_status.json').download_as_text())['status'] == 'completed'
+    page = client.get(f'/status/{job_id}/project/syn-42-00001').get_data(as_text=True)
+    assert BANNER_MARK in page
+
+
+def test_build_provider_uses_the_settings():
+    provider = build_provider(synthetic_settings(SYNTHETIC_SEED='3', SYNTHETIC_LATENCY_MS='0', SYNTHETIC_ERROR_RATE='0.1', SYNTHETIC_DENIED_FRACTION='0.5'))
+    assert provider.describe() == {'projects': 12, 'seed': 3, 'latency_ms': 0.0, 'error_rate': 0.1, 'denied_fraction': 0.5}
+    assert 'seed 3' in banner_for(provider)
+
+
+# --- The offline harness ---
+
+def test_offline_harness_runs_a_scan_and_writes_reports(gcp, tmp_path, capsys):
+    from tools import synthetic_scan
+
+    json_path = tmp_path / 'metrics.json'
+    code = synthetic_scan.main(['--projects', '6', '--latency-ms', '0', '--quiet', '--output-dir', str(tmp_path), '--json', str(json_path)])
+    assert code == 0
+    out = capsys.readouterr().out
+    assert 'RESULT: ok (status=completed)' in out and 'API calls:' in out
+    result = json.loads(json_path.read_text())
+    assert result['outcome']['ok'] and result['api']['total_calls'] > 50 and result['report']['error_checks'] == []
+    assert (tmp_path / 'organization-6-seed42.html').exists() and (tmp_path / 'organization-6-seed42.csv').exists()
+
+
+def test_offline_harness_runs_a_sharded_scan(gcp, tmp_path, capsys):
+    from tools import synthetic_scan
+
+    json_path = tmp_path / 'metrics.json'
+    code = synthetic_scan.main(['--projects', '7', '--shard-size', '3', '--concurrency', '2', '--latency-ms', '0', '--quiet',
+                                '--output-dir', str(tmp_path), '--json', str(json_path)])
+    assert code == 0
+    out = capsys.readouterr().out
+    assert 'RESULT: ok (status=completed)' in out and 'Sharded: 4 shards of 3, 2 at a time' in out
+    assert 'coverage: 7 of 7 projects · organization-level checks completed' in out
+    result = json.loads(json_path.read_text())
+    sharding = result['sharding']
+    assert (sharding['shards'], sharding['shard_attempts'], sharding['shard_retries'], sharding['failed_shards']) == (4, 4, 0, 0)
+    assert sharding['aggregation_attempts'] == 1 and sharding['sweeps'] == 1 and sharding['dispatch_seconds'] >= 0
+    assert [d['path'] for d in sharding['deliveries']][-2:] == ['/run-aggregation', '/sweep']
+    assert result['report']['error_checks'] == [] and result['results_bucket']['deletes'] > 50  # the shards' files were cleaned up
+    sharded = (tmp_path / 'organization-7-seed42-shards3.csv').read_text()
+    assert synthetic_scan.main(['--projects', '7', '--latency-ms', '0', '--quiet', '--output-dir', str(tmp_path)]) == 0
+    single = (tmp_path / 'organization-7-seed42.csv').read_text()
+
+    def data_rows(text):  # headers are taken from a record's first row, whose keys can vary with thread timing
+        return sorted(line for line in text.splitlines() if line and not line.startswith(('Check,', 'Category,')))
+
+    assert data_rows(sharded) == data_rows(single) and len(data_rows(single)) > 50
+    assert len(sharded.splitlines()) == len(single.splitlines())  # same records: same headers and spacers

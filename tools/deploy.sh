@@ -1,0 +1,401 @@
+#!/usr/bin/env bash
+# tools/deploy.sh — deploys CloudGauge, or updates a deployment.
+#
+# Two Cloud Run services from one image: the web service people open sits behind
+# Identity-Aware Proxy (IAP); the worker that runs the scans accepts Cloud Tasks only.
+# The same deployment, declared in Terraform: terraform/ (docs/operations.md › Method 3).
+#
+#   PROJECT_ID=my-project OPERATORS=group:cloud-team@example.com tools/deploy.sh
+#
+# Steps (each one is idempotent, so the same command updates a deployment):
+#   1. setup    enable the APIs, create the service account with its project roles, create the
+#               results bucket. The organization-level scan roles are a one-time manual step
+#               (docs/operations.md › Common Prerequisites).
+#   2. build    cloudbuild.yaml builds the image, runs the test suite in it and pushes it only
+#               if every test passes. The build runs as the service account, not as the Compute
+#               Engine default account.
+#   3. worker   deploy WORKER_SERVICE: CLOUDGAUGE_ROLE=worker, --ingress internal, invoked by
+#               the service account only (that is what Cloud Tasks uses).
+#   4. web      deploy SERVICE: CLOUDGAUGE_ROLE=web, WORKER_URL=<the worker>, --iap; IAP's
+#               service agent becomes its invoker.
+#   5. access   grant OPERATORS roles/iap.httpsResourceAccessor on SERVICE: that role is what
+#               lets a Google account sign in.
+#   6. export   with BIGQUERY_DATASET: create the dataset (in REGION) and let the service account load
+#               into it (WRITER on the dataset, roles/bigquery.jobUser on the project); every finished
+#               scan is then exported (docs/history-and-export.md).
+#   6b. spend   with BILLING_EXPORT (v18.8): let the service account read the billing export dataset
+#               (READER on the dataset when it is in PROJECT_ID — the dataset owner's one grant otherwise
+#               — and roles/bigquery.jobUser on the project); Spend Briefing and Spend Anomalies then read it.
+#   7. schedule with SCHEDULES: create or update one Cloud Scheduler job per entry, posting to the
+#               worker's /scheduled-scan with the service account's OIDC token.
+#
+# Variables (only PROJECT_ID is required):
+#   PROJECT_ID        the project CloudGauge runs in
+#   REGION            region of the services, the queue and the bucket     [asia-south1]
+#   SERVICE           the web service                                       [cloudgauge]
+#   WORKER_SERVICE    the worker service                                    [${SERVICE}-worker]
+#   QUEUE             Cloud Tasks queue, created by the services at startup [cloudgauge-scan-queue]
+#   BUCKET            results bucket                                        [cloudgauge-reports-${PROJECT_ID}]
+#   SERVICE_ACCOUNT   service account name or email                         [cloudgauge-sa]
+#   IMAGE             image to build or deploy                              [gcr.io/${PROJECT_ID}/${SERVICE}]
+#   TAG               image tag                                             [short git hash, else latest]
+#   OPERATORS         who may sign in, comma-separated: user:a@x.com, group:g@x.com, domain:x.com
+#   EXTRA_ENV         more variables for both services, comma-separated KEY=VALUE pairs
+#                     (docs/stability.md › Configuration Reference), e.g. GEMINI_MODEL=gemini-2.5-flash,SCAN_SHARD_SIZE=10
+#   BIGQUERY_DATASET  export every finished scan to this BigQuery dataset (created in REGION if missing)
+#   COST_ALLOCATION_LABELS
+#                     the label keys every project must carry, comma-separated (cost-center,environment,owner);
+#                     its own variable because EXTRA_ENV values cannot contain commas
+#   TRUSTED_DOMAINS   domains besides the organization's primary one whose users and groups External Principals
+#                     does not list, comma-separated (partner.example,acquired.example); its own variable for the same reason
+#   BILLING_EXPORT    the BigQuery dataset the billing account exports to, <project>.<dataset> (v18.8): Spend Briefing
+#                     and Spend Anomalies read its standard export tables; nothing is read from the billing account
+#   SPEND_ANOMALY_FLOOR
+#                     the least a project's week on a service must cost to be a spend anomaly (v18.8)      [50]
+#   SCHEDULES         scheduled scans, semicolon-separated NAME=SCOPE/SCOPE_ID@CRON (cron in UTC), e.g.
+#                     "weekly-org=organization/123456789012@30 0 * * 1;nightly-prod=project/my-prod@0 2 * * *"
+#   SKIP_SETUP=1      skip step 1 (updating a deployment that works)
+#   SKIP_BUILD=1      skip step 2 and deploy IMAGE:TAG as it is (a tag an earlier build pushed)
+#   PROGRAMMATIC_ACCESS=1
+#                     also let the service account through IAP and let your gcloud account sign
+#                     tokens for it: tools/iap_token.py then works, for curl and tools/demo_gif.py
+#   DRY_RUN=1         print the gcloud commands instead of running them
+
+set -euo pipefail
+
+usage() { sed -n '2,/^$/p' "${BASH_SOURCE[0]}" | sed -e 's/^# \{0,1\}//'; }
+
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then usage; exit 0; fi
+if [[ -z "${PROJECT_ID:-}" ]]; then usage; echo; echo "PROJECT_ID is required." >&2; exit 2; fi
+if ! command -v gcloud >/dev/null 2>&1; then echo "gcloud is not installed: https://cloud.google.com/sdk/install" >&2; exit 2; fi
+
+REGION="${REGION:-asia-south1}"
+SERVICE="${SERVICE:-cloudgauge}"
+WORKER_SERVICE="${WORKER_SERVICE:-${SERVICE}-worker}"
+QUEUE="${QUEUE:-cloudgauge-scan-queue}"
+BUCKET="${BUCKET:-cloudgauge-reports-${PROJECT_ID}}"
+SERVICE_ACCOUNT="${SERVICE_ACCOUNT:-cloudgauge-sa}"
+case "$SERVICE_ACCOUNT" in
+  *@*) SA_EMAIL="$SERVICE_ACCOUNT"; SA_NAME="${SERVICE_ACCOUNT%%@*}" ;;
+  *)   SA_NAME="$SERVICE_ACCOUNT"; SA_EMAIL="${SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com" ;;
+esac
+IMAGE="${IMAGE:-gcr.io/${PROJECT_ID}/${SERVICE}}"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+TAG="${TAG:-$(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null || echo latest)}"
+OPERATORS="${OPERATORS:-}"
+EXTRA_ENV="${EXTRA_ENV:-}"
+BIGQUERY_DATASET="${BIGQUERY_DATASET:-}"
+COST_ALLOCATION_LABELS="${COST_ALLOCATION_LABELS:-}"
+TRUSTED_DOMAINS="${TRUSTED_DOMAINS:-}"
+BILLING_EXPORT="${BILLING_EXPORT:-}"
+SPEND_ANOMALY_FLOOR="${SPEND_ANOMALY_FLOOR:-}"
+SCHEDULES="${SCHEDULES:-}"
+DRY_RUN="${DRY_RUN:-0}"
+if [[ -n "$BIGQUERY_DATASET" && ! "$BIGQUERY_DATASET" =~ ^[A-Za-z0-9_]+$ ]]; then
+  echo "BIGQUERY_DATASET must be a dataset ID: letters, digits and underscores." >&2; exit 2
+fi
+if [[ -n "$BILLING_EXPORT" && ! "$BILLING_EXPORT" =~ ^[a-z][a-z0-9-]{4,28}[a-z0-9][.:][A-Za-z0-9_]+$ ]]; then
+  echo "BILLING_EXPORT must be <project>.<dataset>: the BigQuery dataset the billing account exports to." >&2; exit 2
+fi
+if [[ -n "$SPEND_ANOMALY_FLOOR" && ! "$SPEND_ANOMALY_FLOOR" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+  echo "SPEND_ANOMALY_FLOOR must be a number (in the export's currency)." >&2; exit 2
+fi
+
+# The schedules, parsed now so that a typo stops the script before it changes anything: NAME=SCOPE/SCOPE_ID@CRON.
+SCHEDULE_NAMES=(); SCHEDULE_SCOPES=(); SCHEDULE_IDS=(); SCHEDULE_CRONS=()
+if [[ -n "$SCHEDULES" ]]; then
+  IFS=';' read -r -a schedule_entries <<< "$SCHEDULES"
+  for entry in "${schedule_entries[@]+"${schedule_entries[@]}"}"; do
+    entry="$(printf '%s' "$entry" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+    [[ -z "$entry" ]] && continue
+    if [[ ! "$entry" =~ ^([A-Za-z0-9][A-Za-z0-9_-]{0,63})=(organization|folder|project)/([^@/[:space:]]+)@(.+)$ ]]; then
+      echo "SCHEDULES entry '${entry}' must be NAME=SCOPE/SCOPE_ID@CRON, e.g. weekly-org=organization/123456789012@30 0 * * 1" >&2; exit 2
+    fi
+    SCHEDULE_NAMES+=("${BASH_REMATCH[1]}"); SCHEDULE_SCOPES+=("${BASH_REMATCH[2]}"); SCHEDULE_IDS+=("${BASH_REMATCH[3]}"); SCHEDULE_CRONS+=("${BASH_REMATCH[4]}")
+  done
+fi
+
+# The operators as IAM principals, checked now so that a typo stops the script before it changes anything.
+MEMBERS=""
+if [[ -n "$OPERATORS" ]]; then
+  IFS=',' read -r -a operator_entries <<< "$OPERATORS"
+  for member in "${operator_entries[@]+"${operator_entries[@]}"}"; do
+    member="$(printf '%s' "$member" | tr -d '[:space:]')"
+    [[ -z "$member" ]] && continue
+    case "$member" in
+      user:*|group:*|domain:*|serviceAccount:*|principal:*|principalSet:*) ;;
+      *@*.gserviceaccount.com) member="serviceAccount:${member}" ;;
+      *@*) member="user:${member}" ;;
+      *) echo "OPERATORS entry '${member}' needs a type: user:, group: or domain:" >&2; exit 2 ;;
+    esac
+    MEMBERS="${MEMBERS:+${MEMBERS} }${member}"
+  done
+fi
+
+step() { printf '\n==> %s\n' "$*"; }
+note() { printf '    %s\n' "$*"; }
+# Every gcloud call goes through here: never interactive, always this project.
+g() {
+  if [[ "$DRY_RUN" == 1 ]]; then printf '    + gcloud --project %s %s\n' "$PROJECT_ID" "$*" >&2; return 0; fi
+  gcloud --quiet --project "$PROJECT_ID" "$@"
+}
+on_error() {
+  echo >&2
+  echo "deploy.sh stopped at step: ${CURRENT_STEP:-?}" >&2
+  echo "Every step is idempotent: fix the cause and run the same command again. Right after the first setup," >&2
+  echo "IAM grants can take a minute to apply; a deploy that failed on a 403 usually succeeds on the next run." >&2
+}
+trap on_error ERR
+
+step "CloudGauge deployment"
+note "project          ${PROJECT_ID} (${REGION})"
+note "web service      ${SERVICE}"
+note "worker service   ${WORKER_SERVICE}"
+note "service account  ${SA_EMAIL}"
+note "image            ${IMAGE}:${TAG}"
+note "queue / bucket   ${QUEUE} / gs://${BUCKET}"
+note "operators        ${MEMBERS:-(none: grant access afterwards, see the end)}"
+note "BigQuery export  ${BIGQUERY_DATASET:-(off: set BIGQUERY_DATASET to export every scan)}"
+note "label keys       ${COST_ALLOCATION_LABELS:-(none: Cost Allocation Labels stays Informational)}"
+note "trusted domains  ${TRUSTED_DOMAINS:-(none: the primary domain alone)}"
+note "billing export   ${BILLING_EXPORT:-(none: Spend Briefing and Spend Anomalies stay Informational)}"
+note "schedules        ${SCHEDULES:-(none)}"
+if [[ "$DRY_RUN" == 1 ]]; then note "DRY RUN: nothing is executed"; fi
+
+# --- project number and URLs ---------------------------------------------------------------------------------------
+# Cloud Run's deterministic URLs: known before the services exist, so the worker can be told its
+# own URL and nothing has to discover anything at startup.
+CURRENT_STEP="project number"
+if [[ "$DRY_RUN" == 1 ]]; then
+  PROJECT_NUMBER="000000000000"
+else
+  PROJECT_NUMBER="$(gcloud --project "$PROJECT_ID" projects describe "$PROJECT_ID" --format='value(projectNumber)')"
+fi
+WORKER_URL="https://${WORKER_SERVICE}-${PROJECT_NUMBER}.${REGION}.run.app"
+WEB_URL="https://${SERVICE}-${PROJECT_NUMBER}.${REGION}.run.app"
+IAP_AGENT="service-${PROJECT_NUMBER}@gcp-sa-iap.iam.gserviceaccount.com"
+# The services' variables, joined with "|" behind gcloud's "^|^" delimiter prefix so that a value may contain
+# commas (COST_ALLOCATION_LABELS, TRUSTED_DOMAINS). EXTRA_ENV is comma-separated pairs whose values have none, so its commas
+# become the separator.
+COMMON_ENV="^|^PROJECT_ID=${PROJECT_ID}|LOCATION=${REGION}|TASK_QUEUE=${QUEUE}|RESULTS_BUCKET=${BUCKET}|SERVICE_ACCOUNT_EMAIL=${SA_EMAIL}${EXTRA_ENV:+|${EXTRA_ENV//,/|}}${BIGQUERY_DATASET:+|BIGQUERY_DATASET=${BIGQUERY_DATASET}}${COST_ALLOCATION_LABELS:+|COST_ALLOCATION_LABELS=${COST_ALLOCATION_LABELS}}${TRUSTED_DOMAINS:+|TRUSTED_DOMAINS=${TRUSTED_DOMAINS}}${BILLING_EXPORT:+|BILLING_EXPORT=${BILLING_EXPORT}}${SPEND_ANOMALY_FLOOR:+|SPEND_ANOMALY_FLOOR=${SPEND_ANOMALY_FLOOR}}"
+
+# --- 1. setup -----------------------------------------------------------------------------------
+if [[ "${SKIP_SETUP:-0}" != 1 ]]; then
+  CURRENT_STEP="setup"
+  step "Enabling the APIs"
+  # Two calls: gcloud enables at most 20 APIs per command. What CloudGauge runs on, then what it reads.
+  g services enable \
+    run.googleapis.com cloudbuild.googleapis.com artifactregistry.googleapis.com cloudtasks.googleapis.com \
+    iap.googleapis.com iam.googleapis.com iamcredentials.googleapis.com cloudresourcemanager.googleapis.com \
+    storage.googleapis.com logging.googleapis.com aiplatform.googleapis.com
+  g services enable \
+    recommender.googleapis.com securitycenter.googleapis.com servicehealth.googleapis.com \
+    advisorynotifications.googleapis.com essentialcontacts.googleapis.com compute.googleapis.com \
+    container.googleapis.com sqladmin.googleapis.com osconfig.googleapis.com monitoring.googleapis.com \
+    cloudasset.googleapis.com
+  # v17: scheduled scans, the BigQuery export. v17.1: VPC Service Controls Coverage reads the perimeters (read-only use).
+  # v19: SCC Detector Coverage reads the detector services (Security Center Management, read-only).
+  # v19.2: Support Cases and Case Hygiene read the open support cases (Cloud Support API, read-only; the records read Informational without it).
+  g services enable cloudscheduler.googleapis.com bigquery.googleapis.com accesscontextmanager.googleapis.com securitycentermanagement.googleapis.com cloudsupport.googleapis.com
+
+  step "Service account ${SA_EMAIL}"
+  if [[ "$DRY_RUN" == 1 ]] || ! gcloud --project "$PROJECT_ID" iam service-accounts describe "$SA_EMAIL" >/dev/null 2>&1; then
+    g iam service-accounts create "$SA_NAME" --display-name="CloudGauge Service Account"
+  fi
+  # Project roles: Gemini calls, the Cloud Tasks queue the services create and fill, and Cloud Build:
+  # the image is built as this account (it reads the uploaded source, pushes the image, writes the
+  # build log) rather than as the Compute Engine default account, which organizations commonly
+  # leave without roles - and which should not be given any.
+  for role in roles/aiplatform.user roles/cloudtasks.admin roles/cloudbuild.builds.builder; do
+    g projects add-iam-policy-binding "$PROJECT_ID" --member="serviceAccount:${SA_EMAIL}" --role="$role" --condition=None >/dev/null
+  done
+  # On itself: Service Account User, so the services can create Cloud Tasks that carry its OIDC token
+  # (iam.serviceAccounts.actAs). Token Creator on itself is no longer needed: until v16.1 it signed the
+  # status page's CSV link, which is now a route of the web service.
+  g iam service-accounts add-iam-policy-binding "$SA_EMAIL" --member="serviceAccount:${SA_EMAIL}" --role=roles/iam.serviceAccountUser >/dev/null
+
+  step "Results bucket gs://${BUCKET}"
+  if [[ "$DRY_RUN" == 1 ]] || ! gcloud --project "$PROJECT_ID" storage buckets describe "gs://${BUCKET}" >/dev/null 2>&1; then
+    # Same region as the services; uniform access is what organization policies usually require.
+    g storage buckets create "gs://${BUCKET}" --location="$REGION" --uniform-bucket-level-access
+  fi
+  g storage buckets add-iam-policy-binding "gs://${BUCKET}" --member="serviceAccount:${SA_EMAIL}" --role=roles/storage.objectAdmin >/dev/null
+fi
+
+# --- 2. build -----------------------------------------------------------------------------------
+if [[ "${SKIP_BUILD:-0}" != 1 ]]; then
+  CURRENT_STEP="build"
+  step "Building and testing ${IMAGE}:${TAG} with Cloud Build (as ${SA_EMAIL})"
+  (cd "$REPO_ROOT" && g builds submit . --config cloudbuild.yaml --substitutions="_IMAGE=${IMAGE},_TAG=${TAG}" \
+    --service-account="projects/${PROJECT_ID}/serviceAccounts/${SA_EMAIL}")
+fi
+
+# --- 3. worker ----------------------------------------------------------------------------------
+CURRENT_STEP="worker"
+step "Deploying the worker ${WORKER_SERVICE} (Cloud Tasks only)"
+# Long requests, few per instance: a shard can run for 30 minutes. --ingress internal: nothing from
+# the internet reaches it, Cloud Tasks does. WORKER_AUDIENCE is a canary-only setting; a full
+# deployment clears it.
+g run deploy "$WORKER_SERVICE" --region="$REGION" --platform=managed --image="${IMAGE}:${TAG}" \
+  --service-account="$SA_EMAIL" --no-allow-unauthenticated --ingress=internal \
+  --timeout=3600 --concurrency=4 --memory=2Gi \
+  --update-env-vars="${COMMON_ENV}|CLOUDGAUGE_ROLE=worker|WORKER_URL=${WORKER_URL}" \
+  --remove-env-vars=WORKER_AUDIENCE
+# The service account is the identity on every Cloud Tasks request; nobody else may invoke the worker.
+g run services add-iam-policy-binding "$WORKER_SERVICE" --region="$REGION" \
+  --member="serviceAccount:${SA_EMAIL}" --role=roles/run.invoker --condition=None >/dev/null
+
+# --- 4. web -------------------------------------------------------------------------------------
+CURRENT_STEP="web"
+step "Deploying the web service ${SERVICE} behind Identity-Aware Proxy"
+# Pages and the three on-demand Gemini / Recommender calls: small instances, many requests each.
+# --invoker-iam-check undoes a public deployment that disabled the check; --no-allow-unauthenticated
+# removes allUsers. PROJECT_NUMBER lets the service verify IAP's signed identity assertions.
+g run deploy "$SERVICE" --region="$REGION" --platform=managed --image="${IMAGE}:${TAG}" \
+  --service-account="$SA_EMAIL" --no-allow-unauthenticated --iap --invoker-iam-check --ingress=all \
+  --timeout=600 --concurrency=80 --memory=1Gi \
+  --update-env-vars="${COMMON_ENV}|CLOUDGAUGE_ROLE=web|WORKER_URL=${WORKER_URL}|PROJECT_NUMBER=${PROJECT_NUMBER}" \
+  --remove-env-vars=WORKER_AUDIENCE
+# IAP forwards the signed-in person's request as its service agent; gcloud grants this with --iap,
+# making it explicit keeps the deployment complete if that step ever fails.
+g run services add-iam-policy-binding "$SERVICE" --region="$REGION" \
+  --member="serviceAccount:${IAP_AGENT}" --role=roles/run.invoker --condition=None >/dev/null
+
+# --- 5. access ----------------------------------------------------------------------------------
+grant_access() {  # $1: a principal; roles/iap.httpsResourceAccessor on the web service is what lets it in
+  g iap web add-iam-policy-binding --region="$REGION" --resource-type=cloud-run --service="$SERVICE" \
+    --member="$1" --role=roles/iap.httpsResourceAccessor --condition=None >/dev/null
+}
+if [[ -n "$MEMBERS" ]]; then
+  CURRENT_STEP="access"
+  step "Granting access to the pages"
+  for member in $MEMBERS; do  # unquoted on purpose: a space-separated list
+    note "$member"
+    grant_access "$member"
+  done
+fi
+if [[ "${PROGRAMMATIC_ACCESS:-0}" == 1 ]]; then
+  CURRENT_STEP="programmatic access"
+  step "Programmatic access through IAP (tools/iap_token.py)"
+  grant_access "serviceAccount:${SA_EMAIL}"
+  ACCOUNT="$(gcloud config get-value account 2>/dev/null || true)"
+  case "$ACCOUNT" in
+    "") echo "gcloud has no active account (gcloud auth login)." >&2; exit 2 ;;
+    *.gserviceaccount.com) ME="serviceAccount:${ACCOUNT}" ;;
+    *) ME="user:${ACCOUNT}" ;;
+  esac
+  g iam service-accounts add-iam-policy-binding "$SA_EMAIL" --member="$ME" --role=roles/iam.serviceAccountTokenCreator >/dev/null
+  note "${ME} can now mint tokens:  python tools/iap_token.py ${SA_EMAIL} ${WEB_URL}"
+fi
+
+# --- 6. export (v17) ----------------------------------------------------------------------------
+if [[ -n "$BIGQUERY_DATASET" && "${SKIP_SETUP:-0}" != 1 ]]; then
+  CURRENT_STEP="export"
+  step "BigQuery dataset ${PROJECT_ID}:${BIGQUERY_DATASET} for the scan export"
+  if ! command -v bq >/dev/null 2>&1; then echo "bq (part of the Cloud SDK) is needed to create the dataset: gcloud components install bq" >&2; exit 2; fi
+  DATASET="${PROJECT_ID}:${BIGQUERY_DATASET}"
+  if [[ "$DRY_RUN" == 1 ]]; then
+    note "+ bq mk --dataset --location=${REGION} ${DATASET}; grant WRITER to ${SA_EMAIL}; roles/bigquery.jobUser on ${PROJECT_ID}"
+  else
+    if ! bq --project_id="$PROJECT_ID" show --dataset "$DATASET" >/dev/null 2>&1; then
+      bq --project_id="$PROJECT_ID" --location="$REGION" mk --dataset --description="CloudGauge scan history: one row per scan (scans) and per finding (findings)" "$DATASET"
+    fi
+    # WRITER on the dataset (what roles/bigquery.dataEditor grants, on this dataset alone): bq has no
+    # add-iam-policy-binding for datasets, so the access list is read, extended and written back.
+    if ! command -v python3 >/dev/null 2>&1; then
+      echo "python3 is needed to edit the dataset's access list; grant ${SA_EMAIL} WRITER on ${DATASET} in the console instead." >&2; exit 2
+    fi
+    ACCESS_FILE="$(mktemp)"
+    bq --project_id="$PROJECT_ID" show --format=prettyjson "$DATASET" > "$ACCESS_FILE"
+    python3 - "$ACCESS_FILE" "$SA_EMAIL" <<'PY'
+import json, sys
+path, email = sys.argv[1], sys.argv[2]
+dataset = json.load(open(path))
+access = dataset.setdefault("access", [])
+if not any(entry.get("userByEmail") == email and entry.get("role") == "WRITER" for entry in access):
+    access.append({"role": "WRITER", "userByEmail": email})
+json.dump({"access": access}, open(path, "w"))
+PY
+    bq --project_id="$PROJECT_ID" update --source "$ACCESS_FILE" "$DATASET" >/dev/null
+    rm -f "$ACCESS_FILE"
+  fi
+  # Load jobs run as the service account, in the project: Job User, nothing wider.
+  g projects add-iam-policy-binding "$PROJECT_ID" --member="serviceAccount:${SA_EMAIL}" --role=roles/bigquery.jobUser --condition=None >/dev/null
+  note "Every finished scan loads into ${BIGQUERY_DATASET}.scans and ${BIGQUERY_DATASET}.findings (docs/history-and-export.md)."
+  note "Earlier scans: python tools/backfill_export.py --project ${PROJECT_ID} --location ${REGION} --bucket ${BUCKET} --dataset ${BIGQUERY_DATASET}"
+fi
+
+# --- 6b. spend (v18.8) --------------------------------------------------------------------------
+# The billing export is read, never written: READER on the dataset (what roles/bigquery.dataViewer grants, on this
+# dataset alone) when the dataset is in this project; a dataset in another project needs the same entry from its
+# owner (the note says how). The queries run here, under the Job User role the export step grants too.
+if [[ -n "$BILLING_EXPORT" && "${SKIP_SETUP:-0}" != 1 ]]; then
+  CURRENT_STEP="spend"
+  EXPORT_PROJECT="${BILLING_EXPORT%%[.:]*}"
+  EXPORT_DATASET="${BILLING_EXPORT#*[.:]}"
+  step "Billing export ${EXPORT_PROJECT}:${EXPORT_DATASET} for Spend Briefing and Spend Anomalies"
+  if [[ "$EXPORT_PROJECT" == "$PROJECT_ID" ]]; then
+    if ! command -v bq >/dev/null 2>&1; then echo "bq (part of the Cloud SDK) is needed to grant READER on the dataset: gcloud components install bq" >&2; exit 2; fi
+    if [[ "$DRY_RUN" == 1 ]]; then
+      note "+ grant READER on ${EXPORT_PROJECT}:${EXPORT_DATASET} to ${SA_EMAIL}; roles/bigquery.jobUser on ${PROJECT_ID}"
+    else
+      if ! command -v python3 >/dev/null 2>&1; then
+        echo "python3 is needed to edit the dataset's access list; grant ${SA_EMAIL} READER on ${EXPORT_PROJECT}:${EXPORT_DATASET} in the console instead." >&2; exit 2
+      fi
+      ACCESS_FILE="$(mktemp)"
+      bq --project_id="$PROJECT_ID" show --format=prettyjson "${EXPORT_PROJECT}:${EXPORT_DATASET}" > "$ACCESS_FILE"
+      python3 - "$ACCESS_FILE" "$SA_EMAIL" <<'PY'
+import json, sys
+path, email = sys.argv[1], sys.argv[2]
+dataset = json.load(open(path))
+access = dataset.setdefault("access", [])
+if not any(entry.get("userByEmail") == email and entry.get("role") in ("READER", "WRITER", "OWNER") for entry in access):
+    access.append({"role": "READER", "userByEmail": email})
+json.dump({"access": access}, open(path, "w"))
+PY
+      bq --project_id="$PROJECT_ID" update --source "$ACCESS_FILE" "${EXPORT_PROJECT}:${EXPORT_DATASET}" >/dev/null
+      rm -f "$ACCESS_FILE"
+    fi
+  else
+    note "The dataset is in ${EXPORT_PROJECT}: its owner grants ${SA_EMAIL} READER on it once (BigQuery › dataset › Sharing › Permissions, or"
+    note "  bq show --format=prettyjson ${EXPORT_PROJECT}:${EXPORT_DATASET} > ds.json; add {\"role\": \"READER\", \"userByEmail\": \"${SA_EMAIL}\"} to access; bq update --source ds.json ${EXPORT_PROJECT}:${EXPORT_DATASET})."
+  fi
+  # The two queries per scan run in this project: Job User, nothing wider (the export step grants the same role).
+  g projects add-iam-policy-binding "$PROJECT_ID" --member="serviceAccount:${SA_EMAIL}" --role=roles/bigquery.jobUser --condition=None >/dev/null
+  note "Spend Briefing and Spend Anomalies read the standard export tables (gcp_billing_export_v1_*) of ${EXPORT_PROJECT}.${EXPORT_DATASET}; nothing is read from the billing account."
+fi
+
+# --- 7. schedules (v17) -------------------------------------------------------------------------
+if [[ ${#SCHEDULE_NAMES[@]} -gt 0 ]]; then
+  CURRENT_STEP="schedules"
+  step "Scheduled scans (Cloud Scheduler → ${WORKER_URL}/scheduled-scan)"
+  for i in "${!SCHEDULE_NAMES[@]}"; do
+    name="${SCHEDULE_NAMES[$i]}"; scope="${SCHEDULE_SCOPES[$i]}"; scope_id="${SCHEDULE_IDS[$i]}"; cron="${SCHEDULE_CRONS[$i]}"
+    note "${name}: ${scope} ${scope_id} at '${cron}' UTC"
+    verb="create"
+    if [[ "$DRY_RUN" != 1 ]] && gcloud --project "$PROJECT_ID" scheduler jobs describe "$name" --location="$REGION" >/dev/null 2>&1; then verb="update"; fi
+    # The job calls the worker as the service account (its OIDC token, audience the worker's URL), like Cloud Tasks does.
+    g scheduler jobs "$verb" http "$name" --location="$REGION" --schedule="$cron" --time-zone="Etc/UTC" \
+      --uri="${WORKER_URL}/scheduled-scan" --http-method=POST --headers="Content-Type=application/json" \
+      --message-body="{\"scope\":\"${scope}\",\"scope_id\":\"${scope_id}\",\"name\":\"${name}\"}" \
+      --oidc-service-account-email="$SA_EMAIL" --oidc-token-audience="$WORKER_URL" --attempt-deadline=120s --max-retry-attempts=0 >/dev/null
+  done
+fi
+
+# --- done ---------------------------------------------------------------------------------------
+CURRENT_STEP="done"
+step "Deployed ${IMAGE}:${TAG}"
+note "Open            ${WEB_URL}"
+note "Worker          ${WORKER_URL}  (ingress internal: only Cloud Tasks reaches it)"
+if [[ -n "$MEMBERS" ]]; then
+  note "Who can sign in ${MEMBERS}"
+else
+  note "Nobody can sign in yet. Grant a person, a group or a domain roles/iap.httpsResourceAccessor:"
+  note "  gcloud iap web add-iam-policy-binding --project=${PROJECT_ID} --region=${REGION} --resource-type=cloud-run \\"
+  note "    --service=${SERVICE} --member=group:cloud-team@example.com --role=roles/iap.httpsResourceAccessor"
+fi
+note "IAM changes take up to a minute: a 403 right after a grant goes away on reload."
+note "Scans need the organization-level roles of docs/operations.md › Common Prerequisites, granted once to ${SA_EMAIL}."
+if [[ ${#SCHEDULE_NAMES[@]} -gt 0 ]]; then
+  note "Scheduled scans   ${SCHEDULE_NAMES[*]} (gcloud scheduler jobs run NAME --location=${REGION} starts one now)"
+fi

@@ -1,0 +1,385 @@
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+"""The check plan: which checks run, in what order, with which arguments.
+
+A check doesn't know how it is run: this module lists the checks, and
+``app.checks.runner`` executes them. To add a check, write it in one of the
+``app.checks`` modules, add a ``CheckSpec`` below, and add the names it
+reports to ``app.checks.categories.CATEGORY_MAP``.
+"""
+import functools
+from typing import Any, Callable, NamedTuple
+
+from app.checks.advisories import check_org_advisories, check_project_advisories
+from app.checks.capacity import COMMITMENTS_BRIEFING, SIGNALS_CHECK, check_capacity_commitments, check_capacity_signals
+from app.checks.gke_security import CREDENTIAL_EXPOSURE_CHECK, check_gke_security
+from app.checks.impersonation import IMPERSONATION_CHECK, check_service_account_impersonation
+from app.checks.perimeters import VPC_SC_CHECK, check_vpc_sc_coverage
+from app.checks.cost import (
+    LABELS_CHECK,
+    LIFECYCLE_CHECK,
+    SNAPSHOT_SPRAWL_CHECK,
+    check_cost_allocation_labels,
+    check_snapshot_sprawl,
+    check_storage_lifecycle,
+    run_cost_recommendations,
+)
+from app.checks.vm_hardening import VM_SA_CHECK, check_vm_posture
+from app.checks.serverless import COST_CHECK as SERVERLESS_COST_CHECK
+from app.checks.serverless import EXPOSURE_CHECK, SCANNING_CHECK, check_container_scanning, check_serverless_cost, check_serverless_posture
+from app.checks.spend import BRIEFING as SPEND_BRIEFING
+from app.checks.spend import check_spend
+from app.checks.log_cost import LOG_COST_CHECK, check_log_cost
+from app.checks.log_pipeline import AUDIT_PIPELINE_CHECK, DUPLICATE_ROUTING_CHECK, PROJECT_ROUTING_CHECK, check_audit_pipeline, check_duplicate_routing, check_project_routing
+from app.checks.alerting import CHANNELS_CHECK, SYNTHETIC_CHECK, check_alert_channels, check_synthetic_coverage
+from app.checks.scc import DETECTOR_CHECK, SCC_FINDINGS_CHECK, check_detector_coverage, check_scc_findings
+from app.checks.vulnerabilities import EXPOSED_VM_CHECK, OS_VULN_CHECK, check_exposed_vms, check_os_vulnerabilities
+from app.checks.footprint import FOOTPRINT_CHECK, check_platform_footprint
+from app.checks.detection import GKE_ACTIVITY_CHECK, SA_SIGNALS_CHECK, check_gke_activity, check_sa_signals
+from app.checks.support import SUPPORT_BRIEFING, check_support_cases
+from app.checks.org_policy_exceptions import EXCEPTIONS_CHECK as ORG_POLICY_EXCEPTIONS_CHECK, check_org_policy_exceptions
+from app.checks.bucket_logging import BUCKET_LOGGING_CHECK, check_bucket_logging
+from app.checks.edge_security import ARMOR_CHECK, check_edge_security
+from app.checks.privileges import CUSTOM_ROLES_CHECK, FOLDER_ROLES_CHECK, PRIVILEGED_GRANTS_CHECK, check_custom_roles, check_folder_roles, check_privileged_grants
+from app.checks.secrets import SECRET_SCOPE_CHECK, check_secret_posture
+from app.checks.data_governance import (
+    ALLOYDB_CHECK,
+    API_KEYS_CHECK,
+    BIGQUERY_CHECK,
+    KMS_CHECK,
+    SQL_FLAGS_CHECK,
+    check_alloydb_posture,
+    check_api_keys,
+    check_bigquery_governance,
+    check_kms_keys,
+    check_sql_flags,
+)
+from app.checks.gke_operations import UPGRADE_READINESS_CHECK, check_gke_operations
+from app.checks.identity_hygiene import SA_PRIVILEGES_CHECK, UNUSED_SA_CHECK, check_identity_hygiene, check_unused_service_accounts
+from app.checks.gke_versions import CHECK_NAME as GKE_VERSIONS_CHECK
+from app.checks.gke_versions import check_gke_supported_versions
+from app.checks.network import run_network_insights
+from app.checks.network_edge import (
+    DNS_CHECK,
+    EDGE_CHECK,
+    FLOW_LOGS_CHECK,
+    HYBRID_CHECK,
+    PEERING_NAT_CHECK,
+    check_dns_posture,
+    check_flow_logs,
+    check_hybrid_connectivity,
+    check_load_balancer_edge,
+    check_peering_and_nat,
+)
+from app.checks.operations import (
+    DATA_ACCESS_CHECK,
+    QUOTA_RECOMMENDATIONS_CHECK,
+    check_audit_logging,
+    check_data_access_audit_logs,
+    check_monitoring_coverage,
+    check_os_config_coverage,
+    check_quota_recommendations,
+    check_standalone_vms,
+    run_miscellaneous_checks_refactored,
+    run_service_limit_checks_refactored,
+)
+from app.checks.reliability import (
+    SQL_VERSIONS_CHECK,
+    check_cloud_sql_versions,
+    check_essential_contacts,
+    check_gke_hygiene,
+    check_resilience_assets,
+    check_storage_versioning,
+)
+from app.checks.security import (
+    IAM_CHECK,
+    check_cloud_sql_security,
+    check_iam_recommendations,
+    check_open_firewall_rules,
+    check_org_iam_policy,
+    check_organization_policies,
+    check_project_iam_policy,
+    check_public_buckets,
+    check_sa_key_rotation,
+    check_scc_status,
+    check_storage_ubla,
+    check_vm_external_ips,
+    check_vpc_configuration,
+)
+from app.checks.service_health import check_service_health_incidents
+
+
+class CheckSpec(NamedTuple):
+    """One planned check: ``(Category, Friendly Name, function_to_run, (tuple_of_arguments,))``."""
+
+    category: str
+    name: str
+    func: Callable[..., Any]
+    args: tuple
+
+
+# Display names of the checks added in v14 (Advisory Notifications runs differently per scope; see scope_level_checks).
+SERVICE_HEALTH_CHECK = "Service Health Incidents"
+ADVISORIES_CHECK = "Advisory Notifications"
+# Beta v1's organization-only resilience check, run under every scope since v15.6 (app.checks.reliability).
+RESILIENCE_CHECK = "Resilience of Critical Assets"
+# v17: the capacity checks' display names (app.checks.capacity writes several report names each; a crash is
+# recorded under the display name, as for the miscellaneous checks).
+CAPACITY_COMMITMENTS_CHECK = COMMITMENTS_BRIEFING
+CAPACITY_SIGNALS_CHECK = SIGNALS_CHECK
+
+
+
+def build_check_plan(scope, scope_id, job_id, all_projects, active_zones, active_regions, location_errors=None):
+    """
+    Returns the ordered list of checks to run for a scan, as ``CheckSpec`` entries.
+    The first 18 common and 4 organization-only checks, their order, and their arguments
+    are the same as in upstream beta v1's ``run_all_checks``: the legacy plan plus
+    four Security checks at the end of the common list. The runner calls each one as
+    ``func(*args, sink=...)``.
+
+    After them come the checks added since: Service Health Incidents (v14) and GKE
+    Supported Versions (v15), over the projects of every scope; Resilience of Critical
+    Assets, organization-only in beta v1, over the Asset Inventory of every scope since
+    v15.6 (it takes the scope, not the project list, so it stays a scope-level check);
+    and Advisory Notifications (v14), read once from the organization in an organization
+    scan and per project otherwise. Beta v1's organization-level Personalized Service
+    Health probe is retired: the per-project check covers it.
+
+    v17 adds, after them: the FinOps checks (cost-allocation labels, storage lifecycle,
+    snapshot sprawl under the scope), Cloud SQL Extended Support (under the scope),
+    the capacity checks (reservations, commitments and coverage; stockout and quota signals),
+    the quota recommender, and IAM Least Privilege (the scope itself and every project).
+
+    v17.1 adds, after them, the SSRF-chain checks, all scope-level: the GKE security posture
+    (four findings from one listing of the scope's clusters), Service Account Impersonation
+    and VPC Service Controls Coverage.
+
+    The two checks that query by location (Cost-Saving Recommendations, Network
+    Insights) take one argument more than in beta v1: ``location_errors``, project ID
+    -> the error that stopped location discovery for that project, which they report
+    as "Projects not checked" (see ``app.checks.not_checked``).
+    """
+    location_errors = location_errors or {}
+    # --- This structured list is the key to accurate progress reporting ---
+    # Format: (Category, Friendly Name, function_to_run, (tuple_of_arguments,))
+    all_checks_to_run = [
+        CheckSpec("Special", "Organization Policies", check_organization_policies, (scope, scope_id, job_id)),
+        CheckSpec("Security & Identity", "Project IAM Hygiene", check_project_iam_policy, (scope_id, all_projects, job_id)),
+        CheckSpec("Security & Identity", "Service Account Key Rotation", check_sa_key_rotation, (scope_id, all_projects, job_id)),
+        CheckSpec("Security & Identity", "Public GCS Buckets", check_public_buckets, (scope_id, all_projects, job_id)),
+        CheckSpec("Security & Identity", "Open Firewall Rules", check_open_firewall_rules, (scope, scope_id, all_projects, job_id)),  # v18.3: + the scope's firewall policies
+        CheckSpec("Cost Optimization", "Cost-Saving Recommendations", run_cost_recommendations, (scope_id, all_projects, active_zones, active_regions, job_id, location_errors)),
+        CheckSpec("Reliability & Resilience", "GCS Bucket Versioning", check_storage_versioning, (scope, scope_id, all_projects, job_id)),
+        CheckSpec("Reliability & Resilience", "GKE Hygiene", check_gke_hygiene, (scope_id, all_projects, job_id)),
+        CheckSpec("Operational Excellence & Observability", "OS Config Agent Coverage", check_os_config_coverage, (scope_id, all_projects, job_id)),
+        CheckSpec("Operational Excellence & Observability", "Monitoring Alert Coverage", check_monitoring_coverage, (scope_id, all_projects, job_id)),
+        CheckSpec("Operational Excellence & Observability", "Standalone VMs", check_standalone_vms, (scope_id, all_projects, job_id)),
+        CheckSpec("Operational Excellence & Observability", "Network Insights", run_network_insights, (scope_id, all_projects, active_zones, active_regions, job_id, location_errors)),
+        CheckSpec("Operational Excellence & Observability", "Miscellaneous Checks", run_miscellaneous_checks_refactored, (scope, scope_id, all_projects, job_id)),
+        CheckSpec("Operational Excellence & Observability", "Service Quota Limits", run_service_limit_checks_refactored, (scope_id, all_projects, job_id)),
+        CheckSpec("Security & Identity", "Cloud SQL Security", check_cloud_sql_security, (scope_id, all_projects, job_id)),
+        CheckSpec("Security & Identity", "VPC Configuration", check_vpc_configuration, (scope_id, all_projects, job_id)),
+        CheckSpec("Security & Identity", "GCS Uniform Bucket-Level Access", check_storage_ubla, (scope_id, all_projects, job_id)),
+        CheckSpec("Security & Identity", "VM External IPs", check_vm_external_ips, (scope_id, all_projects, job_id)),
+        CheckSpec("Reliability & Resilience", SERVICE_HEALTH_CHECK, check_service_health_incidents, (scope_id, all_projects, job_id)),
+        CheckSpec("Reliability & Resilience", GKE_VERSIONS_CHECK, check_gke_supported_versions, (scope_id, all_projects, job_id)),
+        CheckSpec("Reliability & Resilience", RESILIENCE_CHECK, check_resilience_assets, (scope, scope_id, job_id)),
+        # v17
+        CheckSpec("Cost Optimization", LABELS_CHECK, check_cost_allocation_labels, (scope_id, all_projects, job_id)),
+        CheckSpec("Cost Optimization", LIFECYCLE_CHECK, check_storage_lifecycle, (scope_id, all_projects, job_id)),
+        CheckSpec("Cost Optimization", SNAPSHOT_SPRAWL_CHECK, check_snapshot_sprawl, (scope, scope_id, job_id)),
+        CheckSpec("Reliability & Resilience", SQL_VERSIONS_CHECK, check_cloud_sql_versions, (scope, scope_id, job_id)),
+        CheckSpec("Reliability & Resilience", CAPACITY_COMMITMENTS_CHECK, check_capacity_commitments, (scope_id, all_projects, job_id)),
+        CheckSpec("Reliability & Resilience", CAPACITY_SIGNALS_CHECK, check_capacity_signals, (scope_id, all_projects, job_id)),
+        CheckSpec("Operational Excellence & Observability", QUOTA_RECOMMENDATIONS_CHECK, check_quota_recommendations, (scope_id, all_projects, job_id)),
+        CheckSpec("Security & Identity", IAM_CHECK, check_iam_recommendations, (scope, scope_id, all_projects, job_id)),
+        # v17.1: the SSRF chain
+        CheckSpec("Security & Identity", CREDENTIAL_EXPOSURE_CHECK, check_gke_security, (scope, scope_id, job_id)),
+        CheckSpec("Security & Identity", IMPERSONATION_CHECK, check_service_account_impersonation, (scope, scope_id, job_id)),
+        CheckSpec("Security & Identity", VPC_SC_CHECK, check_vpc_sc_coverage, (scope, scope_id, job_id)),
+        # v18.1: two checks every scope runs on the scope itself
+        CheckSpec("Reliability & Resilience", "Essential Contacts", check_essential_contacts, (scope, scope_id, job_id)),
+        CheckSpec("Operational Excellence & Observability", DATA_ACCESS_CHECK, check_data_access_audit_logs, (scope, scope_id, job_id)),
+        # v18.2: GKE Upgrade Readiness and GKE Observability, from the scope's cluster and PodDisruptionBudget listings
+        CheckSpec("Reliability & Resilience", UPGRADE_READINESS_CHECK, check_gke_operations, (scope, scope_id, job_id)),
+        # v18.3: the network edge, from the scope's inventory (five listings) and one tunnel-state read per project with tunnels
+        CheckSpec("Reliability & Resilience", HYBRID_CHECK, check_hybrid_connectivity, (scope, scope_id, job_id)),
+        CheckSpec("Security & Identity", EDGE_CHECK, check_load_balancer_edge, (scope, scope_id, job_id)),
+        CheckSpec("Security & Identity", DNS_CHECK, check_dns_posture, (scope, scope_id, job_id)),
+        CheckSpec("Operational Excellence & Observability", FLOW_LOGS_CHECK, check_flow_logs, (scope, scope_id, job_id)),
+        CheckSpec("Reliability & Resilience", PEERING_NAT_CHECK, check_peering_and_nat, (scope, scope_id, job_id)),
+        # v18.4: data governance, from the scope's inventory (five listings, two IAM-policy searches)
+        CheckSpec("Security & Identity", BIGQUERY_CHECK, check_bigquery_governance, (scope, scope_id, job_id)),
+        CheckSpec("Security & Identity", SQL_FLAGS_CHECK, check_sql_flags, (scope, scope_id, job_id)),
+        CheckSpec("Reliability & Resilience", ALLOYDB_CHECK, check_alloydb_posture, (scope, scope_id, job_id)),
+        CheckSpec("Security & Identity", KMS_CHECK, check_kms_keys, (scope, scope_id, job_id)),
+        CheckSpec("Security & Identity", API_KEYS_CHECK, check_api_keys, (scope, scope_id, job_id)),
+        # v18.5: VM hardening & identities — VM Service Accounts + VM Hardening from one listing of the scope's instances and compute projects,
+        # Service Account Privileges + External Principals from one listing of the IAM policies under the scope, Unused Service Accounts per project
+        CheckSpec("Security & Identity", VM_SA_CHECK, check_vm_posture, (scope, scope_id, job_id)),
+        CheckSpec("Security & Identity", SA_PRIVILEGES_CHECK, check_identity_hygiene, (scope, scope_id, job_id)),
+        CheckSpec("Security & Identity", UNUSED_SA_CHECK, check_unused_service_accounts, (scope_id, all_projects, job_id)),
+        # v18.6: serverless and edge exposure — Serverless Exposure + Serverless Service Accounts from one listing of the scope's services, jobs,
+        # functions, serverless NEGs and backend services (+ one IAM search, + the Cloud Run and Functions APIs per project), Cloud Armor Policy
+        # Content + SSL Certificate Health from one listing of policies, certificates, backend services and proxies (+ the Compute API per project),
+        # Container Scanning Enabled from two searches (repositories; the Artifact Analysis service)
+        CheckSpec("Security & Identity", EXPOSURE_CHECK, check_serverless_posture, (scope, scope_id, job_id)),
+        CheckSpec("Security & Identity", ARMOR_CHECK, check_edge_security, (scope, scope_id, job_id)),
+        CheckSpec("Security & Identity", SCANNING_CHECK, check_container_scanning, (scope, scope_id, job_id)),
+        # v18.7: folders, keys and privileged grants — Folder Primitive Roles from the folders under the scope (fresh policies), Privileged Grants
+        # (split: the organization's grants, redundancy, deny policies and the organization's and folders' PAM entitlements in the scope shard; the
+        # projects' entitlements per shard), Secret Access Scope + Secret Manager Posture from one IAM search and one resource search, Custom Roles
+        # With IAM Powers (split: the organization's roles in the scope shard, the projects' per shard; holders from the IAM search).
+        # User-Managed Keys is the second record of Service Account Key Rotation (same listing).
+        CheckSpec("Security & Identity", FOLDER_ROLES_CHECK, check_folder_roles, (scope, scope_id, job_id)),
+        CheckSpec("Security & Identity", PRIVILEGED_GRANTS_CHECK, check_privileged_grants, (scope, scope_id, all_projects, job_id)),
+        CheckSpec("Security & Identity", SECRET_SCOPE_CHECK, check_secret_posture, (scope, scope_id, job_id)),
+        CheckSpec("Security & Identity", CUSTOM_ROLES_CHECK, check_custom_roles, (scope, scope_id, all_projects, job_id)),
+        # v18.8: forecasts, budgets and spend — Spend Briefing + Spend Anomalies from the billing export in BigQuery (two queries under the scope's
+        # ancestry), Log Cost Levers per project (log buckets, subnets, sinks, the log volume by severity), Serverless Cost Hygiene from one listing of
+        # the scope's services, jobs, gen-2 functions and connectors (+ the Cloud Run and VPC Access APIs per project). Cloud Storage Lifecycle gained
+        # the versioned-without-pruning row.
+        CheckSpec("Cost Optimization", SPEND_BRIEFING, check_spend, (scope, scope_id, job_id)),
+        CheckSpec("Cost Optimization", LOG_COST_CHECK, check_log_cost, (scope_id, all_projects, job_id)),
+        CheckSpec("Cost Optimization", SERVERLESS_COST_CHECK, check_serverless_cost, (scope, scope_id, job_id)),
+        # v18.9: logging pipeline and alerting hygiene — Audit Log Pipeline (the scope's own customer sinks, their destinations and writers),
+        # Duplicate Log Routing (the aggregated bucket sinks of the organization and the folders in scope against the projects' _Default sinks),
+        # Project Log Routing per project (the _Default sink, bucket and view), Alert Notification Channels per project (policies, channels,
+        # Pub/Sub topics from the inventory), Synthetic and SLO Coverage from one listing of the scope's load balancers, services and clusters
+        # (+ the Monitoring API in the projects that run them).
+        CheckSpec("Operational Excellence & Observability", AUDIT_PIPELINE_CHECK, check_audit_pipeline, (scope, scope_id, job_id)),
+        CheckSpec("Cost Optimization", DUPLICATE_ROUTING_CHECK, check_duplicate_routing, (scope, scope_id, job_id)),
+        CheckSpec("Operational Excellence & Observability", PROJECT_ROUTING_CHECK, check_project_routing, (scope_id, all_projects, job_id)),
+        CheckSpec("Operational Excellence & Observability", CHANNELS_CHECK, check_alert_channels, (scope_id, all_projects, job_id)),
+        CheckSpec("Reliability & Resilience", SYNTHETIC_CHECK, check_synthetic_coverage, (scope, scope_id, job_id)),
+        # v19: findings and vulnerabilities — SCC Active Findings (SCC v2 under the scope, through REST), SCC Detector Coverage per project (the
+        # Security Center Management services), OS Vulnerabilities per project (VM Manager's reports per zone), Exposed Privileged VMs from one
+        # listing of the scope's instances, firewall rules and policies (+ the IAM-policy search Service Account Privileges makes).
+        CheckSpec("Security & Identity", SCC_FINDINGS_CHECK, check_scc_findings, (scope, scope_id, job_id)),
+        CheckSpec("Security & Identity", DETECTOR_CHECK, check_detector_coverage, (scope_id, all_projects, job_id)),
+        CheckSpec("Security & Identity", OS_VULN_CHECK, check_os_vulnerabilities, (scope_id, all_projects, job_id)),
+        CheckSpec("Security & Identity", EXPOSED_VM_CHECK, check_exposed_vms, (scope, scope_id, job_id)),
+        # v19.1: footprint and detection — Platform Footprint (one all-types inventory search under the scope; a briefing), GKE Control Plane
+        # Activity and Service Account Activity Signals (one 7-day Admin Activity log read each under the scope).
+        CheckSpec("Operational Excellence & Observability", FOOTPRINT_CHECK, check_platform_footprint, (scope, scope_id, job_id)),
+        CheckSpec("Security & Identity", GKE_ACTIVITY_CHECK, check_gke_activity, (scope_id, all_projects, job_id)),  # per project: the k8s_cluster audit log is a project's
+        CheckSpec("Security & Identity", SA_SIGNALS_CHECK, check_sa_signals, (scope, scope_id, all_projects, job_id)),  # split: the scope's own entries + every project's
+        # v19.2: the open support cases under the scope — one search, two records (Support Cases, Case Hygiene); Informational when the API or the permission is missing.
+        CheckSpec("Operational Excellence & Observability", SUPPORT_BRIEFING, check_support_cases, (scope, scope_id, job_id)),
+        # v19.3: the guardrails the scanned resource holds that a folder or project below it weakens — one inventory listing, inheritance computed in memory.
+        CheckSpec("Security & Identity", ORG_POLICY_EXCEPTIONS_CHECK, check_org_policy_exceptions, (scope, scope_id, job_id)),
+        # v19.3: who could tell who read a bucket — usage logging per bucket, Data Access logs for storage at the project and above (three listings).
+        CheckSpec("Operational Excellence & Observability", BUCKET_LOGGING_CHECK, check_bucket_logging, (scope, scope_id, job_id)),
+    ]
+
+    if scope == 'organization':
+        org_only_checks = [
+            CheckSpec("Security & Identity", "Organization IAM Policy", check_org_iam_policy, (scope_id, job_id)),
+            CheckSpec("Security & Identity", "Security Command Center Status", check_scc_status, (scope_id, job_id)),
+            CheckSpec("Operational Excellence & Observability", "Organization Audit Logging", check_audit_logging, (scope_id, job_id)),
+            CheckSpec("Security & Identity", ADVISORIES_CHECK, check_org_advisories, (scope_id, job_id)),
+        ]
+        all_checks_to_run.extend(org_only_checks)
+    else:
+        all_checks_to_run.append(CheckSpec("Security & Identity", ADVISORIES_CHECK, check_project_advisories, (scope_id, all_projects, job_id)))
+
+    return all_checks_to_run
+
+
+# Checks that look at the scope itself rather than at its projects. A sharded
+# scan (app.fanout) runs them once, in the "scope" shard, and the project checks
+# once per shard of projects. Rule: a check is scope-level iff its arguments
+# don't include the project list (tests/test_fanout.py verifies this agrees).
+# Resilience of Critical Assets is one in every scope: it reads the scope's Asset
+# Inventory in three listings, not its projects one by one; so are Snapshot Sprawl
+# and Cloud SQL Extended Support (v17), and the v17.1 SSRF-chain checks (one cluster
+# listing, one IAM search, one perimeter listing for the whole scope).
+SCOPE_LEVEL_CHECKS = frozenset({
+    "Organization Policies", "Organization IAM Policy", "Security Command Center Status",
+    "Organization Audit Logging", "Essential Contacts", DATA_ACCESS_CHECK, RESILIENCE_CHECK,
+    SNAPSHOT_SPRAWL_CHECK, SQL_VERSIONS_CHECK, CREDENTIAL_EXPOSURE_CHECK, IMPERSONATION_CHECK, VPC_SC_CHECK,
+    UPGRADE_READINESS_CHECK,  # v18.2: two listings under the scope
+    HYBRID_CHECK, EDGE_CHECK, DNS_CHECK, FLOW_LOGS_CHECK, PEERING_NAT_CHECK,  # v18.3: one listing each
+    BIGQUERY_CHECK, SQL_FLAGS_CHECK, ALLOYDB_CHECK, KMS_CHECK, API_KEYS_CHECK,  # v18.4: one listing each
+    VM_SA_CHECK, SA_PRIVILEGES_CHECK,  # v18.5: one listing each (two records each: VM Hardening, External Principals)
+    EXPOSURE_CHECK, ARMOR_CHECK, SCANNING_CHECK,  # v18.6: one listing each (two records each for the first two: Serverless Service Accounts, SSL Certificate Health)
+    FOLDER_ROLES_CHECK, SECRET_SCOPE_CHECK,  # v18.7: the folders under the scope; one IAM search + one resource search (two records: Secret Manager Posture)
+    SPEND_BRIEFING, SERVERLESS_COST_CHECK,  # v18.8: two BigQuery queries under the scope's ancestry (two records: Spend Anomalies); one listing of the scope's workloads and connectors
+    AUDIT_PIPELINE_CHECK, DUPLICATE_ROUTING_CHECK, SYNTHETIC_CHECK,  # v18.9: the scope's sinks; the aggregated sinks under it; one listing of its load balancers, services and clusters
+    SCC_FINDINGS_CHECK, EXPOSED_VM_CHECK,  # v19: SCC's findings under the scope; one listing of instances, firewall rules and policies
+    FOOTPRINT_CHECK,  # v19.1: one all-types search under the scope (the two detection records read per project; the SA one is split)
+    SUPPORT_BRIEFING,  # v19.2: one cases.search under the scope (two records: Case Hygiene)
+    ORG_POLICY_EXCEPTIONS_CHECK, BUCKET_LOGGING_CHECK,  # v19.3: the policies set under the scope + its folders and projects; the buckets, projects and IAM policies under it
+})
+# The checks that do both: scope-wide work plus per-project work. Shards split them
+# with keyword flags: the scope shard runs the first set, the project shards the second
+# (see run_miscellaneous_checks_refactored and check_iam_recommendations). The scope
+# half of each runs in the scopes listed: the organization's insights exist for an
+# organization only; an organization or a folder has IAM recommendations of its own.
+MISCELLANEOUS_CHECK = "Miscellaneous Checks"
+SPLIT_CHECKS = {  # in plan order
+    # v18.3: the scope's firewall policies (one inventory listing) in the scope shard, the VPC rules per project shard.
+    "Open Firewall Rules": (("organization", "folder", "project"), {"project_rules": False}, {"policies": False}),
+    MISCELLANEOUS_CHECK: (("organization",), {"project_checks": False}, {"org_insights": False}),
+    IAM_CHECK: (("organization", "folder"), {"project_level": False}, {"scope_level": False}),
+    # v18.7: the organization's grants, deny policies and the organization's and folders' PAM entitlements in the scope shard, the projects'
+    # entitlements per project shard; the organization's custom roles in the scope shard, the projects' per shard.
+    PRIVILEGED_GRANTS_CHECK: (("organization", "folder", "project"), {"project_level": False}, {"scope_level": False}),
+    CUSTOM_ROLES_CHECK: (("organization", "folder", "project"), {"project_level": False}, {"scope_level": False}),
+    # v19.1: the organization's or folder's own Admin Activity entries in the scope shard (a project scan has no scope half), the projects' per shard.
+    SA_SIGNALS_CHECK: (("organization", "folder"), {"project_level": False}, {"scope_level": False}),
+}
+
+
+def scope_level_checks(scope):
+    """The names of the scope-level checks of a ``scope`` scan: ``SCOPE_LEVEL_CHECKS``, plus Advisory
+    Notifications in an organization scan (read once from the organization; per project otherwise)."""
+    return SCOPE_LEVEL_CHECKS | ({ADVISORIES_CHECK} if scope == 'organization' else frozenset())
+
+
+def scope_check_plan(scope, scope_id, job_id):
+    """The scope-level checks of :func:`build_check_plan`: Organization Policies and Resilience of
+    Critical Assets, plus, for an organization, the org-only checks and the scope-wide half of the
+    split checks (``SPLIT_CHECKS``) that apply to the scope."""
+    scope_level = scope_level_checks(scope)
+    full = build_check_plan(scope, scope_id, job_id, [], [], [])
+    plan = [spec for spec in full if spec.name in scope_level]
+    for spec in full:
+        split = SPLIT_CHECKS.get(spec.name)
+        if split and scope in split[0]:
+            plan.append(spec._replace(func=functools.partial(spec.func, **split[1])))
+    return plan
+
+
+def project_check_plan(scope, scope_id, job_id, projects, active_zones, active_regions, location_errors=None):
+    """The project-level checks of :func:`build_check_plan`, over ``projects`` only."""
+    plan, scope_level = [], scope_level_checks(scope)
+    for spec in build_check_plan(scope, scope_id, job_id, projects, active_zones, active_regions, location_errors):
+        if spec.name in scope_level:
+            continue
+        if spec.name in SPLIT_CHECKS:
+            spec = spec._replace(func=functools.partial(spec.func, **SPLIT_CHECKS[spec.name][2]))
+        plan.append(spec)
+    return plan
+
+
+def shard_check_names(scope, scope_level):
+    """The names of the checks a shard owns: the scope shard's (``scope_level``) or a project shard's.
+
+    Pure (no clients, no network), so it works even when the shard itself could
+    not run: a sharded scan records one error row per name for such a shard.
+    """
+    plan = scope_check_plan(scope, "", "") if scope_level else project_check_plan(scope, "", "", [], [], [])
+    return [spec.name for spec in plan]

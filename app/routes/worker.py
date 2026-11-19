@@ -1,0 +1,116 @@
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+"""The Cloud Tasks worker endpoints.
+
+Cloud Tasks posts ``{"scope", "scope_id", "job_id"}`` to ``/run-scan`` and retries
+the task when the response is a 5xx, so the bodies and status codes are unchanged.
+
+Sharded scans (``app.fanout``) add three endpoints with the same body plus a
+``shard_id`` or ``sweep`` number: ``/scan-shard``, ``/run-aggregation`` and
+``/sweep``. They follow the same convention: 200 when the task's work is done
+(or no longer needed), 500 when Cloud Tasks should retry it. The
+``X-CloudTasks-TaskRetryCount`` header tells a task whether this is its last
+attempt, so that a shard that keeps failing ends as error rows in the report
+rather than as a missing one.
+
+Scheduled scans (v17, ``app.services.schedules``) add ``/scheduled-scan``, which
+Cloud Scheduler posts ``{"scope", "scope_id", "name"}`` to: it enqueues a scan
+(202), or answers 409 while the scope's previous scan is still running.
+It lives on the worker because the worker is what the service account alone can
+call; nothing that passes Identity-Aware Proxy reaches it.
+
+v18.6.1: every route first verifies the caller's ID token (``app.routes.guards``;
+401 otherwise) and then its body (``app.validation``; 400 for a malformed one,
+before any work — Cloud Tasks retries a 400 as it does a 500, a bounded number
+of times, so the change is in the log, not in the retry behaviour).
+"""
+from flask import Blueprint, jsonify, request
+
+from app import scan_job, validation
+from app.extensions import get_services
+from app.fanout import RETRY_COUNT_HEADER
+from app.routes import guards
+from app.services import schedules
+
+bp = Blueprint("worker", __name__)
+bp.before_request(guards.worker_caller_required)
+
+
+@bp.errorhandler(validation.RequestError)
+def bad_request(error):
+    """A malformed task body: 400 with the reason."""
+    return jsonify({"error": str(error)}), 400
+
+
+def retry_count():
+    """The attempt's retry count from Cloud Tasks (0 on the first attempt, and when called directly)."""
+    try:
+        return int(request.headers.get(RETRY_COUNT_HEADER, 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def body():
+    """The task's JSON body (a non-JSON body counts as missing)."""
+    return request.get_json(force=True, silent=True)
+
+
+@bp.route('/run-scan', methods=['POST'])
+def run_scan_worker():
+    """
+    The worker endpoint triggered by Cloud Tasks. It executes the main `run_all_checks`
+    function and uploads the generated reports to Google Cloud Storage (or, for a
+    scope with more projects than one shard holds, dispatches the shard tasks).
+    """
+    data = validation.clean_scan_body(body())
+    services = get_services()
+    if scan_job.execute_scan_job(data, store=services.results_store, banner=services.report_banner, fanout=services.get_fanout(),
+                                 exporter=services.get_exporter()):
+        return "Scan completed and reports uploaded.", 200
+    return "Internal Server Error", 500
+
+
+@bp.route('/scan-shard', methods=['POST'])
+def scan_shard_worker():
+    """Runs one shard of a sharded scan and, if it was the last one, triggers the aggregation."""
+    data = validation.clean_shard_body(body())
+    if get_services().get_fanout().run_shard(data, retry_count=retry_count()):
+        return "Shard finished.", 200
+    return "Internal Server Error", 500
+
+
+@bp.route('/run-aggregation', methods=['POST'])
+def run_aggregation_worker():
+    """Merges the shards' findings into the final reports and completes the job."""
+    data = validation.clean_scan_body(body())
+    if get_services().get_fanout().aggregate(data, retry_count=retry_count()):
+        return "Aggregation completed and reports uploaded.", 200
+    return "Internal Server Error", 500
+
+
+@bp.route('/sweep', methods=['POST'])
+def sweep_worker():
+    """Checks on a running sharded job; finishes it if its shards have died, else re-schedules itself."""
+    data = validation.clean_sweep_body(body())
+    get_services().get_fanout().sweep(data)
+    return "Sweep done.", 200
+
+
+@bp.route('/scheduled-scan', methods=['POST'])
+def scheduled_scan():
+    """Starts the scan a Cloud Scheduler job asks for (v17): 202 with the job ID, 400 for a malformed body, 409 while
+    the scope's previous scan is still running, 503 (with Retry-After) when Cloud Tasks would not take the task (v20)."""
+    response, status = schedules.start_scheduled_scan(get_services(), body())
+    headers = {"Retry-After": str(schedules.RETRY_AFTER_SECONDS)} if status == 503 else {}
+    return jsonify(response), status, headers

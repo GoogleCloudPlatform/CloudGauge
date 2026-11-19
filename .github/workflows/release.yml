@@ -1,0 +1,70 @@
+# Release — publishes the GitHub Release when a release tag is pushed (v20).
+#
+# A release is a normal pull request that bumps VERSION (and the same number in terraform/versions.tf) and adds the
+# release's section at the top of RELEASE_NOTES.md — the test suite holds the three together — merged to main, then
+# the tag on the merge commit:
+#
+#   git fetch origin main && git tag -a v20.0.0 origin/main -m "v20.0.0" && git push origin v20.0.0
+#
+# This workflow checks that the tag names the commit's VERSION and that the commit is on main, takes the release's
+# section of RELEASE_NOTES.md as the body (tools/release_notes.py) and creates the GitHub Release — a pre-release when
+# the tag carries a suffix (v20.0.0-rc.1). Nothing is built here: every deployment method builds the image in the
+# deployer's own project from the tagged source (docs/operations.md › Deployment Instructions).
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v[0-9]*'
+
+permissions: {}  # nothing by default; the one job asks for what it needs
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false  # two tags are two releases; neither cancels the other
+
+jobs:
+  release:
+    name: GitHub Release
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write  # creates the release
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          fetch-depth: 0  # main's history, to check the tagged commit is on it
+          persist-credentials: false
+      - name: The tag names the commit's VERSION and the commit is on main
+        run: |
+          set -eu
+          tag="$GITHUB_REF_NAME"
+          version="$(tr -d '[:space:]' < VERSION)"
+          if [ "$tag" != "v$version" ]; then
+            echo "::error::the tag is $tag but VERSION says $version: tag the commit that bumped VERSION"
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::$tag points at a commit that is not on main: release tags name merged commits only"
+            exit 1
+          fi
+      - name: The release's section of RELEASE_NOTES.md
+        run: |
+          set -eu
+          tag="$GITHUB_REF_NAME"
+          {
+            python3 tools/release_notes.py "$tag"
+            printf '\n---\n**Deploy this release:** `git fetch --tags && git checkout %s`, then `TAG=%s tools/deploy.sh` (Method 1), the Console steps (Method 2) or Terraform with `?ref=%s` (Method 3) — docs/operations.md › Deployment Instructions. An existing deployment follows *Updating an Existing Deployment (Zero-Downtime)*.\n' "$tag" "$tag" "$tag"
+          } > "$RUNNER_TEMP/notes.md"
+          cat "$RUNNER_TEMP/notes.md"
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          case "$GITHUB_REF_NAME" in
+            *-*) prerelease=--prerelease ;;
+            *)   prerelease= ;;
+          esac
+          # shellcheck disable=SC2086  # $prerelease is a flag or nothing
+          gh release create "$GITHUB_REF_NAME" --verify-tag --title "$GITHUB_REF_NAME" --notes-file "$RUNNER_TEMP/notes.md" $prerelease

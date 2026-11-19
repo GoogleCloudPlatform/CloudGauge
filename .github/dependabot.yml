@@ -1,0 +1,45 @@
+# Dependabot — version updates, one grouped pull request a week per ecosystem (v20).
+# Dependabot *alerts* and *security updates* are enabled on the repository (organization-managed) and need no file;
+# this adds the routine bumps: the pinned Python requirements, the pinned actions of the CI workflow, the base image.
+#
+# target-branch: the release branch until the v20 cutover makes it main — remove the three lines then.
+version: 2
+updates:
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    cooldown:
+      default-days: 7  # a new version must be a week old before it is proposed (supply-chain hygiene; zizmor's dependabot-cooldown)
+    target-branch: refactor/modular-factory
+    groups:
+      python-requirements:
+        patterns: ["*"]
+    commit-message:
+      prefix: "build(deps)"
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    cooldown:
+      default-days: 7  # a new version must be a week old before it is proposed (supply-chain hygiene; zizmor's dependabot-cooldown)
+    target-branch: refactor/modular-factory
+    groups:
+      actions:
+        patterns: ["*"]
+    commit-message:
+      prefix: "ci(deps)"
+
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    cooldown:
+      default-days: 7  # a new version must be a week old before it is proposed (supply-chain hygiene; zizmor's dependabot-cooldown)
+    target-branch: refactor/modular-factory
+    commit-message:
+      prefix: "build(deps)"

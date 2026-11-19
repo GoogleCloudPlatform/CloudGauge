@@ -1,0 +1,44 @@
+name: Bug report
+description: A scan, a page or a report did something wrong.
+title: "bug: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks. Before filing, `docs/operations.md` › **Troubleshooting** covers the common deployment errors.
+        **Do not paste a report, a status file or a finding here** — they name your resources. Describe them instead.
+        Security problems go through [SECURITY.md](../blob/main/SECURITY.md), not an issue.
+  - type: input
+    id: version
+    attributes:
+      label: Release
+      description: The version in the report's footer, or the image tag (`gcloud run services describe … --format='value(spec.template.spec.containers[0].image)'`).
+      placeholder: v20.0.0
+    validations:
+      required: true
+  - type: dropdown
+    id: scope
+    attributes:
+      label: Scan scope
+      options: [organization, folder, project, not a scan (a page, the history, the export, a schedule)]
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: The check or page, what it showed, and what you expected. The number of projects in the scope helps.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Log lines
+      description: From the web or worker service (`gcloud logging read …`, docs/operations.md › Troubleshooting › Step 1), with the `[job id]` prefix if any. Resource names may be redacted.
+      render: text
+  - type: dropdown
+    id: method
+    attributes:
+      label: Deployed with
+      options: [tools/deploy.sh, the Console (Method 2), Terraform (Method 3), other]

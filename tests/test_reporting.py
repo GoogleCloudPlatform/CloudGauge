@@ -1,0 +1,512 @@
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+"""The reports: the Jinja HTML report and the CSV.
+
+Both generators get the same categorized results, as the worker passes them.
+The HTML report is read through ``helpers.report_facts`` (title, overview
+counts, scores, and every check item with its status, details and remediation
+placeholder) where a test cares what it says rather than how: the enterprise
+layout (plan item 6b) orders checks by severity, adds summary lines and paging,
+and so on, but must not lose or alter a finding. The report escapes the values
+it inserts (plan item B3). No Flask app or request context is involved: reports
+are rendered by the worker, outside any request for a page.
+"""
+import json
+import re
+from html import unescape
+
+import pytest
+from jinja2 import UndefinedError
+
+import samples
+from app.config import VERSION
+from app.reporting.context import MAX_ROWS_PER_CHECK, ROWS_PER_PAGE
+from app.reporting.csv_report import generate_csv_data
+from app.reporting.html_report import generate_html_report, report_environment
+from helpers import csv_sections, csv_tables, report_facts
+
+SECURITY, COST, RELIABILITY, OPERATIONS = ('Security & Identity', 'Cost Optimization', 'Reliability & Resilience',
+                                           'Operational Excellence & Observability')
+ORG_POLICIES = (samples.BEST_PRACTICES, samples.CURRENT_POLICIES)
+
+
+def checks(status, count, prefix='Check'):
+    """``count`` findings for distinct checks, all with ``status``."""
+    return [{'Check': f'{prefix} {status} {i}', 'Status': status, 'Finding': f'Finding {i}'} for i in range(count)]
+
+
+# name -> categorized results, as the worker passes them to both generators
+SCENARIOS = {
+    'no results': {},
+    'empty categories': {category: [] for category in (SECURITY, COST, RELIABILITY, OPERATIONS)},
+    'sample scan': {**samples.FINDINGS, 'Organization Policies': ORG_POLICIES},
+    'sample findings only': dict(samples.FINDINGS),
+    'org policies only': {'Organization Policies': ORG_POLICIES},
+    'all org policies compliant': {'Organization Policies': (
+        {'Security': samples.BEST_PRACTICES['Security'][:1]}, samples.CURRENT_POLICIES)},
+    'html in findings': {SECURITY: [
+        {'Check': 'Open Firewall Rules', 'Status': 'Action Required', 'Finding': 'Rule <b>allow-all</b> & "default" open to 0.0.0.0/0'},
+        {'Check': 'Project IAM Hygiene', 'Status': 'Investigation Recommended', 'Finding': [{'Member': '<script>alert(1)</script>', 'Role': "roles/owner's"}]},
+    ]},
+    'unknown and missing statuses': {OPERATIONS: [
+        {'Check': 'Unattended Projects', 'Status': 'Warning', 'Finding': 'Not a known status: styled as Informational'},
+        {'Check': 'Recent Changes (Org & Project)', 'Finding': 'No Status key: rendered as None'},
+    ]},
+    'mixed detail types': {COST: [
+        {'Check': 'VM Rightsizing', 'Status': 'Investigation Recommended', 'Finding': [{'VM': 'big-vm'}, 'n2-standard-8 is enough']}]},
+    'falsy details': {RELIABILITY: [
+        {'Check': 'GKE Hygiene', 'Status': 'Compliant', 'Finding': ''},
+        {'Check': 'Essential Contacts', 'Status': 'Compliant', 'Finding': None},
+        {'Check': 'Cloud SQL PITR', 'Status': 'Compliant'},
+    ]},
+    'cell values': {COST: [
+        {'Check': 'Idle Persistent Disks', 'Status': 'Investigation Recommended',
+         'Finding': [{'Size (GB)': 500, 'Monthly Savings': 12.5, 'Snapshot': None, 'Attached': False, 'Ratio': 1 / 3}]}]},
+    'multiline text': {OPERATIONS: [
+        {'Check': 'Quota Utilization (>80%)', 'Status': 'Action Required', 'Finding': ['CPUS: 92%\nin us-central1', 'GPUS: 81%']}]},
+    'score boundaries': {  # 90% is "medium", 90.9% is "high", 70% is "low", 71.4% is "medium"; Errors sit outside the score (v15.2)
+        SECURITY: checks('Compliant', 9, 'Security') + checks('Action Required', 1, 'Security'),
+        COST: checks('Compliant', 10, 'Cost') + checks('Investigation Recommended', 1, 'Cost'),
+        RELIABILITY: checks('Compliant', 7, 'Reliability') + checks('Action Required', 3, 'Reliability'),
+        OPERATIONS: checks('Compliant', 5, 'Operations') + checks('Action Required', 2, 'Operations')
+        + checks('Informational', 4, 'Operations') + checks('Error', 3, 'Operations'),
+    },
+    'unknown category': {'Uncategorized': [{'Check': 'Something else', 'Status': 'Action Required', 'Finding': 'ignored'}]},
+}
+
+
+@pytest.mark.parametrize('name', SCENARIOS)
+def test_html_report_renders_every_scenario(name):
+    """Every scenario renders, and its facts can be read back: a report with findings lists each check once, under its
+    name and with a status badge."""
+    results = SCENARIOS[name]
+    facts = report_facts(generate_html_report('organization', '123456789', 'job-42', **results))
+    assert facts['title'] == 'CloudGauge Report: Organization 123456789'
+    assert facts['header'] == ('Organization', '123456789', 'job-42')
+    listed = {check['Check'] for category, findings in results.items() if category not in ('Organization Policies', 'Uncategorized') for check in findings}
+    names = [name for name, *_ in facts['items']]
+    assert len(names) == len(set(names))
+    assert listed <= set(names)
+    assert all(badge for _, badge, *_ in facts['items'])
+
+
+@pytest.mark.parametrize('scope, scope_id', [('organization', '123456789'), ('folder', '42'), ('project', 'web-prod')])
+def test_html_report_names_the_scope(scope, scope_id):
+    """The title and header use the scope; the Security section's console link is for organizations only."""
+    html = generate_html_report(scope, scope_id, 'job-42', **SCENARIOS['sample scan'])
+    assert f'<title>CloudGauge Report: {scope.capitalize()} {scope_id}</title>' in html
+    assert report_facts(html)['header'] == (scope.capitalize(), scope_id, 'job-42')
+    assert ('active-assist/list/security/recommendations?organizationId=' in html) is (scope == 'organization')
+
+
+def test_csv_report_raises_on_mixed_detail_types():
+    """Details mixing dicts and strings: the HTML report falls back to text, but the CSV raises."""
+    results = SCENARIOS['mixed detail types']
+    assert 'n2-standard-8 is enough' in generate_html_report('organization', '123456789', 'job-42', **results)
+    with pytest.raises(AttributeError):
+        generate_csv_data(results)
+
+
+def test_csv_report_rows():
+    sections = csv_sections(generate_csv_data(SCENARIOS['sample scan']))
+    assert list(sections) == ['Organization Policies', SECURITY, COST, RELIABILITY, OPERATIONS]
+    assert sections['Organization Policies'] == [['Category', 'Policy', 'Expected Value', 'Current Value', 'Status'],
+                                                 *samples.ORG_POLICY_CSV_ROWS]
+    assert sections[COST] == [
+        ['Check', 'Status', 'Project', 'Disk', 'Monthly Savings'],
+        ['Idle Persistent Disks', 'Investigation Recommended', 'data-lake', 'orphan-disk', '12.4'],
+        ['Idle Persistent Disks', 'Investigation Recommended', 'web-prod', 'old-boot-disk'],
+        [],
+        ['Check', 'Status', 'Details'],
+        ['VM Rightsizing', 'Compliant', ''],
+    ]
+
+
+def csv_check_order(section_rows):
+    """The check names of a CSV section, in file order, one per table."""
+    return [table[1][0] for table in csv_tables(section_rows)]
+
+
+def test_csv_tables_come_in_the_page_order_whatever_the_arrival_order():
+    """A category's tables are listed as the page lists its checks — by severity,
+    then by name — not in the order the results arrived, so two scans of an
+    unchanged estate give identical files even when the shards finish in a
+    different order (v15.1)."""
+    results = SCENARIOS['score boundaries']  # arrival order: Compliant first, then the failing ones
+    csv_data = generate_csv_data(results)
+    sections = csv_sections(csv_data)
+    assert csv_check_order(sections[OPERATIONS]) == (
+        [f'Operations Action Required {i}' for i in range(2)]
+        + [f'Operations Error {i}' for i in range(3)]
+        + [f'Operations Informational {i}' for i in range(4)]
+        + [f'Operations Compliant {i}' for i in range(5)])
+    assert csv_check_order(sections[RELIABILITY]) == (
+        [f'Reliability Action Required {i}' for i in range(3)] + [f'Reliability Compliant {i}' for i in range(7)])
+    # The same order as the page, for every category.
+    html = generate_html_report('organization', '123456789', 'job-42', **results)
+    page_order = [unescape(name) for name in re.findall(r'<span class="check-title"><strong>(.*?)</strong>', html)]
+    for category, prefix in ((SECURITY, 'Security'), (COST, 'Cost'), (RELIABILITY, 'Reliability'), (OPERATIONS, 'Operations')):
+        assert csv_check_order(sections[category]) == [name for name in page_order if name.startswith(prefix)]
+    # Reversed arrival order, identical file.
+    reversed_results = {category: list(reversed(records)) for category, records in results.items()}
+    assert generate_csv_data(reversed_results) == csv_data
+
+
+def test_csv_keeps_the_records_of_one_check_together_in_their_own_order():
+    """A check with several records — its findings and a *Projects not checked*
+    record, say — is one block in the file, placed by its most severe status,
+    its records in the order they were produced."""
+    results = {RELIABILITY: [
+        {'Check': 'Essential Contacts', 'Status': 'Compliant', 'Finding': 'All projects have contacts.'},
+        {'Check': 'GKE Hygiene', 'Status': 'Error', 'Finding': [{'Project': 'web-prod', 'Reason': 'permission denied'}]},
+        {'Check': 'Cloud SQL PITR', 'Status': 'Investigation Recommended', 'Finding': [{'Instance': 'db-1'}]},
+        {'Check': 'GKE Hygiene', 'Status': 'Action Required', 'Finding': [{'Cluster': 'prod', 'Issue': 'no release channel'}]},
+    ]}
+    tables = csv_tables(csv_sections(generate_csv_data(results))[RELIABILITY])
+    assert [(table[1][0], table[1][1]) for table in tables] == [
+        ('GKE Hygiene', 'Error'),  # the check ranks as Action Required (its worst status) ...
+        ('GKE Hygiene', 'Action Required'),  # ... and its records keep their own order
+        ('Cloud SQL PITR', 'Investigation Recommended'),
+        ('Essential Contacts', 'Compliant'),
+    ]
+
+
+def test_report_scores_and_overview():
+    html = generate_html_report('organization', '123456789', 'job-42', **SCENARIOS['score boundaries'])
+    scores = re.findall(r'<span class="score score-(\w+)">(\d+)%</span>', html)
+    assert scores == [('medium', '90'), ('high', '91'), ('low', '70'), ('medium', '71')]
+    # The bar next to each score is as wide as the score, in its colour.
+    assert re.findall(r'<span class="bar-fill score-(\w+)" style="width: (\d+)%">', html) == scores
+    # The facts behind each score, in words; Operations' three Errors are coverage, outside the 71%.
+    assert re.findall(r'<td class="score-of">(.*?)</td>', html) == [
+        '9 of 10 checks compliant', '10 of 11 checks compliant', '7 of 10 checks compliant',
+        '5 of 7 checks compliant · 3 could not be checked']
+    counts = dict(re.findall(r'<h3>([\w ]+)</h3><p class="count">(\d+)</p>', html))
+    assert counts == {'Action Required': '6', 'Investigation Recommended': '1', 'Compliant': '31', 'Errors': '3'}
+
+
+def test_org_policies_count_toward_security():
+    html = generate_html_report('organization', '123456789', 'job-42', **SCENARIOS['org policies only'])
+    assert ('<span class="check-title"><strong>Organization Policies</strong>'
+            '<span class="check-summary">3 policies differ from the recommended value</span></span>') in html
+    assert '<span class="status-badge pill pill-action-required">1/4 Compliant</span>' in html
+    # One check worth 1/4 of a pass (v15.2): 25%, and the Review scores row counts the policies, not checks.
+    assert '<span class="score-pill pill pill-low">25% compliant</span>' in html
+    assert '<td class="score-of">1 of 4 policies as recommended</td>' in html
+
+
+def test_remediation_placeholders_are_numbered_in_display_order():
+    """getGeminiSuggestions() pairs fix-N with the N-th actionable check on the page."""
+    html = generate_html_report('organization', '123456789', 'job-42', **SCENARIOS['sample scan'])
+    placeholders = [int(n) for n in re.findall(r"id='fix-(\d+)'", html)]
+    assert placeholders == list(range(4))  # one per Action Required / Investigation Recommended check
+    # Security (Project IAM Hygiene), Cost (Idle Persistent Disks), Reliability (Essential Contacts), Operations (Quota)
+    order = [html.index(f'<strong>{name}</strong>') for name in
+             ('Project IAM Hygiene', 'Idle Persistent Disks', 'Essential Contacts', 'Quota Utilization (&gt;80%)')]
+    assert order == sorted(order)
+
+
+def test_grouped_check_keeps_the_most_severe_status():
+    html = generate_html_report('project', 'web-prod', 'job-42', **SCENARIOS['sample findings only'])
+    item = html[html.index('<strong>Project IAM Hygiene</strong>'):]
+    assert item.index('<span class="status-badge pill pill-action-required">Action Required</span>') < item.index('</details>')
+    # Both records' details, as chips (Project, Member and Role are resource columns).
+    assert ('<td class="nowrap code"><code class="chip">web-prod</code></td><td class="nowrap code"><code class="chip">user:alice@example.com</code></td>'
+            '<td class="nowrap code"><code class="chip">roles/owner</code></td>') in item
+    assert ('<td class="nowrap code"><code class="chip">data-lake</code></td><td class="nowrap code"><code class="chip">allUsers</code></td>'
+            '<td class="nowrap code"><code class="chip">roles/viewer</code></td>') in item
+
+
+def test_report_is_self_contained():
+    """Stored reports are served as-is long after the scan: no template syntax left, CSS and JS inline,
+    and the only calls back to the app are the three /api/get-* endpoints (plus the CSV download link)."""
+    html = generate_html_report('organization', '123456789', 'job-42', **SCENARIOS['sample scan'])
+    for delimiter in ('{{', '{%', '{#'):
+        assert delimiter not in html
+    assert '<script src=' not in html and 'rel="stylesheet"' in html  # the Google Fonts link, as before
+    handlers = {'showSection', 'setAllChecks', 'getGeminiSuggestions', 'generateAiSummary', 'copySummary', 'copyFix', 'fetchInsights',
+                'renderTablePage',  # renderTablePage is in HTML built by the script; copyFix also in the fix blocks it builds
+                'printScorecard', 'downloadActionPlan', 'copyScorecardMarkdown',  # the Scorecard's buttons (v15.1)
+                'printReport'}  # the header's Print or save as PDF (v20)
+    assert set(re.findall(r'onclick="(\w+)\(', html)) == handlers
+    paging = {'showMoreRows', 'showAllRows'}  # only emitted under tables longer than one page
+    long_table = {SECURITY: [{'Check': 'Public Buckets', 'Status': 'Action Required',
+                              'Finding': [{'Project': 'p1', 'Bucket': f'b{i}'} for i in range(ROWS_PER_PAGE + 10)]}]}
+    assert paging <= set(re.findall(r'onclick="(\w+)\(', generate_html_report('project', 'p1', 'job-42', **long_table)))
+    for handler in handlers | paging | {'scheduleRowFilter', 'applyRowFilter', 'sortTable', 'toggleClamp'}:  # defined in the inlined script
+        assert re.search(rf'function {handler}\(', html), handler
+    # v16: the calls go through apiFetch, which sends X-Requested-With and reloads the page when an expired
+    # Identity-Aware Proxy session answers 401; the paths are the contract stored reports keep.
+    assert sorted(set(re.findall(r"apiFetch\('([^']+)'", html))) == ['/api/get-insights', '/api/get-suggestions', '/api/get-summary']
+    assert re.findall(r"(?<![\w.])fetch\(", html) == ['fetch(']  # the one real fetch is inside apiFetch
+    assert "'X-Requested-With': 'XMLHttpRequest'" in html and 'response.status === 401' in html
+    assert 'JSON.stringify({ scope: "organization", scope_id: "123456789", job_id: "job-42" })' in html  # get-summary (v15.3: with the scope)
+    assert 'JSON.stringify({ scope: "organization", scope_id: "123456789" })' in html
+
+
+def test_the_footer_names_the_release_that_rendered_the_report():
+    """A stored report is read long after the scan (v15.5): the sidebar's footer says when it was rendered and by which
+    release, so the reader can match it to the release notes — and the version is the one every scan summary records."""
+    html = generate_html_report('organization', '123456789', 'job-42', **SCENARIOS['sample scan'])
+    footer = re.search(r'<div class="sidebar-foot">(.*?)</div>', html).group(1)
+    assert re.fullmatch(r'<span class="sidebar-foot-label">Generated</span><time>\d{4}-\d\d-\d\d \d\d:\d\d UTC</time>'
+                        rf'<span class="version">CloudGauge v{re.escape(VERSION)}</span>', footer), footer
+    assert html.count(f'CloudGauge v{VERSION}') == 1 and re.fullmatch(r'\d+(\.\d+)*(-rc\.\d+)?', VERSION)  # a release candidate reads 20.0.0-rc.1 (v20)
+
+
+# --- Layout for large organizations (plan item 6b) ---
+
+def table_check(name, rows, status='Action Required'):
+    return {'Check': name, 'Status': status, 'Finding': rows}
+
+
+def check_names(html):
+    """Check titles in page order (a bare <strong> regex would also match strings in the inlined script)."""
+    return re.findall(r'<span class="check-title"><strong>([^<]+)</strong>', html)
+
+
+def detail_tables(html):
+    """The details tables only: the page also has the Review Scores table and <tr> strings in the script."""
+    return re.findall(r"<table class='data-table details-table'>.*?</table>", html)
+
+
+def test_checks_are_ordered_by_severity_then_name():
+    results = {SECURITY: [
+        {'Check': 'B Compliant', 'Status': 'Compliant', 'Finding': 'ok'},
+        {'Check': 'A Compliant', 'Status': 'Compliant', 'Finding': 'ok'},
+        {'Check': 'Z Error', 'Status': 'Error', 'Finding': [{'Error': 'quota'}]},
+        {'Check': 'M Investigation', 'Status': 'Investigation Recommended', 'Finding': 'look'},
+        {'Check': 'Y Action', 'Status': 'Action Required', 'Finding': 'fix'},
+        {'Check': 'A Action', 'Status': 'Action Required', 'Finding': 'fix'},
+        {'Check': 'N Informational', 'Status': 'Informational', 'Finding': 'fyi'},
+    ]}
+    html = generate_html_report('project', 'p1', 'job-42', **results)
+    assert check_names(html) == ['A Action', 'Y Action', 'M Investigation', 'Z Error', 'N Informational', 'A Compliant', 'B Compliant']
+
+    def count(status_class, n, status):
+        return rf'<span class="count-{status_class}"><span class="dot dot-{status_class}"></span><span class="n">{n}</span> {status}</span>\s*'
+    assert re.search(r'<div class="section-counts">\s*' + count('action-required', 2, 'Action Required') + count('investigation', 1, 'Investigation Recommended')
+                     + count('error', 1, 'Error') + count('informational', 1, 'Informational') + count('compliant', 2, 'Compliant') + '</div>', html)
+
+
+def summaries(html):
+    return [(name, unescape(summary)) for name, summary in
+            re.findall(r'<strong>([^<]+)</strong><span class="check-summary">([^<]+)</span>', html)]
+
+
+def test_check_summary_counts_findings_and_projects():
+    rows = [{'Project': f'p{i % 4}', 'Bucket': f'b{i}'} for i in range(10)]
+    results = {SECURITY: [table_check('Public Buckets', rows),
+                          table_check('One Row', [{'Project': 'p9', 'Bucket': 'b'}]),
+                          table_check('No Project Column', [{'Rule': 'r1'}, {'Rule': 'r2'}]),
+                          table_check('Broken', [{'Error': 'quota exceeded'}], status='Error'),
+                          table_check('Shard Errors', [{'Error': 'a'}, {'Error': 'b'}], status='Error'),
+                          {'Check': 'Text Details', 'Status': 'Action Required', 'Finding': ['line 1', 'line 2']}]}
+    # The share of projects needs the scope's total. Single-row tables without a project column and text details get no line.
+    html = generate_html_report('organization', '123', 'job-42', total_projects=1000, **results)
+    assert dict(summaries(html)) == {'Public Buckets': '10 findings across 4 of 1,000 projects (<1%)',
+                                     'One Row': '1 finding across 1 of 1,000 projects (<1%)',
+                                     'No Project Column': '2 findings', 'Shard Errors': '2 errors'}
+    html = generate_html_report('organization', '123', 'job-42', total_projects=5, **results)
+    assert dict(summaries(html))['Public Buckets'] == '10 findings across 4 of 5 projects (80%)'
+    # Without the total: no share.
+    html = generate_html_report('organization', '123', 'job-42', **results)
+    assert dict(summaries(html))['Public Buckets'] == '10 findings across 4 projects'
+    # A project scan: its rows are all in the one project, so no project phrase at all.
+    one_project = [{'Project': 'p1', 'Bucket': f'b{i}'} for i in range(10)]
+    html = generate_html_report('project', 'p1', 'job-42', total_projects=1, **{SECURITY: [table_check('Public Buckets', one_project)]})
+    assert dict(summaries(html))['Public Buckets'] == '10 findings'
+
+
+def test_rows_past_the_first_page_are_hidden_until_asked_for():
+    rows = [{'Project': 'p1', 'Bucket': f'b{i}'} for i in range(ROWS_PER_PAGE + 10)]
+    html = generate_html_report('project', 'p1', 'job-42', **{SECURITY: [table_check('Public Buckets', rows)]})
+    [table] = detail_tables(html)
+    assert table.count('<tr>') == ROWS_PER_PAGE + 1 and table.count('<tr hidden>') == 10  # +1: the header row
+    assert 'Showing <span class="shown-count">50</span> of 60 rows' in html
+    assert 'onclick="showMoreRows(this)">Show 50 more</button>' in html and 'onclick="showAllRows(this)">Show all</button>' in html
+    assert f'const ROWS_PER_PAGE = {ROWS_PER_PAGE};' in html
+    # A table that fits on one page has no controls and keeps the plain markup.
+    small = generate_html_report('project', 'p1', 'job-42', **{SECURITY: [table_check('Public Buckets', rows[:3])]})
+    assert 'class="table-controls"' not in small and '<tr hidden>' not in small
+
+
+def test_rows_are_capped_in_the_page_but_not_in_the_csv():
+    rows = [{'Project': f'p{i % 700}', 'Bucket': f'b{i}'} for i in range(MAX_ROWS_PER_CHECK + 100)]
+    results = {SECURITY: [table_check('Public Buckets', rows), table_check('Small', rows[:5])]}
+    html = generate_html_report('organization', '123', 'job-42', total_projects=1000, **results)
+    big, small = detail_tables(html)
+    assert big.count('<tr') == 1 + MAX_ROWS_PER_CHECK and small.count('<tr') == 1 + 5  # +1: the header rows
+    assert 'b1999' in big and 'b2000' not in html
+    assert ('Only the first 2,000 of 2,100 rows are included in this page. The complete list is in the '
+            '<a href="/report/job-42/123/csv">CSV report</a>.') in html
+    assert html.count('class="table-note"') == 1  # the small table has no note
+    assert dict(summaries(html))['Public Buckets'] == '2,100 findings across 700 of 1,000 projects (70%)'  # over all rows
+    assert generate_csv_data(results).count('Public Buckets,Action Required,') == MAX_ROWS_PER_CHECK + 100
+
+
+def test_header_has_the_csv_download_and_the_toolbar_the_filter():
+    html = generate_html_report('organization', '123456789', 'job-42', **SCENARIOS['sample scan'])
+    assert '<input id="row-filter" type="search" class="input"' in html and 'oninput="scheduleRowFilter()"' in html
+    assert '<a class="btn btn-outline btn-sm" href="/report/job-42/123456789/csv">Download CSV</a>' in html
+    assert '<dl class="report-meta">\n' in html and '<dt>Scope</dt><dd>Organization 123456789</dd>' in html and '<dt>Report ID</dt><dd>job-42</dd>' in html
+    # The link is a URL: IDs are percent-encoded, not just HTML-escaped.
+    html = generate_html_report('project', 'a b/c?d', 'job 1', **SCENARIOS['sample scan'])
+    assert 'href="/report/job%201/a%20b%2Fc%3Fd/csv"' in html
+
+
+def test_toolbar_is_hidden_on_the_overview():
+    """The filter and Expand/Collapse all act on a category page's checks; the Overview has none, so the toolbar hides there."""
+    html = generate_html_report('organization', '123456789', 'job-42', **SCENARIOS['sample scan'])
+    assert '<div class="report-toolbar no-filter">' in html  # the Overview is the page shown first
+    assert '.report-toolbar.no-filter { display: none; }' in html
+    assert "toolbar.classList.toggle('no-filter', !(targetSection && targetSection.querySelector('.checks-list')))" in html
+    assert 'onclick="setAllChecks(true)">Expand all</button>' in html and 'onclick="setAllChecks(false)">Collapse all</button>' in html
+    overview = re.search(r'<div id="overview-section" class="content-section">(.*?)<div id="[\w-]+-section" class="content-section"', html, re.S).group(1)
+    assert 'checks-list' not in overview and html.count('class="checks-list"') == 4  # one per category page
+
+
+def category_pages(html):
+    """section id -> the section's markup, for the category pages (not the Overview or the Scorecard)."""
+    parts = re.split(r'<div id="([\w-]+)-section" class="content-section"', html.split('<script', 1)[0])
+    return {parts[i]: parts[i + 1] for i in range(1, len(parts) - 1, 2) if parts[i] not in ('overview', 'scorecard')}
+
+
+def test_every_category_has_a_page():
+    """The sidebar and the score table link to all four categories, so all four exist, whatever the scan found
+    (the legacy report skipped a category without results, and its sidebar link then showed an empty page)."""
+    for name in ('no results', 'empty categories', 'org policies only', 'sample scan', 'mixed detail types'):
+        html = generate_html_report('organization', '123456789', 'job-42', **SCENARIOS[name])
+        pages = category_pages(html)
+        assert list(pages) == ['security-identity', 'cost-optimization', 'reliability-resilience', 'operational-excellence-observability'], name
+        targets = set(re.findall(r"showSection\('([\w-]+)'", html)) | set(re.findall(r'href="#([\w-]+)"', html))
+        assert {'overview', 'scorecard', *pages} <= targets, name
+        for target in targets - {'overview', 'scorecard', *pages}:  # the Scorecard's links to checks and cards
+            assert f'id="{target}"' in html, (name, target)
+
+
+def test_a_category_without_results_says_so():
+    """Instead of an empty list (or no page), the page says the category is not assessed; the badge agrees (v15.2)."""
+    html = generate_html_report('organization', '123456789', 'job-42', **SCENARIOS['mixed detail types'])  # one cost check only
+    pages = category_pages(html)
+    cost = pages['cost-optimization']
+    assert 'class="checks-list"' in cost and 'empty-state" role="note"' not in cost  # has checks: no note
+    for section_id, title in (('security-identity', 'Security &amp; Identity'), ('reliability-resilience', 'Reliability &amp; Resilience'),
+                              ('operational-excellence-observability', 'Operational Excellence &amp; Observability')):
+        page = pages[section_id]
+        assert f'<div class="empty-state" role="note"><span class="dot dot-none"></span>Not assessed — no {title} check reported a result in this scan.</div>' in page
+        assert '<span class="score-pill pill pill-none">Not assessed</span>' in page
+        assert 'checks-list' not in page and 'section-counts' not in page and 'filter-empty' not in page
+        assert 'section-footer' not in page  # no "Get detailed insights" / console link without findings
+    assert 'active-assist/list/security/recommendations' not in html
+    # The security footer and the cost footer return with content.
+    html = generate_html_report('organization', '123456789', 'job-42', **SCENARIOS['sample scan'])
+    pages = category_pages(html)
+    assert 'active-assist/list/security/recommendations' in pages['security-identity'] and 'id="insights-btn"' in pages['cost-optimization']
+    assert all('empty-state" role="note"' not in page for page in pages.values())
+    # Org policies alone give Security a list; the other three are empty.
+    pages = category_pages(generate_html_report('organization', '123456789', 'job-42', **SCENARIOS['org policies only']))
+    assert '<strong>Organization Policies</strong>' in pages['security-identity'] and 'empty-state" role="note"' not in pages['security-identity']
+    assert sum('Not assessed — no' in page for page in pages.values()) == 3
+
+
+def test_projects_a_check_could_not_cover_are_one_error_item_per_category():
+    """The "Projects not checked" records (app.checks.not_checked) of a category merge into one Error item: after
+    what needs work, before the compliant checks, with a project | skipped check | reason table. The item is
+    coverage, stated next to the score rather than counted in it (v15.2); a page with nothing but skips is not
+    assessed, not "all compliant"."""
+    def not_checked(category, rows):
+        return {'Check': 'Projects not checked', 'Category': category, 'Status': 'Error', 'Finding': rows}
+
+    results = {
+        SECURITY: [table_check('Open Firewall Rules', [{'Project': 'p1', 'Rule Name': 'allow-all', 'VPC': 'default'}]),
+                   {'Check': 'VM External IPs', 'Status': 'Compliant', 'Finding': [{'Status': 'No VMs with external IP addresses found.'}]},
+                   not_checked(SECURITY, [{'Project': 'p2', 'Skipped check': 'Open Firewall Rules', 'Reason': '403 The caller does not have permission'}]),
+                   not_checked(SECURITY, [{'Project': 'p2', 'Skipped check': 'VM External IPs', 'Reason': '403 The caller does not have permission'},
+                                          {'Project': 'p3', 'Skipped check': 'VM External IPs', 'Reason': '503 Policy checks are unavailable'}])],
+        COST: [not_checked(COST, [{'Project': 'p2', 'Skipped check': 'Cost-Saving Recommendations (all 8 recommenders)',
+                                   'Reason': '403 Cloud Recommender API has not been used in project 2 before or it is disabled.'}])],
+    }
+    html = generate_html_report('organization', '123', 'job-42', total_projects=10, **results)
+    pages = category_pages(html)
+    security, cost = pages['security-identity'], pages['cost-optimization']
+    assert check_names(security) == ['Open Firewall Rules', 'Projects not checked', 'VM External IPs']
+    assert check_names(cost) == ['Projects not checked']
+    assert dict(summaries(security))['Projects not checked'] == '3 skipped checks across 2 of 10 projects (20%)'
+    assert dict(summaries(cost))['Projects not checked'] == '1 skipped check across 1 of 10 projects (10%)'
+    assert security.count('<span class="status-badge pill pill-error">Error</span>') == 1 and cost.count('<span class="status-badge pill pill-error">Error</span>') == 1
+    assert ('<th>Project</th><th>Skipped check</th><th>Reason</th>' in security
+            and ('<tr><td class="nowrap code"><code class="chip">p3</code></td><td class="prose">VM External IPs</td>'
+                 '<td class="prose">503 Policy checks are unavailable</td></tr>') in security)
+    assert 'remediation-placeholder' not in cost  # an Error item gets no Gemini remediation box
+    # The item is outside the score and named next to it: Security 1 of 2 checks, Cost nothing to score.
+    assert '<span class="score-pill pill pill-low">50% compliant</span>' in security and '<span class="score-pill pill pill-none">Not assessed</span>' in cost
+    assert re.findall(r'<td class="score-of">(.*?)</td>', html)[:2] == [
+        '1 of 2 checks compliant · 1 could not be checked', 'no check reached a verdict · 1 could not be checked']
+    assert 'Not assessed — no' not in cost and 'class="checks-list"' in cost
+    assert html.count('Not assessed — no') == 2  # Reliability and Operations, which have no records at all
+    csv = generate_csv_data(results)
+    assert 'Check,Status,Project,Skipped check,Reason\r\n' in csv
+    assert csv.count('Projects not checked,Error,') == 4 and 'Projects not checked,Error,p3,VM External IPs,503 Policy checks are unavailable' in csv
+
+
+def test_a_page_whose_checks_the_filter_hides_says_so():
+    """Each page with checks carries a note that applyRowFilter() fills when the filter leaves nothing on that page."""
+    html = generate_html_report('organization', '123456789', 'job-42', **SCENARIOS['sample scan'])
+    assert html.count('<div class="empty-state filter-empty" role="status" hidden></div>') == 4  # one per page with checks
+    for page in category_pages(html).values():
+        assert page.index('</ul>') < page.index('class="empty-state filter-empty"')  # right under the list
+    assert "note.hidden = !term || matchedHere > 0;" in html
+    assert "`No checks in this category match \\u201C${shownTerm}\\u201D.`" in html
+    assert "matching ${elsewhere === 1 ? 'check is' : 'checks are'} on other pages." in html
+    assert '.empty-state.filter-empty { color: var(--muted); font-size: 13px; }' in html
+    # A category without results has no list to filter, so no note either.
+    html = generate_html_report('organization', '123456789', 'job-42', **SCENARIOS['no results'])
+    assert 'class="empty-state filter-empty"' not in html and html.count('Not assessed — no') == 4
+
+
+def test_finding_text_is_escaped():
+    """Plan item B3: finding text is inserted as text, never as raw HTML."""
+    html = generate_html_report('organization', '123456789', 'job-42', **SCENARIOS['html in findings'])
+    assert 'Rule &lt;b&gt;allow-all&lt;/b&gt; &amp; &#34;default&#34; open to 0.0.0.0/0' in html
+    assert ('<td class="nowrap code"><code class="chip">&lt;script&gt;alert(1)&lt;/script&gt;</code></td>'
+            '<td class="nowrap code"><code class="chip">roles/owner&#39;s</code></td>') in html
+    assert '<script>alert(1)' not in html and '<b>allow-all' not in html
+    # Escaped once: no double-escaped entities anywhere in the page.
+    assert '&amp;#' not in html and '&amp;lt;' not in html and '&amp;amp;' not in html
+
+
+def test_text_details_keep_their_line_breaks():
+    """Text details are joined with <br> tags; only the lines themselves are escaped."""
+    results = {SECURITY: [{'Check': 'Open Firewall Rules', 'Status': 'Action Required', 'Finding': 'a <i>'},
+                          {'Check': 'Open Firewall Rules', 'Status': 'Action Required', 'Finding': 'b & c'}]}
+    html = generate_html_report('project', 'p1', 'job-42', **results)
+    assert '<div class="details">a &lt;i&gt;<br>b &amp; c</div>' in html
+
+
+@pytest.mark.parametrize('scope_id', ["o'brien\\", '</script><script>alert(1)</script>', 'a"b'])
+def test_script_values_are_json_strings(scope_id):
+    """IDs in the inline script can't end the string (quote, trailing backslash) or the <script> element."""
+    html = generate_html_report('project', scope_id, 'job-42', **SCENARIOS['sample scan'])
+    # The get-summary body (scope, scope_id, job_id) and the get-insights body (scope, scope_id).
+    embedded = re.findall(r'JSON\.stringify\(\{ scope: "project", scope_id: (.*?)(?:, job_id: "job-42")? \}\)', html)
+    assert len(embedded) == 2 and [json.loads(value) for value in embedded] == [scope_id, scope_id]
+    assert all('<' not in value and "'" not in value for value in embedded)  # tojson writes \u003c and \u0027
+    assert html.count('</script>') == 1  # only the report's own script element ends
+
+
+def test_report_environment_rejects_undefined_variables():
+    """A misspelled template variable fails the render instead of printing nothing."""
+    with pytest.raises(UndefinedError):
+        report_environment().from_string('{{ scope_idd }}').render(scope_id='42')

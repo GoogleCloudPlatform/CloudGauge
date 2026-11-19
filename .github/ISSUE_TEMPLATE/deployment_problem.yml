@@ -1,0 +1,37 @@
+name: Deployment problem
+description: deploy.sh, the Console steps or Terraform did not get you to a working CloudGauge.
+title: "deploy: "
+labels: [deployment]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        `docs/operations.md` › **Troubleshooting › Step 3: Resolve Common Errors** lists the errors seen so far with their fixes; please check it first.
+        Redact project IDs and account names if you prefer — the step and the error text are what matter.
+  - type: dropdown
+    id: method
+    attributes:
+      label: Method
+      options: [tools/deploy.sh (Method 1), the Console (Method 2), Terraform (Method 3)]
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Release or branch
+      placeholder: v20.0.0, or the commit
+    validations:
+      required: true
+  - type: textarea
+    id: step
+    attributes:
+      label: The step that failed
+      description: The command (or the Console page) and the full error text.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: New deployment or an update; an organization with a domain or a project without one; organization policies that are known to be strict (`iam.allowedPolicyMemberDomains`, `run.allowedIngress`, `iam.disableServiceAccountKeyCreation`…); whether the person deploying is an Organization Administrator.

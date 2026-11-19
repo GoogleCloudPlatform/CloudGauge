@@ -1,0 +1,146 @@
+{#
+  Copyright 2025 Google LLC
+
+  Licensed under the Apache License, Version 2.0 (the "License");
+  you may not use this file except in compliance with the License.
+  You may obtain a copy of the License at
+
+      https://www.apache.org/licenses/LICENSE-2.0
+
+  Unless required by applicable law or agreed to in writing, software
+  distributed under the License is distributed on an "AS IS" BASIS,
+  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+  See the License for the specific language governing permissions and
+  limitations under the License.
+#}
+{#
+  The setup page: one centred card on the dot-grid canvas. Choosing a scope
+  loads its resources into the second select (/api/list-resources); the
+  loading, empty and error states are a help line under it, and "Start scan"
+  stays disabled until a resource is chosen.
+#}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CloudGauge</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+    <style>
+{% include "_design.css" %}
+        body { min-height: 100vh; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px; padding: 24px; }
+        .setup-card { width: 100%; max-width: 448px; padding: 32px; }
+        .notice { width: 100%; max-width: 448px; }
+        .brand { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; margin-bottom: 28px; font-size: 13px; font-weight: 600; letter-spacing: -0.01em; color: var(--ink); }
+        .signed-in { font-weight: 400; letter-spacing: 0; font-size: 12px; color: var(--muted); overflow-wrap: anywhere; text-align: right; }
+        .setup-card h1 { font-size: 22px; margin-bottom: 6px; }
+        .lede { margin-bottom: 24px; color: var(--muted); }
+        form { display: flex; flex-direction: column; gap: 18px; }
+        .field .help { margin-top: 2px; }
+        .btn-block { margin-top: 6px; padding: 11px 14px; }
+    </style>
+</head>
+<body class="dotgrid">
+    {% if banner %}<div role="note" class="notice notice-amber">{{ banner }}</div>{% endif %}
+    <main class="card setup-card">
+        <div class="brand">CloudGauge{% if current_user %}<span class="signed-in">Signed in as {{ current_user }}</span>{% endif %}</div>
+        <h1>Review your cloud environment</h1>
+        <p class="lede">Choose a scope, then the resource to review.</p>
+        <form action="/scan" method="post">
+            <div class="field">
+                <label for="scope">Scope</label>
+                <select id="scope" name="scope" class="select">
+                    <option value="" disabled selected>Choose a scope</option>
+                    <option value="organization">Organization</option>
+                    <option value="folder">Folder</option>
+                    <option value="project">Project</option>
+                </select>
+            </div>
+            <div class="field">
+                <label for="scope_id">Resource</label>
+                <select id="scope_id" name="scope_id" class="select" required disabled aria-describedby="resource-help">
+                    <option value="" disabled selected>Choose a scope first</option>
+                </select>
+                <p id="loader" class="help" hidden><span class="spinner"></span>Loading resources…</p>
+                <p id="resource-help" class="help" aria-live="polite"></p>
+                <p id="history-help" class="help" hidden><a id="history-link" href="/">Scan history</a><span>of this resource</span></p>
+            </div>
+            <button id="submit-btn" type="submit" class="btn btn-primary btn-block" disabled>Start scan</button>
+        </form>
+    </main>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', function() {
+            const scopeSelect = document.getElementById('scope');
+            const resourceSelect = document.getElementById('scope_id');
+            const loader = document.getElementById('loader');
+            const help = document.getElementById('resource-help');
+            const submitBtn = document.getElementById('submit-btn');
+            const historyHelp = document.getElementById('history-help');
+            const historyLink = document.getElementById('history-link');
+            const SCOPE_NOUNS = { organization: 'organizations', folder: 'folders', project: 'projects' };
+
+            function setHelp(text, isError = false) {
+                help.textContent = text;
+                help.classList.toggle('help-error', isError);
+                help.hidden = !text;
+            }
+
+            scopeSelect.addEventListener('change', async function() {
+                const selectedScope = this.value;
+                if (!selectedScope) return;
+
+                // Reset and show the loading line
+                resourceSelect.innerHTML = '<option value="" disabled selected>Loading…</option>';
+                resourceSelect.disabled = true;
+                submitBtn.disabled = true;
+                historyHelp.hidden = true;
+                setHelp('');
+                loader.hidden = false;
+
+                try {
+                    const response = await fetch(`/api/list-resources?scope=${selectedScope}`);
+                    if (!response.ok) {
+                        throw new Error('Failed to fetch resources.');
+                    }
+                    const resources = await response.json();
+
+                    // Clear dropdown and add new options
+                    resourceSelect.innerHTML = '<option value="" disabled selected>Choose a resource</option>';
+                    if (resources.length > 0) {
+                        resources.forEach(resource => {
+                            const option = new Option(resource.name, resource.id);
+                            resourceSelect.appendChild(option);
+                        });
+                        resourceSelect.disabled = false;
+                        setHelp(`${resources.length} ${resources.length === 1 ? SCOPE_NOUNS[selectedScope].slice(0, -1) : SCOPE_NOUNS[selectedScope]} available`);
+                    } else {
+                        resourceSelect.innerHTML = '<option value="" disabled selected>No resources found</option>';
+                        setHelp(`No ${SCOPE_NOUNS[selectedScope]} are visible to the service account.`);
+                    }
+                } catch (error) {
+                    console.error('Error:', error);
+                    resourceSelect.innerHTML = '<option value="" disabled selected>Could not load resources</option>';
+                    setHelp(`Couldn't load the ${SCOPE_NOUNS[selectedScope]}. Check the service account's permissions and the application logs.`, true);
+                } finally {
+                    loader.hidden = true;
+                }
+            });
+
+            resourceSelect.addEventListener('change', function() {
+                if (this.value) {
+                    submitBtn.disabled = false;
+                    // v17: the scope's scans over time, one click away once a resource is chosen.
+                    historyLink.href = `/history/${encodeURIComponent(scopeSelect.value)}/${encodeURIComponent(this.value)}`;
+                    historyHelp.hidden = false;
+                } else {
+                    submitBtn.disabled = true;
+                    historyHelp.hidden = true;
+                }
+            });
+        });
+    </script>
+</body>
+</html>

@@ -1,0 +1,175 @@
+{#
+  Copyright 2025 Google LLC
+
+  Licensed under the Apache License, Version 2.0 (the "License");
+  you may not use this file except in compliance with the License.
+  You may obtain a copy of the License at
+
+      https://www.apache.org/licenses/LICENSE-2.0
+
+  Unless required by applicable law or agreed to in writing, software
+  distributed under the License is distributed on an "AS IS" BASIS,
+  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+  See the License for the specific language governing permissions and
+  limitations under the License.
+#}
+{#
+  The scan status page: one centred card on the dot-grid canvas, in one of
+  three states built by the script. In progress: a 4px progress bar and the
+  current task, polled from /api/status every 3 seconds. Complete: the
+  check-circle, the report and CSV buttons. Failed: the x-circle and the error.
+#}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Scan in progress</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+    <style>
+{% include "_design.css" %}
+        body { min-height: 100vh; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px; padding: 24px; }
+        .status-card { width: 100%; max-width: 448px; padding: 32px; }
+        .notice { width: 100%; max-width: 448px; }
+        .brand { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; margin-bottom: 28px; font-size: 13px; font-weight: 600; letter-spacing: -0.01em; color: var(--ink); }
+        .signed-in { font-weight: 400; letter-spacing: 0; font-size: 12px; color: var(--muted); overflow-wrap: anywhere; text-align: right; }
+        .status-card h1 { font-size: 22px; margin-bottom: 6px; }
+        .scope-line { margin-bottom: 20px; font-family: var(--font-mono); font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
+        .lede { margin-bottom: 20px; color: var(--muted); }
+        .progress-row { display: flex; align-items: center; gap: 12px; margin: 4px 0 10px; }
+        .progress-bar-container { flex: 1; height: 4px; border-radius: 2px; background: var(--zinc-100); overflow: hidden; }
+        .progress-bar { display: block; width: 0%; height: 100%; border-radius: 2px; background: var(--ink); transition: width 0.4s linear; }
+        .progress-text { min-width: 4ch; text-align: right; font-family: var(--font-mono); font-size: 12px; font-variant-numeric: tabular-nums; color: var(--ink); }
+        .status-message { min-height: 21px; font-size: 14px; color: var(--body); }
+        .state-icon { display: flex; align-items: center; justify-content: center; width: 56px; height: 56px; margin-bottom: 20px; border-radius: 50%; }
+        .state-icon.ok { background: var(--emerald-50); color: var(--emerald-600); }
+        .state-icon.failed { background: var(--rose-50); color: var(--rose-700); }
+        .button-group { display: flex; flex-direction: column; gap: 10px; margin-top: 24px; }
+        .button-group .btn { padding: 11px 14px; }
+        .error-box { margin: 0 0 16px; padding: 10px 12px; border: 1px solid var(--hairline); border-radius: var(--radius-control); background: var(--canvas); font-family: var(--font-mono); font-size: 12.5px; line-height: 1.55; color: var(--body); white-space: pre-wrap; overflow-wrap: anywhere; }
+        .job-line { margin-top: 24px; padding-top: 14px; border-top: 1px solid var(--hairline); font-family: var(--font-mono); font-size: 11px; color: var(--faint); overflow-wrap: anywhere; }
+        .again { font-size: 13px; }
+    </style>
+</head>
+<body class="dotgrid">
+    {% if banner %}<div role="note" class="notice notice-amber">{{ banner }}</div>{% endif %}
+    <main id="status-card" class="card status-card" aria-live="polite">
+        </main>
+
+    <script>
+        const job_id = "{{ job_id }}";
+        const scope_id = "{{ scope_id }}";
+        const scope = "{{ scope }}";
+        const signed_in_as = {{ (current_user or '')|tojson }};  // the verified IAP identity; '' when not behind IAP
+        const card = document.getElementById('status-card');
+        const CHECK_CIRCLE = '<svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="m9 12 2 2 4-4"/></svg>';
+        const X_CIRCLE = '<svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="m15 9-6 6"/><path d="m9 9 6 6"/></svg>';
+
+        function escapeHtml(text) {
+            return String(text).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+        }
+
+        function brandHtml() {
+            const who = signed_in_as ? `<span class="signed-in">Signed in as ${escapeHtml(signed_in_as)}</span>` : '';
+            return `<div class="brand">CloudGauge${who}</div>`;
+        }
+
+        // --- UI Update Functions  ---
+        function showInProgressUI() {
+            document.title = "Scan in progress";
+            card.innerHTML = `
+                ${brandHtml()}
+                <h1>Scan in progress</h1>
+                <p class="scope-line">${escapeHtml(scope)} ${escapeHtml(scope_id)}</p>
+                <p class="lede">Every check runs across the scope. This may take several minutes; the report opens from this page when it is ready.</p>
+                <div class="progress-row">
+                    <div class="progress-bar-container"><span id="progress-bar" class="progress-bar"></span></div>
+                    <span id="progress-text" class="progress-text">0%</span>
+                </div>
+                <p id="status-message" class="status-message">Starting…</p>
+                <p class="job-line">Job ${escapeHtml(job_id)}</p>
+            `;
+        }
+
+        function showReadyUI() {
+            document.title = "Report ready";
+            const report_url = `/report/${job_id}/${scope_id}`;
+            const csv_url = `/report/${job_id}/${scope_id}/csv`;  // v16.1: the service's own route, behind the same sign-in as the pages
+            const history_url = `/history/${scope}/${scope_id}`;  // v17: the scope's scans over time
+            card.innerHTML = `
+                <div class="state-icon ok">${CHECK_CIRCLE}</div>
+                <h1>Scan complete</h1>
+                <p class="scope-line">${escapeHtml(scope)} ${escapeHtml(scope_id)}</p>
+                <p class="lede">The report is ready: open it to review the findings, or download every row as a CSV file.</p>
+                <div class="button-group">
+                    <a href="${report_url}" target="_blank" class="btn btn-primary">View interactive report</a>
+                    <a href="${csv_url}" class="btn btn-outline">Download CSV</a>
+                    <a href="${history_url}" class="btn btn-outline">View history</a>
+                </div>
+                <p class="job-line">Job ${escapeHtml(job_id)}</p>
+            `;
+        }
+
+        function showErrorUI(message) {
+            document.title = "Scan failed";
+            card.innerHTML = `
+                <div class="state-icon failed">${X_CIRCLE}</div>
+                <h1>Scan failed</h1>
+                <p class="scope-line">${escapeHtml(scope)} ${escapeHtml(scope_id)}</p>
+                <p class="lede">The scan stopped before the report was written. The last message was:</p>
+                <pre class="error-box">${escapeHtml(message || 'Unknown error. Check the application logs.')}</pre>
+                <a class="again" href="/">Start another scan</a>
+                <p class="job-line">Job ${escapeHtml(job_id)}</p>
+            `;
+        }
+
+        // --- Logic to run on page load ---
+        showInProgressUI();
+
+        const progressBar = document.getElementById('progress-bar');
+        const progressText = document.getElementById('progress-text');
+        const statusMessage = document.getElementById('status-message');
+
+        // --- Real-time API Polling ---
+        async function checkStatus() {
+            try {
+                // Behind Identity-Aware Proxy an expired session answers an XHR with 401 (a plain fetch would
+                // get a sign-in redirect it cannot follow); reloading the page signs in again and comes back here.
+                const response = await fetch(`/api/status/${job_id}/${scope_id}`, { headers: { 'X-Requested-With': 'XMLHttpRequest' } });
+                if (response.status === 401) {
+                    clearInterval(statusInterval);
+                    location.reload();
+                    return;
+                }
+                if (!response.ok) {
+                    // Handle server errors during polling
+                    throw new Error(`API returned status ${response.status}`);
+                }
+                const data = await response.json();
+
+                // Update the UI with real data from the backend
+                if (progressBar) progressBar.style.width = data.progress + '%';
+                if (progressText) progressText.textContent = Math.round(data.progress) + '%';
+                if (statusMessage) statusMessage.textContent = data.current_task;
+
+                // Check the final status
+                if (data.status === 'completed') {
+                    clearInterval(statusInterval); // Stop polling
+                    setTimeout(showReadyUI, 500); // Short delay to show 100%
+                } else if (data.status === 'error') {
+                    clearInterval(statusInterval); // Stop polling
+                    showErrorUI(data.current_task);
+                }
+            } catch (e) {
+                console.error("Failed to get status:", e);
+                // Optional: You could stop polling after several consecutive errors
+            }
+        }
+
+        const statusInterval = setInterval(checkStatus, 3000); // Check every 3 seconds
+        checkStatus(); // Initial check on page load
+    </script>
+</body>
+</html>

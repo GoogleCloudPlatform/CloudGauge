@@ -1,0 +1,466 @@
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+"""Constants and environment-driven settings.
+
+Replaces the module-level globals and ``check_environment_variables()`` of the
+legacy ``cloudgauge.py``. Reading settings has no side effects: nothing here
+touches the network or creates clients.
+"""
+import logging
+import os
+import pathlib
+import re
+from dataclasses import dataclass
+
+# --- Environment Variables & Constants ---
+# The release, as the image tag names it ("15.6" for v15.6), read from the VERSION file at the repository root — the one
+# place a release is written (v20; the image copies the file next to the package, terraform/versions.tf carries the same
+# number and tests/test_packaging.py pins both to the newest entry of RELEASE_NOTES.md). The report's footer shows it,
+# and every scan summary records it so the next scan can tell a check that is new to the release from one that merely
+# had nothing to check last time (app.reporting.changes).
+VERSION_FILE = pathlib.Path(__file__).resolve().parent.parent / "VERSION"
+VERSION = VERSION_FILE.read_text(encoding="utf-8").strip()
+# The policy table of the Organization Policies check (v18.1): by default the one shipped with the release
+# (assets/gcp_best_practices.csv, copied into the image), so a scan never depends on GitHub and the rules move only
+# with a release. BEST_PRACTICES_CSV_URL set to a gs:// object (read as the service account) or an https:// URL
+# (fetched anonymously; the pre-v18.1 default was the GitHub Beta branch, GITHUB_POLICY_TABLE_URL) replaces it.
+BUNDLED_POLICY_TABLE = "bundled"
+BEST_PRACTICES_CSV_URL = BUNDLED_POLICY_TABLE
+GITHUB_POLICY_TABLE_URL = "https://raw.githubusercontent.com/GoogleCloudPlatform/CloudGauge/Beta/assets/gcp_best_practices.csv"
+BEST_PRACTICES_FETCH_TIMEOUT_SECONDS = 30
+# The operator's overrides table, in the results bucket: the same columns, merged by constraint ID on top of the
+# table in use (add a constraint, change an expectation, or Skip a row). Read at every scan; no redeploy.
+POLICY_OVERRIDES_OBJECT = "config/best_practices_overrides.csv"
+SCOPES = ['https://www.googleapis.com/auth/cloud-platform']
+
+# These names are part of the deploy contract (README, Terraform); don't rename them.
+REQUIRED_ENV_VARS = ('PROJECT_ID', 'LOCATION', 'TASK_QUEUE', 'RESULTS_BUCKET', 'SERVICE_ACCOUNT_EMAIL')
+
+# CLOUDGAUGE_ROLE: which half of the tool a Cloud Run service is. The recommended deployment
+# (README, tools/deploy.sh) is two services from one image: 'web' serves the pages and the JSON
+# API behind Identity-Aware Proxy and only ever *enqueues* scans, to WORKER_URL; 'worker' serves
+# the Cloud Tasks endpoints (/run-scan, /scan-shard, /run-aggregation, /sweep), reachable by the
+# service account alone, and enqueues its own shards to its own URL. 'all' (the default) is the
+# single service of earlier releases: every route on one URL, WORKER_URL optional.
+ROLES = ('all', 'web', 'worker')
+DEFAULT_ROLE = 'all'
+
+# GEMINI_MODEL: "auto" (the default) uses the newest stable Gemini Flash model
+# available to the project, looked up at runtime (see app.services.gemini).
+# Any other value is used as the model ID, e.g. "gemini-3.5-flash" to pin one.
+AUTO_GEMINI_MODEL = "auto"
+DEFAULT_GEMINI_MODEL = AUTO_GEMINI_MODEL
+# Used when "auto" can't list the models: Google's alias for its latest Flash model.
+FALLBACK_GEMINI_MODEL = "gemini-flash-latest"
+DEFAULT_VERTEX_LOCATION = "global"
+
+CHECK_RUNNER_MAX_WORKERS = 15
+# --- Throttling logic setup ---
+# We will only update GCS if at least 2 seconds have passed since the last update.
+STATUS_UPDATE_INTERVAL_SECONDS = 2
+
+# --- Sharded scans (app.fanout) ---
+# A scan of more than SCAN_SHARD_SIZE projects is split into shards of that many
+# projects, each run by its own Cloud Tasks task; smaller scans run inline in
+# one task as before. SCAN_MAX_CONCURRENT_SHARDS bounds how many shards run at
+# once (the queue's max_concurrent_dispatches: with 15 check threads per shard
+# it caps the organization-wide API concurrency). Every task gets a Cloud Tasks
+# dispatch deadline of TASK_DISPATCH_DEADLINE_SECONDS (its maximum is 30 min) so
+# a hung request is retried instead of silently duplicated, and a shard stops
+# starting new checks after SHARD_TIME_BUDGET_SECONDS so it always answers
+# before that deadline. A sweeper task re-checks a running job every
+# SWEEP_INTERVAL_SECONDS and finishes it with error rows if shards have died.
+DEFAULT_SCAN_SHARD_SIZE = 20
+DEFAULT_SCAN_MAX_CONCURRENT_SHARDS = 25
+DEFAULT_SHARD_TIME_BUDGET_SECONDS = 20 * 60
+DEFAULT_TASK_DISPATCH_DEADLINE_SECONDS = 30 * 60
+MAX_TASK_DISPATCH_DEADLINE_SECONDS = 30 * 60  # Cloud Tasks' maximum for HTTP tasks
+DEFAULT_SWEEP_INTERVAL_SECONDS = 30 * 60
+# A job's *time limit*: when it has run this long, the sweeper finishes it with
+# the results it has (the rest become error rows). It is computed per job from
+# its size, so a large organization is never cut off while its shards are still
+# queued: the queue runs the shards in waves of SCAN_MAX_CONCURRENT_SHARDS, and
+# the limit is JOB_TIME_LIMIT_FACTOR times the time all the waves take if every
+# shard uses its full dispatch deadline (the factor leaves room for retries), and
+# never less than MIN_JOB_TIME_LIMIT_SECONDS. SCAN_TIME_LIMIT_SECONDS replaces
+# the computed limit (see app.fanout.job_time_limit_seconds).
+MIN_JOB_TIME_LIMIT_SECONDS = 6 * 60 * 60
+JOB_TIME_LIMIT_FACTOR = 2
+# Retry policy of the queue (created at startup if missing). Three attempts:
+# a crashed shard is re-run, a persistently failing one ends up as error rows
+# in the report instead of retrying for hours.
+QUEUE_MAX_ATTEMPTS = 3
+QUEUE_MIN_BACKOFF_SECONDS = 30
+QUEUE_MAX_BACKOFF_SECONDS = 600
+
+# --- Service Health incidents and Advisory Notifications (the report's briefings) ---
+# The Service Health Incidents briefing lists the incidents updated in the last
+# SERVICE_HEALTH_WINDOW_DAYS whose relevance to a scanned project is one of
+# SERVICE_HEALTH_RELEVANCE (comma-separated) - "Impacted" alone by default (v17.3;
+# "Impacted" is only computed for some products) - plus, whatever the setting, the
+# "Related" incidents confined to specific locations: those are the evidence of the
+# Incident Exposure check (app.checks.exposure). Global "Related" incidents are
+# counted in a note under the table, not listed. SERVICE_HEALTH_INCIDENTS=off skips
+# the briefing and Incident Exposure altogether; the API coverage check still runs.
+# The Advisory Notifications briefing lists the notifications created in the last
+# ADVISORY_WINDOW_DAYS (the API keeps about a year).
+DEFAULT_SERVICE_HEALTH_WINDOW_DAYS = 90
+DEFAULT_SERVICE_HEALTH_RELEVANCE = ("IMPACTED",)
+SERVICE_HEALTH_RELEVANCE_VALUES = ("IMPACTED", "RELATED", "PARTIALLY_RELATED", "NOT_IMPACTED", "UNKNOWN")
+DEFAULT_ADVISORY_WINDOW_DAYS = 365
+
+# --- FinOps and capacity (v17) ---
+# COST_ALLOCATION_LABELS: the label keys every project must carry for cost allocation
+# ("cost-center,environment,owner"). Unset: the check reports *Not configured* and stays out of the score.
+# SNAPSHOT_MAX_AGE_DAYS: a disk snapshot older than this is listed by Snapshot Sprawl.
+# RESERVATION_COVERAGE_MIN_VCPUS: Reservation Coverage speaks up from this many running vCPUs in one
+# zone of a project without a reservation there.
+DEFAULT_SNAPSHOT_MAX_AGE_DAYS = 90
+DEFAULT_RESERVATION_COVERAGE_MIN_VCPUS = 32
+
+# --- Spend (v18.8) ---
+# BILLING_EXPORT: the BigQuery dataset the organization's billing account exports to, as <project>.<dataset>
+# (or <project>:<dataset>); the standard usage cost tables in it (gcp_billing_export_v1_*) feed Spend Briefing and
+# Spend Anomalies. The service account needs roles/bigquery.dataViewer on the dataset (a dataset-level grant;
+# nothing on the billing account). Unset: both report *Not configured* and stay out of the score.
+# SPEND_ANOMALY_FLOOR: a project's week on a service has to cost at least this much (in the export's currency) to be
+# an anomaly; 2 % of last month's net spend applies instead when that is higher.
+DEFAULT_SPEND_ANOMALY_FLOOR = 50.0
+
+# --- Identities (v18.5) ---
+# TRUSTED_DOMAINS: domains besides the organization's primary one whose users and groups External Principals
+# does not list ("partner.example,acquired.example"). Unset: the primary domain alone is the organization's.
+
+# --- History and analytics (v17) ---
+# BIGQUERY_DATASET: the dataset (in PROJECT_ID) every finished scan is loaded into, as two tables,
+# ``scans`` and ``findings`` (app.services.bigquery_export). Unset: nothing is exported.
+# BIGQUERY_EXPORT_WAIT_SECONDS: how long the report build waits for the load jobs before it reports
+# the export as still running (the jobs finish on their own either way).
+BIGQUERY_EXPORT_TABLES = ("scans", "findings")
+DEFAULT_BIGQUERY_EXPORT_WAIT_SECONDS = 60
+# How many scans the history page shows (the newest first).
+HISTORY_PAGE_SCANS = 52
+
+# --- Request hardening (v18.6.1) ---
+# WORKER_TOKEN_CHECK: whether the worker routes verify the caller's ID token in-process (app.routes.guards),
+# on top of Cloud Run's IAM check. On by default; "off" is the way back if a deployment's front alters the
+# token path. Only the production and synthetic profiles enforce it (both receive real Cloud Tasks calls).
+# The largest request body any route takes (the form, the JSON bodies, the task bodies are all far smaller).
+MAX_REQUEST_BYTES = 1024 * 1024
+
+# --- API attribution (v18.8.1) ---
+# CLOUDGAUGE_DISABLE_ATTRIBUTION: ``true`` (also ``1``, ``yes``, ``on``) stops the services from appending the static client
+# identifier ``cloud-solutions/cloudgauge-v<release>`` to the user agent of their Google Cloud API calls (app.services.user_agent).
+# Unset or ``false``: the identifier is sent. Nothing else about a scan changes either way, and nothing is ever sent anywhere
+# but the Google Cloud APIs the scan calls in any case.
+# /api/get-suggestions: at most this many findings per request (the report's script sends 5 at a time) and this
+# much text per finding (the script keeps a table's sample to 25 rows; a free-text finding to 4,000 characters).
+MAX_SUGGESTIONS_PER_REQUEST = 20
+MAX_SUGGESTION_TEXT_CHARS = 20_000
+MAX_SUGGESTION_PROJECT_CHARS = 128
+
+# Configures logging to display INFO level messages with a timestamp.
+LOG_FORMAT = '%(levelname)s: [%(asctime)s] %(message)s'
+LOG_DATEFMT = '%Y-%m-%d %H:%M:%S'
+
+# CLOUDGAUGE_ENV selects the profile. The app factory (Phase 4) runs the startup
+# checks (env validation, worker URL lookup, queue creation) only in production
+# and synthetic. 'synthetic' is production plus the synthetic load mode
+# (app.synthetic): the checks run against a generated organization instead of
+# Google Cloud APIs. It is opt-in by profile *and* SYNTHETIC_PROJECTS, so it
+# can't be switched on by accident on a real deployment.
+PROFILES = ('production', 'development', 'testing', 'synthetic')
+DEFAULT_PROFILE = 'production'
+SYNTHETIC_PROFILE = 'synthetic'
+DEFAULT_SYNTHETIC_SEED = 42
+DEFAULT_SYNTHETIC_LATENCY_MS = 150.0  # median simulated latency per API call
+DEFAULT_SYNTHETIC_ERROR_RATE = 0.0  # share of API calls that fail with 429
+DEFAULT_SYNTHETIC_DENIED_FRACTION = 0.02  # share of projects that answer 403 to everything
+
+
+def _gemini_model(value):
+    """``GEMINI_MODEL`` as a model ID, or ``AUTO_GEMINI_MODEL`` when unset, empty, or any casing of "auto"."""
+    value = (value or '').strip()
+    return AUTO_GEMINI_MODEL if value.lower() in ('', AUTO_GEMINI_MODEL) else value
+
+
+def _number(env, name, default, cast, minimum=None, maximum=None):
+    """Reads a numeric environment variable, with a default and an inclusive range."""
+    raw = (env.get(name) or '').strip()
+    if not raw:
+        return default
+    try:
+        value = cast(raw)
+    except ValueError:
+        raise ValueError(f"{name} must be a number, got '{raw}'") from None
+    if (minimum is not None and value < minimum) or (maximum is not None and value > maximum):
+        raise ValueError(f"{name} must be between {minimum} and {maximum}, got {value}")
+    return value
+
+
+def _label_keys(value):
+    """``COST_ALLOCATION_LABELS`` as a tuple of label keys (comma-separated, lower-cased, de-duplicated); empty when unset."""
+    keys = tuple(dict.fromkeys(key.strip().lower() for key in (value or '').split(',') if key.strip()))
+    for key in keys:
+        if not re.fullmatch(r'[a-z][a-z0-9_-]{0,62}', key):
+            raise ValueError(f"COST_ALLOCATION_LABELS has an invalid label key '{key}': a key is 1-63 lowercase letters, digits, "
+                             f"underscores or dashes and starts with a letter")
+    return keys
+
+
+def _domains(value):
+    """``TRUSTED_DOMAINS`` as a tuple of lower-case domains (comma-separated, de-duplicated); empty when unset."""
+    domains = tuple(dict.fromkeys(d.strip().lower() for d in (value or '').split(',') if d.strip()))
+    for domain in domains:
+        if not re.fullmatch(r'[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+', domain):
+            raise ValueError(f"TRUSTED_DOMAINS has an invalid domain '{domain}': a domain is labels of letters, digits and dashes joined by dots")
+    return domains
+
+
+def _dataset(value):
+    """``BIGQUERY_DATASET`` as a dataset ID (letters, digits and underscores), or ``None`` when unset."""
+    dataset = (value or '').strip()
+    if not dataset:
+        return None
+    if not re.fullmatch(r'[A-Za-z0-9_]{1,1024}', dataset):
+        raise ValueError(f"BIGQUERY_DATASET must be a dataset ID (letters, digits and underscores), got '{dataset}'")
+    return dataset
+
+
+def _billing_export(value):
+    """``BILLING_EXPORT`` as ``(project_id, dataset_id)`` — ``<project>.<dataset>`` or ``<project>:<dataset>`` — or ``None`` when unset."""
+    text = (value or '').strip()
+    if not text:
+        return None
+    match = re.fullmatch(r'([a-z][a-z0-9-]{4,28}[a-z0-9]|[a-z0-9.-]+:[a-z][a-z0-9-]{4,28}[a-z0-9])[.:]([A-Za-z0-9_]{1,1024})', text)
+    if not match:
+        raise ValueError(f"BILLING_EXPORT must be <project>.<dataset> (the billing export dataset in BigQuery), got '{text}'")
+    return match.group(1), match.group(2)
+
+
+def _switch(value, name, default=True):
+    """``on``/``off`` (also ``true``/``false``, ``1``/``0``, ``yes``/``no``); the default when unset."""
+    text = (value or '').strip().lower()
+    if text == '':
+        return default
+    if text in ('on', 'true', '1', 'yes'):
+        return True
+    if text in ('off', 'false', '0', 'no'):
+        return False
+    raise ValueError(f"{name} must be on or off, not {value!r}")
+
+
+def _relevance(value):
+    """``SERVICE_HEALTH_RELEVANCE`` as a tuple of relevance values (any casing, comma-separated); the default when unset."""
+    values = tuple(dict.fromkeys(v.strip().upper() for v in (value or '').split(',') if v.strip()))
+    if not values:
+        return DEFAULT_SERVICE_HEALTH_RELEVANCE
+    unknown = [v for v in values if v not in SERVICE_HEALTH_RELEVANCE_VALUES]
+    if unknown:
+        raise ValueError(f"SERVICE_HEALTH_RELEVANCE has unknown values {unknown}; expected a comma-separated subset of "
+                         f"{', '.join(SERVICE_HEALTH_RELEVANCE_VALUES)}")
+    return values
+
+
+@dataclass(frozen=True)
+class Settings:
+    """Runtime settings. Build them with :meth:`from_env`; they never change afterwards."""
+
+    # Required (see REQUIRED_ENV_VARS)
+    project_id: str | None = None
+    location: str | None = None
+    task_queue: str | None = None
+    results_bucket: str | None = None
+    service_account_email: str | None = None
+    # Set by Cloud Run
+    k_service: str | None = None
+    # Optional; the defaults match the legacy behavior
+    worker_url: str | None = None
+    # OIDC audience for the scan task's token. Unset: Cloud Tasks uses the task URL.
+    # Needed when WORKER_URL is a revision tag URL (canary): Cloud Run rejects
+    # tokens whose audience is a tag URL (401), so set this to the service's main URL.
+    worker_audience: str | None = None
+    # Whether the worker routes verify the caller's ID token in-process (v18.6.1; WORKER_TOKEN_CHECK, default on).
+    worker_token_check: bool = True
+    # Whether the client identifier goes on the Google Cloud API calls (v18.8.1; CLOUDGAUGE_DISABLE_ATTRIBUTION turns it off).
+    attribution: bool = True
+    # Which half of the tool this service is (see ROLES). 'web' needs WORKER_URL.
+    role: str = DEFAULT_ROLE
+    # The project's number, which the IAP assertion's audience carries (app.identity). Unset: read from
+    # the metadata server on first use.
+    project_number: str | None = None
+    gemini_model: str = DEFAULT_GEMINI_MODEL
+    vertex_location: str = DEFAULT_VERTEX_LOCATION
+    best_practices_csv_url: str = BEST_PRACTICES_CSV_URL
+    profile: str = DEFAULT_PROFILE
+    # Sharded scans (see the constants above and app.fanout)
+    scan_shard_size: int = DEFAULT_SCAN_SHARD_SIZE
+    scan_max_concurrent_shards: int = DEFAULT_SCAN_MAX_CONCURRENT_SHARDS
+    shard_time_budget_seconds: int = DEFAULT_SHARD_TIME_BUDGET_SECONDS
+    task_dispatch_deadline_seconds: int = DEFAULT_TASK_DISPATCH_DEADLINE_SECONDS
+    sweep_interval_seconds: int = DEFAULT_SWEEP_INTERVAL_SECONDS
+    scan_time_limit_seconds: int = 0  # 0: computed per job (app.fanout.job_time_limit_seconds)
+    task_max_attempts: int = QUEUE_MAX_ATTEMPTS
+    # Service Health incidents and Advisory Notifications (see the constants above)
+    service_health_window_days: int = DEFAULT_SERVICE_HEALTH_WINDOW_DAYS
+    service_health_relevance: tuple = DEFAULT_SERVICE_HEALTH_RELEVANCE
+    service_health_incidents: bool = True  # SERVICE_HEALTH_INCIDENTS=off: no briefing, no Incident Exposure (v17.3)
+    advisory_window_days: int = DEFAULT_ADVISORY_WINDOW_DAYS
+    # FinOps and capacity (v17; see the constants above)
+    cost_allocation_labels: tuple = ()
+    trusted_domains: tuple = ()  # TRUSTED_DOMAINS (v18.5): domains counted as the organization's by External Principals
+    snapshot_max_age_days: int = DEFAULT_SNAPSHOT_MAX_AGE_DAYS
+    reservation_coverage_min_vcpus: int = DEFAULT_RESERVATION_COVERAGE_MIN_VCPUS
+    # Spend (v18.8): the billing export dataset as (project, dataset), or None (Spend Briefing and Spend Anomalies not configured).
+    billing_export: tuple | None = None
+    spend_anomaly_floor: float = DEFAULT_SPEND_ANOMALY_FLOOR
+    # History and analytics (v17): the BigQuery dataset scans are exported to, in PROJECT_ID. None: no export.
+    bigquery_dataset: str | None = None
+    bigquery_export_wait_seconds: int = DEFAULT_BIGQUERY_EXPORT_WAIT_SECONDS
+    # Synthetic load mode (profile 'synthetic' only; see app.synthetic)
+    synthetic_projects: int = 0
+    synthetic_seed: int = DEFAULT_SYNTHETIC_SEED
+    synthetic_latency_ms: float = DEFAULT_SYNTHETIC_LATENCY_MS
+    synthetic_error_rate: float = DEFAULT_SYNTHETIC_ERROR_RATE
+    synthetic_denied_fraction: float = DEFAULT_SYNTHETIC_DENIED_FRACTION
+
+    @classmethod
+    def from_env(cls, environ=None):
+        """Reads settings from ``environ`` (default: ``os.environ``).
+
+        Raises:
+            ValueError: If ``CLOUDGAUGE_ENV`` is not one of ``PROFILES``, if a
+                numeric setting is out of range, or if the synthetic profile
+                is selected without ``SYNTHETIC_PROJECTS``.
+        """
+        env = os.environ if environ is None else environ
+        profile = (env.get('CLOUDGAUGE_ENV') or DEFAULT_PROFILE).strip().lower()
+        if profile not in PROFILES:
+            raise ValueError(f"Invalid CLOUDGAUGE_ENV '{profile}'. Expected one of: {', '.join(PROFILES)}")
+        role = (env.get('CLOUDGAUGE_ROLE') or DEFAULT_ROLE).strip().lower()
+        if role not in ROLES:
+            raise ValueError(f"Invalid CLOUDGAUGE_ROLE '{role}'. Expected one of: {', '.join(ROLES)}")
+        synthetic_projects = _number(env, 'SYNTHETIC_PROJECTS', 0, int, minimum=0)
+        if profile == SYNTHETIC_PROFILE and synthetic_projects < 1:
+            raise ValueError("CLOUDGAUGE_ENV=synthetic needs SYNTHETIC_PROJECTS (the number of generated projects, at least 1)")
+        return cls(
+            project_id=env.get('PROJECT_ID'),
+            location=env.get('LOCATION'),
+            task_queue=env.get('TASK_QUEUE'),
+            results_bucket=env.get('RESULTS_BUCKET'),
+            service_account_email=env.get('SERVICE_ACCOUNT_EMAIL'),
+            k_service=env.get('K_SERVICE'),
+            worker_url=env.get('WORKER_URL') or None,
+            worker_audience=env.get('WORKER_AUDIENCE') or None,
+            worker_token_check=_switch(env.get('WORKER_TOKEN_CHECK'), 'WORKER_TOKEN_CHECK'),
+            attribution=not _switch(env.get('CLOUDGAUGE_DISABLE_ATTRIBUTION'), 'CLOUDGAUGE_DISABLE_ATTRIBUTION', default=False),
+            role=role,
+            project_number=(env.get('PROJECT_NUMBER') or '').strip() or None,
+            gemini_model=_gemini_model(env.get('GEMINI_MODEL')),
+            vertex_location=env.get('VERTEX_LOCATION') or DEFAULT_VERTEX_LOCATION,
+            best_practices_csv_url=env.get('BEST_PRACTICES_CSV_URL') or BEST_PRACTICES_CSV_URL,
+            profile=profile,
+            scan_shard_size=_number(env, 'SCAN_SHARD_SIZE', DEFAULT_SCAN_SHARD_SIZE, int, minimum=1),
+            scan_max_concurrent_shards=_number(env, 'SCAN_MAX_CONCURRENT_SHARDS', DEFAULT_SCAN_MAX_CONCURRENT_SHARDS, int, minimum=1, maximum=1000),
+            shard_time_budget_seconds=_number(env, 'SHARD_TIME_BUDGET_SECONDS', DEFAULT_SHARD_TIME_BUDGET_SECONDS, int, minimum=60,
+                                              maximum=MAX_TASK_DISPATCH_DEADLINE_SECONDS),
+            task_dispatch_deadline_seconds=_number(env, 'TASK_DISPATCH_DEADLINE_SECONDS', DEFAULT_TASK_DISPATCH_DEADLINE_SECONDS, int, minimum=15,
+                                                   maximum=MAX_TASK_DISPATCH_DEADLINE_SECONDS),
+            sweep_interval_seconds=_number(env, 'SWEEP_INTERVAL_SECONDS', DEFAULT_SWEEP_INTERVAL_SECONDS, int, minimum=60),
+            scan_time_limit_seconds=_number(env, 'SCAN_TIME_LIMIT_SECONDS', 0, int, minimum=0),
+            task_max_attempts=_number(env, 'TASK_MAX_ATTEMPTS', QUEUE_MAX_ATTEMPTS, int, minimum=1, maximum=100),
+            service_health_window_days=_number(env, 'SERVICE_HEALTH_WINDOW_DAYS', DEFAULT_SERVICE_HEALTH_WINDOW_DAYS, int, minimum=1, maximum=366),
+            service_health_relevance=_relevance(env.get('SERVICE_HEALTH_RELEVANCE')),
+            service_health_incidents=_switch(env.get('SERVICE_HEALTH_INCIDENTS'), 'SERVICE_HEALTH_INCIDENTS'),
+            advisory_window_days=_number(env, 'ADVISORY_WINDOW_DAYS', DEFAULT_ADVISORY_WINDOW_DAYS, int, minimum=1, maximum=3660),
+            cost_allocation_labels=_label_keys(env.get('COST_ALLOCATION_LABELS')),
+            trusted_domains=_domains(env.get('TRUSTED_DOMAINS')),
+            snapshot_max_age_days=_number(env, 'SNAPSHOT_MAX_AGE_DAYS', DEFAULT_SNAPSHOT_MAX_AGE_DAYS, int, minimum=1, maximum=3660),
+            reservation_coverage_min_vcpus=_number(env, 'RESERVATION_COVERAGE_MIN_VCPUS', DEFAULT_RESERVATION_COVERAGE_MIN_VCPUS, int, minimum=1),
+            billing_export=_billing_export(env.get('BILLING_EXPORT')),
+            spend_anomaly_floor=_number(env, 'SPEND_ANOMALY_FLOOR', DEFAULT_SPEND_ANOMALY_FLOOR, float, minimum=0),
+            bigquery_dataset=_dataset(env.get('BIGQUERY_DATASET')),
+            bigquery_export_wait_seconds=_number(env, 'BIGQUERY_EXPORT_WAIT_SECONDS', DEFAULT_BIGQUERY_EXPORT_WAIT_SECONDS, int, minimum=0, maximum=600),
+            synthetic_projects=synthetic_projects,
+            synthetic_seed=_number(env, 'SYNTHETIC_SEED', DEFAULT_SYNTHETIC_SEED, int),
+            synthetic_latency_ms=_number(env, 'SYNTHETIC_LATENCY_MS', DEFAULT_SYNTHETIC_LATENCY_MS, float, minimum=0),
+            synthetic_error_rate=_number(env, 'SYNTHETIC_ERROR_RATE', DEFAULT_SYNTHETIC_ERROR_RATE, float, minimum=0, maximum=1),
+            synthetic_denied_fraction=_number(env, 'SYNTHETIC_DENIED_FRACTION', DEFAULT_SYNTHETIC_DENIED_FRACTION, float, minimum=0, maximum=1),
+        )
+
+    @property
+    def is_production(self):
+        return self.profile == 'production'
+
+    @property
+    def is_testing(self):
+        return self.profile == 'testing'
+
+    @property
+    def is_synthetic(self):
+        """True in the synthetic load mode: generated organization, no Google Cloud data-plane calls."""
+        return self.profile == SYNTHETIC_PROFILE
+
+    @property
+    def startup_checks_enabled(self):
+        """Whether ``create_app`` validates the env, resolves the worker URL and ensures the queue."""
+        return self.profile in ('production', SYNTHETIC_PROFILE)
+
+    @property
+    def serves_pages(self):
+        """Whether this service registers the ``ui`` and ``api`` blueprints (roles ``all`` and ``web``)."""
+        return self.role in ('all', 'web')
+
+    @property
+    def serves_worker(self):
+        """Whether this service registers the ``worker`` blueprint (roles ``all`` and ``worker``)."""
+        return self.role in ('all', 'worker')
+
+    @property
+    def is_web_role(self):
+        return self.role == 'web'
+
+    def missing_required(self):
+        """Returns the names of required environment variables that are unset or empty."""
+        values = {
+            'PROJECT_ID': self.project_id,
+            'LOCATION': self.location,
+            'TASK_QUEUE': self.task_queue,
+            'RESULTS_BUCKET': self.results_bucket,
+            'SERVICE_ACCOUNT_EMAIL': self.service_account_email,
+        }
+        return [var for var in REQUIRED_ENV_VARS if not values[var]]
+
+    def validate(self):
+        """Checks for required environment variables at startup."""
+        missing_vars = self.missing_required()
+        if missing_vars:
+            error_message = f"FATAL: Missing required environment variables: {', '.join(missing_vars)}"
+            logging.critical(error_message)
+            # In a production environment, you might want to raise an exception or exit
+            # For Cloud Run, this will make the deployment fail with a clear log message
+            raise RuntimeError(error_message)
+        if self.is_web_role and not self.worker_url:
+            # Self-discovery would hand the web service its own URL, and every scan would be posted to a
+            # service that has no /run-scan. Fail here, where the log says what to set.
+            error_message = ("FATAL: CLOUDGAUGE_ROLE=web needs WORKER_URL, the URL of the worker service "
+                             "(the one deployed with CLOUDGAUGE_ROLE=worker); the web service never runs scans itself.")
+            logging.critical(error_message)
+            raise RuntimeError(error_message)
+        print("✅ All required environment variables are set.")
+
+
+def get_settings(environ=None):
+    """Returns a new :class:`Settings` read from the environment."""
+    return Settings.from_env(environ)

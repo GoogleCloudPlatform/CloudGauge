@@ -1,0 +1,109 @@
+# CI — what every pull request and every push to main must pass.
+#
+# Four jobs, each a required status check on main (Settings › Rules › Rulesets):
+#
+#   tests (3.11)   the suite and the lint on the interpreter the image ships (python:3.11-slim)
+#   tests (3.13)   the same on the interpreter the maintainers develop on — the two have disagreed before
+#   terraform      terraform fmt, init (no backend, no credentials) and validate on terraform/
+#   docker         the application image, the test image, and the suite inside it — exactly cloudbuild.yaml's
+#                  build, build-tests and test steps, so a green run here means the release build is green
+#
+# The suite needs no credentials and no network: GCS, Cloud Tasks and the Google APIs are in-memory fakes
+# (docs/development.md › Local Development & Testing).
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - refactor/modular-factory  # the release branch until the v20 cutover; remove afterwards
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHONDONTWRITEBYTECODE: '1'
+  PIP_DISABLE_PIP_VERSION_CHECK: '1'
+
+jobs:
+  tests:
+    name: tests (${{ matrix.python }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.11', '3.13']
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+          cache-dependency-path: requirements*.txt
+      - name: Install
+        run: python -m pip install -r requirements-dev.txt
+      - name: Lint (errors, undefined names, unused and redefined imports)
+        run: ruff check --select E9,F63,F7,F82,F401,F811 app tests tools cloudgauge.py run.py
+      - name: Test
+        run: python -m pytest -p no:cacheprovider -q --no-header -rfE
+
+  terraform:
+    name: terraform
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: terraform
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e  # v4.0.1
+        with:
+          terraform_version: '1.17.2'
+          terraform_wrapper: false
+      - name: Format
+        run: terraform fmt -check -recursive -diff
+      - name: Init (providers only — no backend, no credentials)
+        run: terraform init -backend=false -input=false
+      - name: Validate
+        run: terraform validate
+
+  docker:
+    name: docker
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      DOCKER_BUILDKIT: '1'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build the application image
+        run: docker build -t cloudgauge .
+      - name: Build the test image
+        run: docker build -f Dockerfile.test --build-arg APP_IMAGE=cloudgauge -t cloudgauge-test .
+      - name: Run the suite inside the image
+        run: docker run --rm cloudgauge-test
+      - name: Serve the image and request the UI
+        # The container as Cloud Run runs it, in the testing profile (no GCP calls): the UI page and a route's input validation.
+        run: |
+          set -eu
+          docker run --detach --rm --name cloudgauge -p 8080:8080 -e CLOUDGAUGE_ENV=testing cloudgauge
+          for attempt in $(seq 1 60); do
+            if curl -fsS -o /tmp/index.html http://127.0.0.1:8080/; then break; fi
+            sleep 1
+          done
+          grep -q '/api/list-resources?scope=' /tmp/index.html
+          test "$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/api/list-resources)" = 400
+          docker logs cloudgauge 2>&1 | grep -q 'Booting worker'
+          docker stop cloudgauge

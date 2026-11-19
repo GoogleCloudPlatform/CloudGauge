@@ -1,0 +1,335 @@
+/*
+ * Copyright 2025 Google LLC
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+/* The report's own layout on top of _design.css: shell, overview, accordions, tables, remediation, print. */
+
+/* Shell: a fixed sidebar and one page at a time in the main column. */
+body { display: flex; min-height: 100vh; }
+.sidebar { position: fixed; top: 0; left: 0; bottom: 0; width: 240px; display: flex; flex-direction: column; padding: 20px 12px 16px; background: var(--surface); border-right: 1px solid var(--hairline); overflow-y: auto; }
+.sidebar-brand { padding: 2px 12px 22px; font-size: 15px; font-weight: 600; letter-spacing: -0.01em; color: var(--ink); }
+.sidebar .nav-link { display: flex; align-items: center; gap: 10px; margin: 1px 0; padding: 7px 10px 7px 12px; border-left: 2px solid transparent; border-radius: var(--radius-control); color: var(--body); font-size: 13px; text-decoration: none; }
+.sidebar .nav-link:hover { background: var(--canvas); }
+.sidebar .nav-link.active { background: var(--zinc-100); border-left-color: var(--ink); color: var(--ink); font-weight: 500; }
+.nav-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.nav-meta { display: inline-flex; align-items: center; gap: 7px; font-size: 12px; color: var(--muted); }
+.sidebar-foot { display: flex; flex-direction: column; gap: 2px; margin-top: auto; padding: 16px 12px 0; font-size: 11px; color: var(--faint); }
+.sidebar-foot time, .sidebar-foot .version { font-family: var(--font-mono); white-space: nowrap; }
+.sidebar-foot .version { margin-top: 6px; }
+.main-content { flex: 1; min-width: 0; margin-left: 240px; padding: 28px 32px 56px; max-width: 1320px; }
+.main-content > * { margin-bottom: 16px; }
+
+/* Header: the title, a monospace definition list, and the CSV button. */
+.report-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 20px; }
+.report-header h1 { margin-bottom: 10px; }
+.header-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; flex-shrink: 0; }
+.report-meta { display: grid; grid-template-columns: max-content 1fr; gap: 3px 14px; margin: 0; font-family: var(--font-mono); font-size: 12px; color: var(--muted); }
+.report-meta dd { margin: 0; overflow-wrap: anywhere; }
+.report-meta .coverage .dot { width: 7px; height: 7px; margin-right: 8px; vertical-align: 1px; }
+.report-meta .coverage-incomplete { color: var(--body); }
+.report-meta a { color: var(--ink); text-decoration: underline; text-underline-offset: 3px; text-decoration-color: var(--zinc-300); }
+.report-meta a:hover { text-decoration-color: currentColor; }
+
+/* Toolbar: the filter box and the accordion controls; hidden on the Overview, which has no checks. */
+.report-toolbar { display: flex; align-items: center; gap: 12px; }
+.report-toolbar.no-filter { display: none; }
+#row-filter { flex: 0 1 440px; padding: 8px 12px; font-size: 13px; }
+#filter-status { font-size: 13px; color: var(--muted); }
+.toolbar-actions { display: inline-flex; gap: 14px; margin-left: auto; }
+
+/* Overview: four counts (with their change since the last scan), the coverage note when a scan is incomplete,
+   the scores, the Changes card, the Suggested fixes card. */
+.kpi-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+.kpi { display: grid; grid-template-columns: auto 1fr; align-items: center; column-gap: 8px; padding: 16px 18px 14px; background: var(--surface); border: 1px solid var(--hairline); border-radius: var(--radius-card); }
+.kpi h3 { font-size: 13px; font-weight: 500; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.kpi .count { grid-column: 1 / -1; margin: 14px 0 0; font-size: 48px; font-weight: 300; letter-spacing: -0.04em; line-height: 1; color: var(--ink); font-variant-numeric: tabular-nums; }
+.kpi-unit { grid-column: 1 / -1; margin-top: 6px; font-size: 12px; color: var(--muted); }
+.kpi-delta { display: block; margin-top: 2px; color: var(--faint); }
+.kpi-delta .mono { color: var(--muted); }
+.coverage-note { display: flex; align-items: flex-start; gap: 10px; padding: 2px 4px; font-size: 13px; color: var(--muted); line-height: 1.5; }
+.coverage-note .dot { margin-top: 6px; }
+.coverage-note strong { font-weight: 500; color: var(--body); }
+/* Changes since last scan: numbers in mono, the score's arrow a muted glyph (a delta is not a status). */
+.card-meta { margin-left: auto; font-family: var(--font-mono); font-size: 12px; color: var(--muted); text-align: right; }
+.card-meta a { color: var(--muted); text-decoration: underline; text-underline-offset: 3px; text-decoration-color: var(--zinc-300); }
+.card-meta a:hover { color: var(--ink); text-decoration-color: currentColor; }
+.changes-table td { padding: 9px 12px; vertical-align: top; }
+.changes-table td:first-child { padding-left: 0; }
+.changes-table th:last-child, .changes-table td:last-child { padding-right: 0; }
+.changes-table th:first-child { padding-left: 0; }
+.changes-table tbody tr:hover > td { background: transparent; }
+.changes-table td.num { font-size: 13px; }
+.changes-table .delta { display: inline-block; min-width: 4.5ch; margin-left: 6px; font-family: var(--font-mono); font-size: 12px; font-variant-numeric: tabular-nums; color: var(--muted); text-align: left; }
+.changes-table .delta-flat { color: var(--faint); }
+.changes-table .status-change { display: block; font-size: 13px; }
+.changes-table .status-change + .status-change { margin-top: 3px; }
+.changes-table .status-change a { color: var(--ink); font-weight: 500; text-decoration: none; }
+.changes-table .status-change a:hover { text-decoration: underline; text-underline-offset: 3px; }
+.changes-table details.cell-more { display: block; margin-top: 3px; }
+.changes-table details.cell-more summary { cursor: pointer; color: var(--muted); font-size: 12px; list-style: none; text-decoration: underline; text-underline-offset: 3px; text-decoration-color: var(--zinc-300); }
+.changes-table details.cell-more summary::-webkit-details-marker { display: none; }
+.changes-table details.cell-more .more-body { display: block; margin-top: 3px; }
+.changes-foot { margin: 12px 0 0; font-size: 12px; line-height: 1.6; color: var(--muted); }
+.changes-foot + .changes-foot { margin-top: 4px; }
+.pill-new { padding: 1px 7px; border-color: transparent; font-size: 11px; line-height: 16px; }  /* the same label the tables' New marker shows */
+.attribution { margin-left: 8px; font-size: 12px; font-weight: 400; color: var(--muted); vertical-align: 1px; }
+.card h2 { margin-bottom: 12px; }
+.card-title-row { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
+.card-title-row h2, .card-title-row h3 { margin: 0; }
+.card-title-row .btn { margin-left: auto; }
+.scores-table td { padding: 9px 12px; }
+.scores-table tr:first-child td { border-top: 1px solid var(--hairline); }
+.scores-table td:first-child { padding-left: 0; }
+.scores-table td:last-child { padding-right: 0; }
+.scores-table tbody tr:hover > td { background: transparent; }
+.score-name { width: 34%; }
+.score-name a { color: var(--ink); font-weight: 500; text-decoration: none; }
+.score-name a:hover { text-decoration: underline; text-underline-offset: 3px; }
+.score-bar-cell { vertical-align: middle; }
+.bar { display: block; height: 4px; min-width: 160px; border-radius: 2px; background: var(--zinc-100); overflow: hidden; }
+.bar-fill { display: block; height: 100%; border-radius: 2px; background: var(--emerald-500); }
+.bar-fill.score-medium { background: var(--amber-500); }
+.bar-fill.score-low { background: var(--rose-500); }
+.bar-fill.score-none { background: transparent; }
+.score-cell { width: 1%; }
+.score { font-family: var(--font-mono); font-variant-numeric: tabular-nums; font-weight: 500; color: var(--ink); }
+/* Not assessed (app.reporting.scoring): the words where the number would be, in the muted tone of the evidence next to them. */
+.score-none { font-size: 13px; font-weight: 500; color: var(--muted); white-space: nowrap; }
+.score.score-none { font-family: var(--font-mono); font-weight: 400; }
+.score-of { width: 1%; white-space: nowrap; font-size: 12px; color: var(--muted); }
+
+/* Gemini: the Overview's Draft fixes card with its status line, and the pending lines; the executive summary is
+   generated and read on the Scorecard (its card is styled with the Scorecard, below). */
+.gemini-card { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 16px 24px; }
+.gemini-card h2 { margin-bottom: 4px; }
+.gemini-card p { color: var(--muted); max-width: 64ch; }
+.gemini-actions { display: flex; gap: 10px; flex: none; }
+.gemini-status { flex-basis: 100%; display: flex; align-items: flex-start; gap: 10px; padding-top: 14px; border-top: 1px solid var(--rule); font-size: 13px; line-height: 1.5; color: var(--body); }
+.gemini-status.is-pending { color: var(--muted); }
+.gemini-status .spinner { margin-top: 3px; }
+.gemini-status .notice { flex: 1; }
+.gemini-status a { font-weight: 500; }
+.pending { display: flex; align-items: center; gap: 10px; padding: 6px 0; font-size: 13px; color: var(--muted); }
+.prose-block { max-width: 72ch; line-height: 1.65; }
+.prose-block h3 { margin: 18px 0 6px; }
+.prose-block > :first-child { margin-top: 0; }
+.prose-block p { margin: 0 0 10px; }
+.prose-block ul, .prose-block ol { margin: 0 0 12px; padding-left: 22px; }
+.prose-block li { margin-bottom: 6px; }
+.prose-block li::marker { color: var(--muted); }
+.prose-block code { padding: 1px 5px; border-radius: var(--radius-chip); background: var(--zinc-100); font-size: 12.5px; }
+.footnote { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--rule); font-size: 12px; color: var(--muted); }
+.remediation-note { margin-top: 10px; font-size: 13px; color: var(--muted); }
+
+/* Scorecard (app/reporting/scorecard.py): the review page. Four stoplights - the lamp is the one element of its own
+   on the page (lit lamp = the state, readable without colour), the pill says it in words, the score keeps the
+   Overview's mono figure and the Changes card's delta glyph - then the since line, the Top actions table and the
+   executive summary card, which is empty until Gemini writes it. */
+.content-section > * + * { margin-top: 16px; }
+.content-section > .sr-only + * { margin-top: 0; }
+.scorecard-head { display: flex; align-items: center; gap: 16px; }
+.scorecard-head h2 { margin: 0; font-size: 18px; }
+.scorecard-actions { margin-left: auto; display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+.stoplight-list { list-style: none; margin: 0; padding: 0; }
+.stoplight { display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto; align-items: center; column-gap: 18px; padding: 14px 0; border-bottom: 1px solid var(--rule); }
+.stoplight:first-child { padding-top: 2px; }
+.stoplight:last-child { border-bottom: 0; }
+.lamp { display: inline-flex; flex-direction: column; gap: 3px; padding: 5px; border-radius: 999px; background: var(--zinc-100); border: 1px solid var(--hairline); }
+.lamp i { display: block; width: 9px; height: 9px; border-radius: 50%; background: var(--zinc-300); }
+.lamp-low i:nth-child(1) { background: var(--rose-500); }
+.lamp-medium i:nth-child(2) { background: var(--amber-500); }
+.lamp-high i:nth-child(3) { background: var(--emerald-500); }
+/* .lamp-none (not assessed) lights nothing: the three default dots, and the pill says why. */
+.stoplight-title { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.stoplight-title a { font-size: 15px; font-weight: 500; color: var(--ink); text-decoration: none; }
+.stoplight-title a:hover { text-decoration: underline; text-underline-offset: 3px; }
+.stoplight-category { font-size: 13px; color: var(--muted); }
+.stoplight-evidence { margin: 3px 0 0; font-size: 13px; color: var(--body); }
+.stoplight-score { display: flex; align-items: baseline; gap: 8px; white-space: nowrap; }
+.stoplight-score .score { font-size: 22px; font-weight: 400; }
+.stoplight-score .delta { font-family: var(--font-mono); font-size: 12px; font-variant-numeric: tabular-nums; color: var(--muted); }
+.stoplight-score .delta-flat { color: var(--faint); }
+.stoplight .pill { justify-self: end; min-width: 128px; justify-content: center; }
+.since-line { margin: 14px 0 0; padding-top: 12px; border-top: 1px solid var(--hairline); font-size: 13px; color: var(--body); line-height: 1.5; }
+.since-line a { color: var(--body); text-decoration: underline; text-underline-offset: 3px; text-decoration-color: var(--zinc-300); }
+.since-line a:hover { color: var(--ink); text-decoration-color: currentColor; }
+.actions-table td { vertical-align: middle; }
+.actions-table .action-name a { color: var(--ink); font-weight: 500; text-decoration: none; }
+.actions-table .action-name a:hover { text-decoration: underline; text-underline-offset: 3px; }
+.actions-table .fix-tag { margin-left: 8px; font-size: 12px; color: var(--muted); white-space: nowrap; }
+.actions-table .category-cell { white-space: nowrap; }
+.actions-table .since-cell { font-family: var(--font-mono); font-size: 12px; color: var(--muted); white-space: nowrap; }
+.actions-foot { margin: 10px 0 0; font-size: 13px; color: var(--body); }
+.actions-foot a { color: var(--ink); font-weight: 500; text-decoration: none; }
+.actions-foot a:hover { text-decoration: underline; text-underline-offset: 3px; }
+.actions-foot + .actions-foot { margin-top: 4px; }
+.scorecard-summary .summary-empty { max-width: 64ch; color: var(--muted); }
+.scorecard-summary:not(.is-empty) .summary-empty { display: none; }
+.scorecard-summary #summaryBtn { margin-top: 12px; }
+
+/* Category pages: title, score pill, status counts, the accordion list. */
+.section-header { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.section-header h2 { margin: 0; font-size: 18px; }
+.section-counts { display: flex; flex-wrap: wrap; gap: 4px 18px; margin: 10px 0 14px; font-size: 13px; color: var(--muted); }
+.section-counts > span { display: inline-flex; align-items: center; gap: 6px; }
+.section-counts .n { font-family: var(--font-mono); font-variant-numeric: tabular-nums; font-weight: 500; color: var(--ink); }
+.checks-list { list-style: none; margin: 0; padding: 0; border-top: 1px solid var(--hairline); }
+.checks-list > li { border-bottom: 1px solid var(--hairline); }
+details.check > summary { display: flex; align-items: flex-start; gap: 10px; padding: 12px 4px; list-style: none; cursor: pointer; }
+details.check > summary::-webkit-details-marker { display: none; }
+details.check > summary:hover { background: var(--canvas); }
+details.check > summary .chevron { flex: none; margin-top: 3px; color: var(--faint); transition: transform 0.15s ease; }
+details.check[open] > summary .chevron { transform: rotate(90deg); }
+details.check > summary .dot { margin-top: 7px; }
+.check-title { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.check-title strong { font-weight: 500; color: var(--ink); }
+.check-summary { font-size: 13px; color: var(--muted); }
+details.check > summary .status-badge { margin-top: 1px; }
+.check-content { padding: 2px 4px 16px 48px; }
+.check-content .details { overflow-x: auto; }
+.table-controls, .table-note { margin-top: 8px; font-size: 13px; color: var(--muted); }
+.table-controls .link-btn { margin-left: 10px; }
+.table-note a { color: var(--ink); }
+.empty-state { display: flex; align-items: center; gap: 10px; margin: 4px 0 8px; padding: 14px 16px; border: 1px solid var(--hairline); border-radius: var(--radius-control); color: var(--body); font-size: 14px; }
+.empty-state.filter-empty { color: var(--muted); font-size: 13px; }
+.section-footer { margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--hairline); }
+.insights-intro { margin-bottom: 10px; color: var(--muted); font-size: 13px; }
+#insights-placeholder:not(:empty) { margin-top: 16px; }
+.pagination-controls { display: flex; align-items: center; justify-content: center; gap: 10px; margin-top: 14px; font-size: 13px; color: var(--muted); }
+
+/* Tables: sorting indicators on the details tables (the global table rules are in _design.css). */
+.details-table th { cursor: pointer; user-select: none; }
+.details-table th:hover { color: var(--ink); }
+.details-table th[aria-sort]::after { margin-left: 4px; font-size: 10px; color: var(--ink); }
+.details-table th[aria-sort="ascending"]::after { content: "\2191"; }
+.details-table th[aria-sort="descending"]::after { content: "\2193"; }
+/* Cells (app/reporting/layouts.py): short columns never wrap; long content sits behind a disclosure or a
+   three-line clamp instead of being cut. A table wider than the page scrolls sideways rather than squeezing. */
+.details-table td.nowrap { white-space: nowrap; }
+.details-table td.code { line-height: 1.7; }
+.details-table .state-active { color: var(--rose-700); font-weight: 500; }
+.details-table .cell-title { color: var(--ink); font-weight: 500; }
+.details-table .cell-secondary { display: block; margin-top: 3px; font-size: 12px; line-height: 1.45; color: var(--muted); }
+.details-table .cell-code { display: block; margin-top: 2px; font-family: var(--font-mono); font-size: 11.5px; color: var(--muted); white-space: nowrap; }
+.details-table details.cell-more { display: inline; }
+.details-table details.cell-more summary { display: inline; cursor: pointer; color: var(--ink); font-weight: 500; list-style: none; text-decoration: underline; text-underline-offset: 3px; text-decoration-color: var(--zinc-300); }
+.details-table details.cell-more summary::-webkit-details-marker { display: none; }
+.details-table details.cell-more[open] summary { text-decoration-color: currentColor; }
+.details-table details.cell-more .more-body { display: block; margin-top: 6px; line-height: 1.5; color: var(--body); }
+.details-table details.cell-more .more-body.chip-list { line-height: 1.9; }
+.details-table ul.cell-list { margin: 0; padding-left: 16px; line-height: 1.5; }
+.details-table ul.cell-list li { display: list-item; padding: 0; border: 0; margin: 0 0 2px; }  /* not a .checks-list li */
+.details-table .clamp { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; white-space: pre-line; line-height: 1.45; margin-top: 4px; }
+.details-table .clamp.open { display: block; -webkit-line-clamp: unset; }
+.clamp-toggle { display: block; margin-top: 2px; }
+.clamp-toggle::after { content: attr(data-more); }
+.clamp.open + .clamp-toggle::after { content: attr(data-less); }
+.org-policy-table td.state code { font-size: 12px; }
+
+/* One remediation block per failing finding: the check's own fix when it knows one (fix-block), Gemini's
+   suggestion otherwise (filled into the remediation placeholder by getGeminiSuggestions). Fixes are commands;
+   every block has the same title row with a Copy control (fix_block in _macros.html, suggestedFixHtml). */
+.fix-block { margin-top: 12px; padding-left: 12px; border-left: 2px solid var(--hairline); }
+.fix-block strong { font-size: 13px; font-weight: 500; color: var(--ink); }
+.fix-head { display: flex; align-items: center; gap: 8px; min-height: 28px; }
+.fix-head .copy-btn { margin-left: auto; }
+.fix-block pre, .remediation-placeholder pre { margin: 6px 0 0; padding: 10px 12px; border: 1px solid var(--hairline); border-radius: var(--radius-control); background: var(--canvas); color: var(--body); font-size: 12.5px; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
+
+/* Since the previous scan (app.reporting.changes): the chip after a status pill, the CSS-generated "New" marker on
+   rows the previous scan did not have (so it is not part of the row's text), and the resolved rows under a table. */
+.change-chip { flex: none; margin-top: 3px; font-family: var(--font-mono); font-size: 11.5px; color: var(--muted); white-space: nowrap; }
+.change-chip-note { color: var(--faint); }
+tr.row-new > td:first-child::before, .line-new::before { content: "New"; display: inline-block; margin-right: 8px; padding: 1px 7px; border-radius: 999px; background: var(--zinc-100); color: var(--zinc-700); font: 500 11px/16px var(--font-sans); vertical-align: 1px; white-space: nowrap; }
+.resolved-list { margin-top: 10px; font-size: 13px; }
+.resolved-list summary { cursor: pointer; color: var(--muted); list-style: none; }
+.resolved-list summary::-webkit-details-marker { display: none; }
+.resolved-list summary::before { content: "\25B8"; display: inline-block; width: 12px; color: var(--faint); }
+.resolved-list[open] summary::before { content: "\25BE"; }
+.resolved-list summary:hover { color: var(--ink); }
+.resolved-list ul { margin: 6px 0 0 12px; padding-left: 16px; font-family: var(--font-mono); font-size: 12px; line-height: 1.7; color: var(--body); }
+.resolved-list li::marker { color: var(--faint); }
+.resolved-list p { margin: 4px 0 0 12px; font-size: 12px; }
+
+@media (max-width: 1100px) {
+    .kpi-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .gemini-card { flex-direction: column; align-items: flex-start; }
+}
+@media (max-width: 900px) {
+    body { display: block; }
+    .sidebar { position: static; width: auto; flex-direction: row; flex-wrap: wrap; align-items: center; gap: 2px; padding: 10px 12px; border-right: 0; border-bottom: 1px solid var(--hairline); }
+    .sidebar-brand { width: 100%; padding: 4px 8px 8px; }
+    .sidebar .nav-link { padding: 6px 10px; }
+    .sidebar-foot { display: none; }
+    .main-content { margin: 0; padding: 20px 16px 40px; }
+    .report-header { flex-direction: column; }
+    .report-toolbar { flex-wrap: wrap; }
+    #row-filter { flex-basis: 100%; }
+    .toolbar-actions { margin-left: 0; }
+    .check-content { padding-left: 4px; }
+}
+@media screen and (max-width: 900px) {  /* screen only: a printed sheet is narrower than 900px and keeps the full rows */
+    .scorecard-head { flex-wrap: wrap; }
+    .scorecard-actions { margin-left: 0; justify-content: flex-start; }
+    .stoplight { grid-template-columns: auto minmax(0, 1fr) auto; row-gap: 6px; }
+    .stoplight .pill { grid-column: 2 / -1; justify-self: start; min-width: 0; }
+}
+@media (max-width: 560px) {
+    .kpi-grid { grid-template-columns: minmax(0, 1fr); }
+    .score-bar-cell { display: none; }
+}
+@media print {
+    body { display: block; background: white; }
+    .sidebar, .report-toolbar, .btn, .table-controls, .section-footer button, .clamp-toggle, .gemini-card { display: none !important; }
+    .main-content { margin: 0; padding: 0; max-width: none; }
+    /* Print or save as PDF (v20) prints the whole report: the header, then the Scorecard (the script moves it ahead of the
+       Overview for the print), then the Overview and each category on a fresh sheet; every accordion open (the script), its title kept with its
+       first rows; rows stay whole and a table that breaks repeats its header row. */
+    .content-section { display: block !important; break-inside: auto; page-break-inside: auto; }
+    body:not(.print-scorecard) .content-section ~ .content-section { break-before: page; page-break-before: always; }
+    details.check > summary { break-after: avoid; page-break-after: avoid; }
+    .check-content .details { overflow-x: visible; }  /* no scrollbar track on paper; a wide table shows whole */
+    .details-table thead { display: table-header-group; }
+    .details-table tr { break-inside: avoid; page-break-inside: avoid; }
+    .header-actions { display: none !important; }
+    .card, .kpi { border: 1px solid var(--hairline); }
+    .details-table th::after { content: none !important; }
+    .details-table .clamp { display: block; -webkit-line-clamp: unset; }
+    details.check > summary .chevron { display: none; }
+    /* The Scorecard's Print button prints that page alone (printScorecard sets body.print-scorecard), on one sheet:
+       the report header above it carries the scope, report ID, coverage and previous scan; a summary not yet
+       written is left out; the actions table keeps its rows whole and repeats its header if it must break. */
+    body.print-scorecard .content-section:not(#scorecard-section) { display: none !important; }
+    body.print-scorecard #scorecard-section { page-break-inside: auto; break-inside: auto; }
+    .scorecard-actions, .scorecard-summary.is-empty { display: none !important; }
+    body.print-scorecard .report-header { margin-bottom: 12px; }
+    #scorecard-section { font-size: 12px; }
+    #scorecard-section .card { padding: 10px 14px; break-inside: auto; }
+    #scorecard-section > * + * { margin-top: 8px; }
+    #scorecard-section .stoplights { break-inside: avoid; }
+    .actions-table tr { break-inside: avoid; }
+    .actions-table thead { display: table-header-group; }
+    .actions-table .action-name { white-space: nowrap; }
+    .actions-table .pill { padding: 0 7px; font-size: 11px; line-height: 16px; }
+    .stoplight { padding: 7px 0; column-gap: 14px; break-inside: avoid; }
+    .stoplight-title a { font-size: 13px; }
+    .stoplight-category, .stoplight-evidence, .since-line, .actions-foot { font-size: 11px; }
+    .stoplight-evidence { margin-top: 1px; }
+    .stoplight-score .score { font-size: 17px; }
+    .stoplight .pill { min-width: 112px; }
+    .since-line { margin-top: 6px; padding-top: 6px; }
+    .actions-table th, .actions-table td { padding: 4px 8px; font-size: 11px; }
+    .actions-table .since-cell, .actions-table .fix-tag { font-size: 10px; }
+    .actions-foot { margin-top: 6px; }
+    @page { margin: 10mm 12mm; }
+}
