@@ -304,3 +304,37 @@ def test_the_folder_is_documented_and_kept_out_of_the_build(operations):
 def test_the_files_are_formatted():
     result = subprocess.run(['terraform', 'fmt', '-check', '-recursive', str(TERRAFORM)], capture_output=True, text=True)
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_the_cleanup_script_undoes_the_deployment(script, operations):
+    """v20: docs/operations.md › Cleanup Script removes what tools/deploy.sh creates — the two services, the queue, the
+    bucket, the schedules, the export dataset, the images, the project and organization roles, the account — under
+    the script's default names, with gcloud storage (not gsutil); a Terraform deployment is `terraform destroy`."""
+    cleanup = operations.split('## Cleanup Script')[1].split('### Step-by-Step Explanation')[0]
+    block = re.search(r'```\n(#!/bin/bash.*?)```', cleanup, re.S).group(1)
+    assert 'gsutil' not in cleanup and 'terraform destroy' in cleanup
+    # The names are deploy.sh's defaults.
+    defaults = dict(re.findall(r'^(\w+)="\$\{\w+:-(.*)\}"$', script, re.M))  # NAME="${NAME:-default}", the default may nest ${…}
+    assert defaults['SERVICE'] == 'cloudgauge' and defaults['WORKER_SERVICE'] == '${SERVICE}-worker'
+    assert 'export SERVICE_NAME="cloudgauge"' in block and 'export WORKER_SERVICE="${SERVICE_NAME}-worker"' in block
+    assert f'export QUEUE_NAME="{defaults["QUEUE"]}"' in block and f'export BUCKET_NAME="{defaults["BUCKET"]}"' in block
+    assert f'export SA_NAME="{defaults["SERVICE_ACCOUNT"]}"' in block and 'export IMAGE="gcr.io/${PROJECT_ID}/${SERVICE_NAME}"' in block
+    assert defaults['IMAGE'] == 'gcr.io/${PROJECT_ID}/${SERVICE}'
+    # Every kind of resource the deployment creates has its deletion, in an order that stops the scans first.
+    order = ['gcloud scheduler jobs delete "${NAME}"', 'gcloud run services delete ${SERVICE_NAME}', 'gcloud run services delete ${WORKER_SERVICE}',
+             'gcloud tasks queues delete ${QUEUE_NAME}', 'gcloud storage rm -r "gs://${BUCKET_NAME}"',
+             'bq --project_id="${PROJECT_ID}" rm -r -f --dataset "${PROJECT_ID}:${BIGQUERY_DATASET}"',
+             'gcloud container images delete "${IMAGE}@${DIGEST}" --force-delete-tags', 'gcloud organizations remove-iam-policy-binding ${ORG_ID}',
+             'gcloud iam roles delete CloudGaugeAdvisoryViewer --organization=${ORG_ID}', 'gcloud projects remove-iam-policy-binding ${PROJECT_ID}',
+             'gcloud iam service-accounts delete ${SA_EMAIL}']
+    positions = [block.index(command) for command in order]
+    assert positions == sorted(positions)
+    # The roles removed are the roles granted: the documented organization roles plus the custom one, and the script's project roles.
+    organization = set(re.findall(r'gcloud organizations add-iam-policy-binding \$\{ORG_ID\} .*--role="(roles/[^"]+)"', operations))
+    removed = re.search(r'for ROLE in \\\n(.*?); do\n  gcloud organizations remove-iam-policy-binding', block, re.S).group(1)
+    assert set(re.findall(r'(?<![\w/])roles/[\w.]+', removed)) == organization  # the predefined ones; the custom role's path is below
+    assert '"organizations/${ORG_ID}/roles/CloudGaugeAdvisoryViewer"' in removed
+    project = re.search(r'for ROLE in ((?:roles/\S+ ?)+); do\n  gcloud projects remove-iam-policy-binding', block).group(1).split()
+    granted = re.search(r'for role in ((?:roles/\S+ ?)+); do', script).group(1).split() + ['roles/bigquery.jobUser']
+    assert project == granted
+    assert '--member="serviceAccount:${SA_EMAIL}"' in block and 'BILLING_EXPORT' not in block  # the billing export is never CloudGauge's to delete

@@ -621,11 +621,11 @@ By following these steps, you can ensure your container images are stored and ma
 
 ## Cleanup Script
 
-This gCloud script will remove all the resources created by the tool. 
+This script removes everything a `tools/deploy.sh` deployment (Method 1) or the Console steps (Method 2) created: the scheduled scans, the two Cloud Run services, the queue, the results bucket, the export dataset, the images, the roles and the service account. A Terraform deployment (Method 3) is removed with `terraform destroy` from the same configuration instead — do not run the script on it. Two of the steps delete data you may want to keep — the results bucket (every report and the scan history) and the BigQuery export dataset — read them before running.
 
 ### Configure Your Variables
 
-Before running the script, replace the placeholder values in the first few lines with the ones you used during deployment.
+Before running the script, replace the placeholder values in the first few lines with the ones you used during deployment. The derived names are `tools/deploy.sh`'s defaults; change them if you chose others (`SERVICE`, `WORKER_SERVICE`, `QUEUE`, `BUCKET`, `SERVICE_ACCOUNT`, `IMAGE`).
 
 ```
 #!/bin/bash
@@ -634,41 +634,62 @@ Before running the script, replace the placeholder values in the first few lines
 export ORG_ID="123456789012"              # The Organization ID you granted the roles on
 export PROJECT_ID="your-gcp-project-id"   # The project CloudGauge was deployed in
 export REGION="asia-south1"               # The region you deployed to
+export BIGQUERY_DATASET=""                # The export dataset (BIGQUERY_DATASET at deployment), or empty if the export was never configured
+export SCHEDULE_NAMES=""                  # The names of the scheduled scans (the NAME part of each SCHEDULES entry), space-separated, or empty
 # --- END CONFIGURATION ---
 
 
-# Set derived variables (the names the deployment instructions use; change them if you chose others)
+# Set derived variables (the names tools/deploy.sh and the deployment instructions use; change them if you chose others)
 export SERVICE_NAME="cloudgauge"
-export WORKER_SERVICE="${SERVICE_NAME}-worker"   # a public single-service deployment has no worker
+export WORKER_SERVICE="${SERVICE_NAME}-worker"
 export QUEUE_NAME="cloudgauge-scan-queue"
 export BUCKET_NAME="cloudgauge-reports-${PROJECT_ID}"
 export SA_NAME="cloudgauge-sa"
 export SA_EMAIL="${SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
+export IMAGE="gcr.io/${PROJECT_ID}/${SERVICE_NAME}"
 
 # --- DELETION SCRIPT STARTS HERE ---
 
 echo "--- Starting Cleanup for CloudGauge in project ${PROJECT_ID} ---"
 
-# 1. Delete the two Cloud Run services (their IAM bindings go with them: the operators' IAP access,
+# 1. Delete the scheduled scans (v17): one Cloud Scheduler job per SCHEDULES entry
+for NAME in ${SCHEDULE_NAMES}; do
+  echo "Deleting Cloud Scheduler job: ${NAME}..."
+  gcloud scheduler jobs delete "${NAME}" --location=${REGION} --quiet
+done
+
+# 2. Delete the two Cloud Run services (their IAM bindings go with them: the operators' IAP access,
 #    the IAP service agent's and the service account's roles/run.invoker)
 echo "Deleting Cloud Run services: ${SERVICE_NAME}, ${WORKER_SERVICE}..."
 gcloud run services delete ${SERVICE_NAME} --region=${REGION} --platform=managed --quiet
 gcloud run services delete ${WORKER_SERVICE} --region=${REGION} --platform=managed --quiet
 
-# 2. Delete the Cloud Tasks queue (the service created it at startup)
+# 3. Delete the Cloud Tasks queue (the services create it at startup; Cloud Tasks keeps the name reserved for 3 days)
 echo "Deleting Cloud Tasks queue: ${QUEUE_NAME}..."
 gcloud tasks queues delete ${QUEUE_NAME} --location=${REGION} --quiet
 
-# 3. Delete the results bucket and everything in it: reports, status files and the per-scope
-#    scan history (the bucket's roles/storage.objectAdmin binding goes with it)
+# 4. Delete the results bucket and everything in it: every report, the status files and the per-scope scan
+#    history under scopes/ (the bucket's roles/storage.objectAdmin binding goes with it). Download what you
+#    want to keep first: gcloud storage cp -r "gs://${BUCKET_NAME}" ./cloudgauge-reports
 echo "Deleting GCS bucket: gs://${BUCKET_NAME}..."
-gsutil -m rm -r "gs://${BUCKET_NAME}"
+gcloud storage rm -r "gs://${BUCKET_NAME}"
 
-# 4. Delete the container image (Method 2 pushes it to gcr.io; see the explanation below for Method 1)
-echo "Deleting container image..."
-gcloud container images delete "gcr.io/${PROJECT_ID}/${SERVICE_NAME}" --force-delete-tags --quiet
+# 5. Delete the BigQuery export dataset (v17), when the export was configured: the scans and findings tables,
+#    the dashboards' source. Keep it if you want the history — it costs little and nothing else depends on it;
+#    then leave BIGQUERY_DATASET empty above.
+if [[ -n "${BIGQUERY_DATASET}" ]]; then
+  echo "Deleting BigQuery dataset: ${PROJECT_ID}:${BIGQUERY_DATASET}..."
+  bq --project_id="${PROJECT_ID}" rm -r -f --dataset "${PROJECT_ID}:${BIGQUERY_DATASET}"
+fi
 
-# 5. Remove the IAM bindings the prerequisites granted: the same roles, in the same order
+# 6. Delete the container images: tools/deploy.sh pushes one per deployed tag to gcr.io/PROJECT/cloudgauge
+#    (Cloud Build's staging bucket, PROJECT_ID_cloudbuild, may be deleted too: gcloud storage rm -r "gs://${PROJECT_ID}_cloudbuild")
+echo "Deleting container images under ${IMAGE}..."
+for DIGEST in $(gcloud container images list-tags "${IMAGE}" --format="get(digest)"); do
+  gcloud container images delete "${IMAGE}@${DIGEST}" --force-delete-tags --quiet
+done
+
+# 7. Remove the IAM bindings the prerequisites and the deployment granted: the same roles, in the same order
 echo "Removing IAM bindings for ${SA_EMAIL}..."
 
 # Organization-level roles, including the custom Advisory Notifications role (v14)
@@ -692,12 +713,14 @@ done
 # The custom role itself, now that nothing is bound to it
 gcloud iam roles delete CloudGaugeAdvisoryViewer --organization=${ORG_ID} --quiet
 
-# Project-level roles (on the project CloudGauge was deployed in)
-for ROLE in roles/aiplatform.user roles/cloudtasks.admin; do
+# Project-level roles (on the project CloudGauge was deployed in): Vertex AI, Cloud Tasks, the build identity (v17.2),
+# the export's and the spend records' BigQuery Job User (v17, v18.8) — the last one is absent when neither was configured
+for ROLE in roles/aiplatform.user roles/cloudtasks.admin roles/cloudbuild.builds.builder roles/bigquery.jobUser; do
   gcloud projects remove-iam-policy-binding ${PROJECT_ID} --member="serviceAccount:${SA_EMAIL}" --role="${ROLE}" --quiet
 done
 
-# 6. Delete the Service Account (its own Token Creator and Service Account User bindings go with it)
+# 8. Delete the Service Account (the bindings on the account itself go with it: its own Service Account User,
+#    and the Token Creator granted to the people who used tools/iap_token.py)
 echo "Deleting service account: ${SA_EMAIL}..."
 gcloud iam service-accounts delete ${SA_EMAIL} --quiet
 
@@ -709,15 +732,19 @@ echo "✅ Cleanup complete!"
 
 Here's a breakdown of what each command in the script does:
 
-1. **Delete Cloud Run Services**: `gcloud run services delete`  
-   * This removes the web service and the worker, stopping them from running and incurring costs. Everything granted on them disappears with them: the `roles/iap.httpsResourceAccessor` bindings of the people who could sign in, the IAP service agent's and the service account's `roles/run.invoker`. IAP itself leaves nothing behind. A public single-service deployment has no worker; the second command then reports it as not found.  
-2. **Delete Cloud Tasks Queue**: `gcloud tasks queues delete`  
-   * The service creates the Cloud Tasks queue named in `TASK_QUEUE` (`cloudgauge-scan-queue`) when it starts, if it does not exist. This command deletes that queue, and with it any scan still queued.  
-3. **Delete GCS Bucket**: `gsutil -m rm -r`  
-   * This command deletes the `cloudgauge-reports-...` bucket and everything stored inside it: the HTML/CSV reports, the status files, and the per-scope scan summaries under `scopes/` that the report's *since* line compares against. The `-m` flag helps it run faster if there are many files. The `roles/storage.objectAdmin` binding was granted on the bucket, so it goes with it.  
-4. **Delete Container Image**: `gcloud container images delete`  
-   * Method 2 builds the image with Cloud Build and stores it in Google Container Registry (`gcr.io`); this command deletes it. Method 1 (deploy from source) stores its images in the Artifact Registry repository `cloud-run-source-deploy` and creates a Cloud Build trigger for your fork; delete both from the console (**Artifact Registry** and **Cloud Build › Triggers**), as their names depend on your repository. If you followed [Forcing Image Storage to a Specific Region](#forcing-image-storage-to-a-specific-region), delete the `cloudgauge-repo` repository as well.  
-5. **Remove IAM Bindings**: `gcloud ... remove-iam-policy-binding`  
-   * This is a critical step. Before deleting the service account, remove the roles the prerequisites granted it at the **Organization** level (the twelve predefined roles and the custom `CloudGaugeAdvisoryViewer` role, which is then deleted) and at the **Project** level (`roles/aiplatform.user`, `roles/cloudtasks.admin`). This prevents "ghost" principals from showing up in your IAM policies.  
-6. **Delete Service Account**: `gcloud iam service-accounts delete`  
+1. **Delete the scheduled scans**: `gcloud scheduler jobs delete`
+   * Each `SCHEDULES` entry of the deployment is a Cloud Scheduler job named after it (`weekly-org`, …), posting to the worker's `/scheduled-scan`. They go first, so nothing starts a scan while the rest is being removed. A deployment without schedules leaves `SCHEDULE_NAMES` empty and this step does nothing.
+2. **Delete Cloud Run Services**: `gcloud run services delete`
+   * This removes the web service and the worker, stopping them from running and incurring costs. Everything granted on them disappears with them: the `roles/iap.httpsResourceAccessor` bindings of the people who could sign in, the IAP service agent's and the service account's `roles/run.invoker`. IAP itself leaves nothing behind. A public single-service deployment ([A public deployment (discouraged)](security.md#a-public-deployment-discouraged)) has no worker; the second command then reports it as not found.
+3. **Delete Cloud Tasks Queue**: `gcloud tasks queues delete`
+   * The services create the Cloud Tasks queue named in `TASK_QUEUE` (`cloudgauge-scan-queue`) when they start, if it does not exist. This command deletes that queue, and with it any scan still queued. Cloud Tasks reserves a deleted queue's name for about 3 days: a redeployment within that time needs another queue name.
+4. **Delete GCS Bucket**: `gcloud storage rm -r`
+   * This command deletes the `cloudgauge-reports-...` bucket and everything stored inside it: the HTML/CSV reports, the status files, and the per-scope scan summaries under `scopes/` that the report's *Changes since last scan* and the history page read. Copy the bucket out first if the reports are worth keeping. The `roles/storage.objectAdmin` binding was granted on the bucket, so it goes with it.
+5. **Delete the BigQuery export dataset**: `bq rm -r -f --dataset`
+   * Only when the deployment exported its scans (`BIGQUERY_DATASET`): the `scans` and `findings` tables and the dashboards built on them ([The BigQuery export](history-and-export.md#the-bigquery-export)). The dataset is the scan history in queryable form and nothing else depends on it, so keeping it is a reasonable choice — leave the variable empty and the step is skipped. The billing export the spend records read is **not** CloudGauge's and is never touched.
+6. **Delete the container images**: `gcloud container images delete`
+   * `tools/deploy.sh` builds with Cloud Build and pushes one image per deployed tag to `gcr.io/PROJECT_ID/cloudgauge`; the loop deletes every one of them. Cloud Build also keeps the uploaded sources in the `PROJECT_ID_cloudbuild` staging bucket — delete it with the command in the comment if you want nothing left. Method 2 (the Console) built instead through a Cloud Build trigger into the Artifact Registry repository `cloud-run-source-deploy`; delete both from the console (**Artifact Registry** and **Cloud Build › Triggers**), as their names depend on your repository. If you followed [Forcing Image Storage to a Specific Region](#forcing-image-storage-to-a-specific-region), delete the `cloudgauge-repo` repository as well.
+7. **Remove IAM Bindings**: `gcloud ... remove-iam-policy-binding`
+   * This is a critical step. Before deleting the service account, remove the roles the prerequisites granted it at the **Organization** level (the twelve predefined read-only roles and the custom `CloudGaugeAdvisoryViewer` role, which is then deleted) and at the **Project** level (`roles/aiplatform.user`, `roles/cloudtasks.admin`, `roles/cloudbuild.builds.builder`, and `roles/bigquery.jobUser` when the export or the spend records were configured — a role that was never granted makes the command report so, harmlessly). This prevents "ghost" principals from showing up in your IAM policies.
+8. **Delete Service Account**: `gcloud iam service-accounts delete`
    * This is the final step. After removing its permissions, you can safely delete the `cloudgauge-sa` service account itself; the Service Account User binding it held on itself (for Cloud Tasks), and any `roles/iam.serviceAccountTokenCreator` granted to a person for `tools/iap_token.py`, are deleted with it. A deployment first made by a release before v16.1 also holds a Token Creator binding on the account itself, which signed the status page's CSV link; since v16.1 the link is a route of the service and nothing is signed, so on a deployment you keep the binding can go: `gcloud iam service-accounts remove-iam-policy-binding ${SA_EMAIL} --member="serviceAccount:${SA_EMAIL}" --role="roles/iam.serviceAccountTokenCreator"`.
