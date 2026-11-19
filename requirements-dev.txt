@@ -1,4 +1,4 @@
 # Test and lint tools, on top of the runtime dependencies.
 -r requirements.txt
-pytest==9.1.1
-ruff==0.16.8
+pytest==9.2.0
+ruff==0.17.4
