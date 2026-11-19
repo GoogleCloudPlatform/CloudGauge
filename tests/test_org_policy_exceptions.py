@@ -130,7 +130,11 @@ def test_exception_rows_name_the_cause_its_reach_and_the_verdict():
         (OS_LOGIN, 'folders/2062 (Dev)', '1 project: data-lake', AR),  # web-prod re-enforced it
         (EXT_IP, 'projects/sandbox', 'the project itself', AR),
         (OS_LOGIN, 'projects/sandbox', 'tagged resources in 1 project', IR),
-        ('—', '4 other policies set below', '—', INFO)]  # web-prod's restore, F1's merged domains, data-lake's KEYS (the organization's own gap) and its out-of-table constraint
+        ('4 constraints', '3 resources below', '—', INFO)]  # web-prod's restore, F1's merged domains, data-lake's KEYS (the organization's own gap) and its out-of-table constraint
+    note = rows[-1]  # v20: the Informational line names the policies instead of showing a bare count under an empty constraint
+    assert note['Issue'] == '4 policies set below that weaken no guardrail.' and note['Below'] == 'set — weakens nothing'
+    assert note['Detail'].startswith('compute.requireOsLogin on projects/web-prod; gcp.resourceLocations on projects/data-lake; iam.allowedPolicyMemberDomains on folders/1061 (Platform); '
+                                     'iam.disableServiceAccountKeyCreation on projects/data-lake. Each tightens or restates')
     folder_row = rows[0]
     assert (folder_row['Above'], folder_row['Below']) == ('enforced', 'not enforced') and folder_row['Issue'] == 'Guardrail weakened below the scanned resource.'
     assert folder_row['Fix'].startswith('gcloud org-policies delete compute.requireOsLogin --folder=2062') and 'Require OS Login: enforced at organizations/' in folder_row['Detail']
@@ -139,7 +143,7 @@ def test_exception_rows_name_the_cause_its_reach_and_the_verdict():
     assert all(tuple(k for k in r if k != '_status') == COLUMNS for r in rows)
     # A folder scan: the folder's own effective policies are the baseline; only what is under it counts.
     folder_rows = exception_rows(F2, TABLE, {**BASELINE, OS_LOGIN: {'booleanPolicy': {'enforced': False}}}, container_facts(HIERARCHY), policies_by_container(POLICIES))
-    assert [(r['Constraint'], r['Set on']) for r in folder_rows] == [('—', '3 other policies set below')]  # OS Login is the folder's own gap now; web-prod's restore, data-lake's two
+    assert [(r['Constraint'], r['Set on']) for r in folder_rows] == [('3 constraints', '2 resources below')]  # OS Login is the folder's own gap now; web-prod's restore, data-lake's two
     # Nothing set below: no rows (the check writes the all-clear).
     assert exception_rows(ORG_NAME, TABLE, BASELINE, container_facts(HIERARCHY), {}) == []
 
@@ -151,7 +155,7 @@ def test_check_org_policy_exceptions_end_to_end(gcp, monkeypatch):
     s = Sink()
     check_org_policy_exceptions('organization', ORG, JOB, sink=s)
     record = s.by_check()[EXCEPTIONS_CHECK]
-    assert record['Status'] == AR and [r['Constraint'] for r in record['Finding']] == [OS_LOGIN, EXT_IP, OS_LOGIN, '—'] and all('_status' not in r for r in record['Finding'])
+    assert record['Status'] == AR and [r['Constraint'] for r in record['Finding']] == [OS_LOGIN, EXT_IP, OS_LOGIN, '4 constraints'] and all('_status' not in r for r in record['Finding'])
     assert [r['asset_types'] for r in gcp.assets.list_requests] == [['orgpolicy.googleapis.com/Policy'], ['cloudresourcemanager.googleapis.com/Project', 'cloudresourcemanager.googleapis.com/Folder']]
     # The Below column and the count the report derives from the record.
     assert exceptions_by_constraint([record]) == {OS_LOGIN: '2 exceptions (folders/2062 (Dev), projects/sandbox)', EXT_IP: '1 exception (projects/sandbox)'}
