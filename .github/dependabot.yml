@@ -10,6 +10,8 @@ updates:
     schedule:
       interval: weekly
       day: monday
+    cooldown:
+      default-days: 7  # a new version must be a week old before it is proposed (supply-chain hygiene; zizmor's dependabot-cooldown)
     target-branch: refactor/modular-factory
     groups:
       python-requirements:
@@ -22,6 +24,8 @@ updates:
     schedule:
       interval: weekly
       day: monday
+    cooldown:
+      default-days: 7  # a new version must be a week old before it is proposed (supply-chain hygiene; zizmor's dependabot-cooldown)
     target-branch: refactor/modular-factory
     groups:
       actions:
@@ -34,6 +38,8 @@ updates:
     schedule:
       interval: weekly
       day: monday
+    cooldown:
+      default-days: 7  # a new version must be a week old before it is proposed (supply-chain hygiene; zizmor's dependabot-cooldown)
     target-branch: refactor/modular-factory
     commit-message:
       prefix: "build(deps)"
