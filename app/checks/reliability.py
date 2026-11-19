@@ -29,7 +29,7 @@ from googleapiclient.errors import HttpError
 from app.config import SCOPES
 from app.checks.not_checked import NotChecked
 from app.services import gcp
-from app.utils import parse_timestamp, utcnow
+from app.utils import parse_timestamp, service_of, utcnow
 
 # The Essential Contacts categories every organization should have someone subscribed to:
 # security incidents, technical issues and outages, legal notices, and account suspension warnings.
@@ -133,7 +133,7 @@ def sink_destination_buckets(assets):
     for asset in assets:
         data = getattr(getattr(asset, "resource", None), "data", None) or {}
         destination = str(data.get("destination", "") if hasattr(data, "get") else "")
-        if destination.startswith("storage.googleapis.com/"):
+        if service_of(destination) == "storage.googleapis.com":
             buckets.add(destination.split("/", 1)[1].split("/", 1)[0])
     return buckets
 

@@ -488,3 +488,15 @@ def test_check_project_routing_end_to_end(gcp):
     assert [(r['Project'], r['Issue']) for r in s.by_check()[PROJECT_ROUTING_CHECK]['Finding']] == [(P, 'Log Analytics off.')]
     assert [(r['Project'], r['Skipped check'], r['Reason']) for r in s.not_checked()] == [
         (P, f'{PROJECT_ROUTING_CHECK} (the audit configuration or the views could not be read; the view rule was not applied)', 'iam down'), (P2, PROJECT_ROUTING_CHECK, 'sinks down')]
+
+
+def test_service_of_names_the_api_host_whole():
+    """v20: the callers compare the service of a resource name whole, never as a substring or prefix of the name
+    (what CodeQL rightly distrusts as a sanitiser): the asset-name form, the log-sink destination form, and neither."""
+    from app.utils import service_of
+    assert service_of('//cloudresourcemanager.googleapis.com/projects/p') == 'cloudresourcemanager.googleapis.com'
+    assert service_of('//cloudresourcemanager.googleapis.com.evil/projects/p') == 'cloudresourcemanager.googleapis.com.evil'
+    assert service_of('storage.googleapis.com/bucket') == 'storage.googleapis.com'
+    assert service_of('bigquery.googleapis.com/projects/p/datasets/d') == 'bigquery.googleapis.com'
+    assert service_of('projects/p/topics/t') == '' and service_of('') == '' and service_of(None) == ''
+

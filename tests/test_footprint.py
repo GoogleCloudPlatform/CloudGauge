@@ -87,6 +87,7 @@ def test_family_map_is_consistent_and_covers_the_versioned_types():
     assert [singular(x) for x in ('disks', 'policies', 'addresses', 'node pools', 'functions (gen 1)', 'MIGs')] == ['disk', 'policy', 'address', 'node pool', 'functions (gen 1)', 'MIG']
     assert LEAD_OF['Compute Engine'] == 'compute.googleapis.com/Instance' and LEAD_OF['Cloud Run'] == 'run.googleapis.com/Service' and LEAD_OF['GKE'] == 'container.googleapis.com/Cluster'
     assert family_of('k8s.io/Pod') == 'Kubernetes objects' and family_of('rbac.authorization.k8s.io/ClusterRoleBinding') == 'Kubernetes objects' and family_of('dataplex.googleapis.com/EntryGroup') == 'Other'
+    assert family_of('notk8s.io/Thing') == 'Other'  # v20: the group is k8s.io or one of its subdomains, not any name ending in those letters
     assert [label_of(t) for t in ('k8s.io/Pod', 'rbac.authorization.k8s.io/ClusterRoleBinding', 'networking.k8s.io/Ingress', 'networking.k8s.io/NetworkPolicy', 'k8s.io/Endpoints', 'compute.googleapis.com/Disk')] == [
         'Pods', 'ClusterRoleBindings', 'Ingresses', 'NetworkPolicies', 'Endpoints', 'disks']
     assert len(FAMILY_OF) == sum(len(types) for types in FAMILIES.values())  # no type in two families

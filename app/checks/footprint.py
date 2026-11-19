@@ -80,7 +80,8 @@ TOP = 5
 def family_of(asset_type):
     if asset_type in FAMILY_OF:
         return FAMILY_OF[asset_type]
-    return KUBERNETES if asset_type.split("/")[0].endswith("k8s.io") else "Other"
+    group = asset_type.split("/")[0]  # "k8s.io/Pod", "apps.k8s.io/Deployment": the Kubernetes API group is k8s.io or one of its subdomains
+    return KUBERNETES if group == "k8s.io" or group.endswith(".k8s.io") else "Other"
 
 
 def label_of(asset_type):

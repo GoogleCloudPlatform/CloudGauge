@@ -41,6 +41,7 @@ from app.checks.not_checked import NotChecked
 from app.checks.operations import ALERT_CONDITION_FIELDS
 from app.config import SCOPES
 from app.services import gcp
+from app.utils import service_of
 
 CHANNELS_CHECK = "Alert Notification Channels"
 SYNTHETIC_CHECK = "Synthetic and SLO Coverage"
@@ -193,7 +194,7 @@ def publisher_grant_found(policies, topic):
             continue
         if resource.endswith("/" + topic) or resource.endswith("/topics/" + tail(topic)):
             return True
-        if project and resource.startswith("//cloudresourcemanager.googleapis.com/") and resource.endswith(f"/projects/{project}"):
+        if project and service_of(resource) == "cloudresourcemanager.googleapis.com" and resource.endswith(f"/projects/{project}"):
             return True
     return False
 

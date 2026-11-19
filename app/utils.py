@@ -32,6 +32,21 @@ from google.api_core import exceptions as core_exceptions
 from app.config import LOG_DATEFMT, LOG_FORMAT, STATUS_UPDATE_INTERVAL_SECONDS
 
 
+def service_of(resource_name):
+    """The Google API host an asset or resource name belongs to, compared whole by the callers (v20).
+
+    ``"//cloudresourcemanager.googleapis.com/projects/p"`` → ``"cloudresourcemanager.googleapis.com"``;
+    ``"storage.googleapis.com/bucket"`` (a log-sink destination) → ``"storage.googleapis.com"``; a name
+    without a service → ``""``. An equality test on the result is what a classification needs; a substring
+    or prefix test on the name is what a static analyser rightly distrusts.
+    """
+    name = str(resource_name or "")
+    if name.startswith("//"):
+        return name[2:].split("/", 1)[0]
+    host = name.split("/", 1)[0]
+    return host if host.endswith(".googleapis.com") else ""
+
+
 def utcnow():
     """The current time, timezone-aware UTC. The checks call it through their module so a test can pin the clock."""
     return datetime.now(timezone.utc)

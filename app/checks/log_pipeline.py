@@ -52,7 +52,7 @@ from app.checks.operations import audit_config_assessment
 from app.checks.privileges import search_folders, search_projects
 from app.config import SCOPES, get_settings
 from app.services import gcp
-from app.utils import utcnow
+from app.utils import service_of, utcnow
 
 AUDIT_PIPELINE_CHECK = "Audit Log Pipeline"
 DUPLICATE_ROUTING_CHECK = "Duplicate Log Routing"
@@ -248,7 +248,7 @@ def writer_grant_found(policies, facts, aliases=None):
         tail = resource.split("//", 1)[-1].split("/", 1)[-1] if "//" in resource else resource  # "//logging.googleapis.com/projects/p/…" → "projects/p/…"
         if facts["name"] and (tail.endswith(facts["name"]) or facts["name"].endswith(tail) or resource.endswith("/" + facts["short"])):
             return True
-        if resource.startswith("//cloudresourcemanager.googleapis.com/"):
+        if service_of(resource) == "cloudresourcemanager.googleapis.com":
             if tail.startswith(("folders/", "organizations/")) or any(tail == f"projects/{owner}" for owner in owners):
                 return True
     return False
