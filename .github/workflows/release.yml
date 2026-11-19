@@ -17,18 +17,24 @@ on:
     tags:
       - 'v[0-9]*'
 
-permissions:
-  contents: write  # creates the release
+permissions: {}  # nothing by default; the one job asks for what it needs
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false  # two tags are two releases; neither cancels the other
 
 jobs:
   release:
     name: GitHub Release
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: write  # creates the release
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           fetch-depth: 0  # main's history, to check the tagged commit is on it
+          persist-credentials: false
       - name: The tag names the commit's VERSION and the commit is on main
         run: |
           set -eu

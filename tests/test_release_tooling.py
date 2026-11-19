@@ -115,7 +115,10 @@ def test_every_action_is_pinned_to_a_commit_with_its_version_named():
 def test_the_workflows_ask_for_the_least_they_need():
     ci, release = workflow('ci.yml'), workflow('release.yml')
     assert re.search(r'^permissions:\n  contents: read\n', ci, re.M)
-    assert re.search(r'^permissions:\n  contents: write', release, re.M) and 'pull-requests' not in release
+    assert re.search(r'^permissions: \{\}', release, re.M) and re.search(r'^    permissions:\n      contents: write', release, re.M) and 'pull-requests' not in release
+    for path in sorted(WORKFLOWS.glob('*.yml')):  # a checkout never leaves the token in the working tree (zizmor: artipacked)
+        text = path.read_text(encoding='utf-8')
+        assert text.count('actions/checkout@') == text.count('persist-credentials: false'), path.name
     assert re.search(r"^on:\n  push:\n    tags:\n      - 'v\[0-9\]\*'\n", release, re.M)
     assert 'pull_request' not in release  # a tag publishes; nothing else
 
