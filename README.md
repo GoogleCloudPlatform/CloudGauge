@@ -1,4 +1,6 @@
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+[![CI](https://github.com/GoogleCloudPlatform/CloudGauge/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/GoogleCloudPlatform/CloudGauge/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/GoogleCloudPlatform/CloudGauge?include_prereleases&sort=semver)](https://github.com/GoogleCloudPlatform/CloudGauge/releases)
 
 # **CloudGauge**
 
