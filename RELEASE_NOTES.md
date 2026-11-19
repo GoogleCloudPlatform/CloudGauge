@@ -8,7 +8,111 @@ the test suite running inside the image, a zero-traffic canary revision scanned
 against a real organization, promotion, and a production scan compared fact for
 fact with the previous version's report.
 
-Versions are the image tags (`v5` … `v19.3`); the commit is the one that shipped.
+Versions are the image tags (`v5` … `v20.0.0-rc.1`); the commit is the one that shipped. From v20 the
+versions are also git tags, and a tag publishes the GitHub Release (docs/development.md › Cut a release).
+
+## v20.0.0-rc.1 — The GA candidate
+
+The release that moves the modular CloudGauge onto `main`: the application that
+has been the shipped one since v5 replaces the 2025 single-file original as the
+repository's default branch, with a release candidate soaked on the scheduled
+scans before `v20.0.0` is tagged. No new check — the check plan is the v19.3
+plan, pinned by the tests at 77 functions for an organization and 74 for a
+folder or a project — no new role, no new API. What changed is around the
+application: how a scan that Cloud Tasks will not take is reported, how the
+report prints, how the history page reaches a report, how the repository is
+built, tested, released and documented, and what a deployer may rely on.
+
+### Added
+
+- **Scan not queued (503).** Every `create_task` retries a transient Cloud
+  Tasks answer — `UNAVAILABLE` (a `Stream removed` reached a person as a 500
+  once), `DEADLINE_EXCEEDED`, `INTERNAL` — with exponential backoff for up to
+  30 seconds; the scan task is named `scan-<job id>`, so the retry after a lost
+  answer meets *already exists* and never starts a scan twice. What still fails
+  is a 503 page in the 409 page's shape — the queue, the answer, a **Try again**
+  button, `Retry-After: 60`, JSON for a client that asks — and nothing is
+  started or noted. `/scheduled-scan` answers the same 503; the job records a
+  failed run and its next scheduled run is the next attempt (the deployments
+  create the jobs without retries).
+- **Print or save as PDF** on the report header: the whole report through the
+  browser's print dialog — the Scorecard first, then the Overview and each
+  category on its own sheet, every accordion open with its title kept with its
+  first rows, rows never split, a table's header row repeated when it breaks.
+  The Scorecard's own **Print** keeps printing that page alone. A 12-project
+  synthetic report prints on 79 sheets.
+- **Every scan on the history page opens its report**: the scan's date is the
+  link, a **Report · CSV** column sits before the wide *Changes* column, each
+  dot of the chart opens the scan it stands for, and **Open latest report** is
+  in the page head. The link was there since v17 — as the last of eight
+  columns behind a horizontal scrollbar; the page is 1,200 px wide now and all
+  eight fit a laptop.
+- **CI** (`.github/workflows/ci.yml`): the lint and the suite on Python 3.11
+  (the image) and 3.13, `terraform fmt`/`init`/`validate`, the application and
+  test images built with the suite run inside and the container served, on
+  every pull request and push — the four jobs are the required status checks
+  of `main`. **Release** (`.github/workflows/release.yml`): a tag `vX` on a
+  merged commit of `main` publishes the GitHub Release with that version's
+  section of these notes as the body (`tools/release_notes.py`), a pre-release
+  when the tag carries a suffix. `SECURITY.md`, Dependabot, CODEOWNERS, issue
+  and pull-request templates, the rulesets of `main` and of the `v*` tags as
+  files under `.github/rulesets/`.
+- **`VERSION`**: the release number lives in one file at the repository root;
+  `app/config.py` reads it, the image copies it, `terraform/versions.tf`
+  carries the same number (a `provider_meta` block takes constants only) and
+  the tests hold the two to the newest section of these notes.
+- **`docs/`**: the README is a 100-line landing page; the depth moved,
+  verbatim, into eight pages — the catalogue, the architecture, the operations
+  guide, security, history and export, development, the roadmap, and
+  **`docs/stability.md`**: the stability surface (configuration, Terraform
+  variables and outputs, roles and APIs, the export schema, the CSV columns,
+  every check name, the routes) and the rule a release follows from v20.0.0 —
+  removing or renaming any of them is announced a minor release ahead and
+  ships only in a major; additions are free.
+
+### Changed
+
+- **The documentation was scrubbed claim by claim against the code** (~515
+  claims, 45 corrected): the Troubleshooting entries name the worker
+  (`cloudgauge-worker`, 2 GiB; `SCAN_SHARD_SIZE` is the lever that survives a
+  redeploy) instead of a service that never existed in this line; the VPC-SC
+  build recipe builds through `cloudbuild.yaml`; the prerequisites create the
+  bucket with `gcloud storage`; the load-test example sets `WORKER_URL`; the
+  public-deployment snippet sets it before the start that needs it; Method 3's
+  build command runs through `eval` from the repository root; 27 APIs; Python
+  3.11 or 3.13. **The cleanup script undoes the v20 deployment** — scheduled
+  scans, both services, the queue, the bucket, the export dataset as an opt-in
+  step, every image, the twelve organization roles and the custom one, all four
+  project roles, the account — and a test holds it to `tools/deploy.sh`.
+- The Advisory Notifications row that pointed at "the README" points at
+  `docs/operations.md › Common Prerequisites`; the Terraform outputs and the
+  deploy script's notes point at the pages that hold their sections.
+
+### Removed
+
+- **`tests/legacy/`** — the frozen pre-refactor application and its beta branch
+  (7,000 lines) and the fixtures built on them. Of the 48 tests that compared
+  the two applications, the ones that encode a contract now state it: the HTTP
+  contract of the web routes (`tests/test_api_contract.py`), the pinned URL
+  map, view resolution and `url_for`, the production startup, the worker's
+  writes, and the pinned check plan. A guard test forbids a reference to the
+  frozen modules from growing back.
+
+### Tests
+
+- 1,347 tests. New: the enqueue retry and the 503 (14), the release tooling and
+  the workflows (14), the pinned check plan, URL map and startup, the print
+  path, the history links, the cleanup script against the deploy script, the
+  frozen-module guard. The synthetic quota test's intermittent failure is
+  gone: a project named by number is the same project.
+
+### Upgrade notes
+
+Nothing to enable or grant. The scan task is named now, which changes nothing
+a deployment can see. A deployment made from this tag runs the v19.3 checks;
+the Changes card has nothing new to flag. The image tag is the git tag from
+here on (`TAG=v20.0.0-rc.1 tools/deploy.sh`, `?ref=v20.0.0-rc.1` for Terraform)
+and the short hash still works.
 
 ## v19.3 — Finish what the report points at
 

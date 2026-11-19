@@ -262,7 +262,7 @@ def test_the_footer_names_the_release_that_rendered_the_report():
     footer = re.search(r'<div class="sidebar-foot">(.*?)</div>', html).group(1)
     assert re.fullmatch(r'<span class="sidebar-foot-label">Generated</span><time>\d{4}-\d\d-\d\d \d\d:\d\d UTC</time>'
                         rf'<span class="version">CloudGauge v{re.escape(VERSION)}</span>', footer), footer
-    assert html.count(f'CloudGauge v{VERSION}') == 1 and re.fullmatch(r'\d+(\.\d+)*', VERSION)
+    assert html.count(f'CloudGauge v{VERSION}') == 1 and re.fullmatch(r'\d+(\.\d+)*(-rc\.\d+)?', VERSION)  # a release candidate reads 20.0.0-rc.1 (v20)
 
 
 # --- Layout for large organizations (plan item 6b) ---
