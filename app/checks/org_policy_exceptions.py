@@ -260,13 +260,24 @@ def exception_rows(scope_name, best_practices, baseline, containers, set_policie
                                f"a scoped exception by design; confirm the tag and who can attach it.",
                      "Fix": f"gcloud org-policies describe {constraint} {restore_command(container, facts['kind'], facts['id'], constraint).split(' ')[-1]}  # review the condition and the tag's IAM",
                      "_status": INVESTIGATION})
-    set_below = sum(len(policies) for container, policies in set_policies.items() if container in below)
-    others = set_below - len(groups) - len(conditional)
-    if others > 0:
-        rows.append({"Constraint": "—", "Set on": f"{others} other polic{'y' if others == 1 else 'ies'} set below", "Above": "—", "Below": "—", "Reaches": "—",
-                     "Issue": "Policies set below that weaken no guardrail.",
-                     "Detail": "They tighten or restate the scanned resource's policy, name constraints the best-practice table does not, address a gap the scanned resource has itself "
-                               "(counted in the Organization Policies table), or reach no project. Nothing to fix.",
+    # The policies set below that weaken nothing: one Informational line that names them (v20 — the line used to show "—" for
+    # the constraint and a bare count, which read like a finding with a hole in it).
+    other = sorted((constraint, container) for container in below for constraint in set_policies.get(container, {})
+                   if (constraint, container) not in groups and (constraint, container) not in conditional)
+    if other:
+        def label(container):
+            return containers[container]["label"] if container in containers else container
+        constraints = sorted({constraint for constraint, _ in other})
+        places = sorted({label(container) for _, container in other})
+        listing = "; ".join(f"{constraint} on {label(container)}" for constraint, container in other[:10])
+        if len(other) > 10:
+            listing += f"; and {len(other) - 10} more"
+        rows.append({"Constraint": constraints[0] if len(constraints) == 1 else f"{len(constraints)} constraints",
+                     "Set on": places[0] if len(places) == 1 else f"{len(places)} resources below",
+                     "Above": "—", "Below": "set — weakens nothing", "Reaches": "—",
+                     "Issue": f"{len(other)} polic{'y' if len(other) == 1 else 'ies'} set below that weaken no guardrail.",
+                     "Detail": f"{listing}. Each tightens or restates the scanned resource's policy, names a constraint the best-practice table does not, "
+                               "addresses a gap the scanned resource has itself (counted in the Organization Policies table), or reaches no project. Nothing to fix.",
                      "Fix": f"gcloud asset list --{scope_name.split('/')[0][:-1]}={tail(scope_name)} --asset-types={POLICY_TYPE} --content-type=resource", "_status": INFORMATIONAL})
     return rows
 
@@ -315,6 +326,8 @@ def exceptions_by_constraint(findings):
             continue
         for row in record.get("Finding") or []:
             constraint, where = row.get("Constraint"), row.get("Set on")
+            if row.get("Above") == "—":  # the Informational line about the policies that weaken nothing (v20 names them; it is not an exception)
+                continue
             if constraint and constraint != "—" and where:
                 found.setdefault(constraint, []).append(where)
     return {constraint: f"{len(places)} exception{'s' if len(places) != 1 else ''} ({', '.join(places[:TOP])}{f' +{len(places) - TOP}' if len(places) > TOP else ''})" for constraint, places in found.items()}
