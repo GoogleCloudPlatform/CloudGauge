@@ -32,7 +32,7 @@
     <style>
 {% include "_design.css" %}
         body { min-height: 100vh; padding: 32px 24px 48px; }
-        .page { width: 100%; max-width: 1040px; margin: 0 auto; display: flex; flex-direction: column; gap: 16px; }
+        .page { width: 100%; max-width: 1200px; margin: 0 auto; display: flex; flex-direction: column; gap: 16px; }  /* v20: eight columns fit a laptop without a scrollbar */
         .notice { width: 100%; }
         .brand { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; font-size: 13px; font-weight: 600; letter-spacing: -0.01em; color: var(--ink); }
         .signed-in { font-weight: 400; letter-spacing: 0; font-size: 12px; color: var(--muted); overflow-wrap: anywhere; text-align: right; }
@@ -47,13 +47,18 @@
         .chart .line { fill: none; stroke: var(--ink); stroke-width: 1.5; stroke-linejoin: round; stroke-linecap: round; }
         .chart .value { font: 500 11px var(--font-mono); fill: var(--ink); }
         .chart .dot { fill: var(--surface, #fff); stroke: var(--ink); stroke-width: 1.2; }
+        .chart .hit { fill: transparent; stroke: none; }  /* a larger target around each dot: the dot links to that scan's report (v20) */
+        .chart a:hover .dot, .chart a:focus .dot { stroke-width: 2.2; }
         .legend { display: flex; flex-wrap: wrap; gap: 8px 20px; margin-top: 10px; font-size: 13px; color: var(--body); }
         .legend-item { display: inline-flex; align-items: center; gap: 8px; }
         .legend-item svg { display: block; }
         .legend-item .sample { stroke: var(--ink); stroke-width: 1.5; fill: none; }
         .legend-item .mono { color: var(--muted); font-size: 12px; }
         .table-wrap { overflow-x: auto; }
-        .scans-table td.scan-when { white-space: nowrap; }
+        .scans-table td.scan-when time { white-space: nowrap; }  /* the date on one line; the requester line below it wraps (v20) */
+        .scans-table td.scan-when time a { color: var(--ink); font-weight: 500; }
+        .scans-table td.report { white-space: nowrap; }
+        .page-head .actions { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; }
         .scans-table td.counts { white-space: nowrap; font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
         .scans-table .who { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
         .score { font-family: var(--font-mono); font-variant-numeric: tabular-nums; font-weight: 500; }
@@ -77,7 +82,10 @@
                 <p class="scope-line">{{ history.scope }} {{ history.scope_id }}</p>
                 {% if history.span_text %}<p class="span-line">{{ history.span_text }}</p>{% endif %}
             </div>
-            <a class="btn btn-outline" href="/">Start a scan</a>
+            <div class="actions">
+{% if history.entries %}                <a class="btn btn-outline" href="/report/{{ history.entries[0].job_id|urlencode }}/{{ history.scope_id|urlencode }}">Open latest report</a>
+{% endif %}                <a class="btn btn-outline" href="/">Start a scan</a>
+            </div>
         </header>
 {% if not history.entries %}
         <section class="card">
@@ -101,8 +109,8 @@
                 {% endif %}
             {% endfor %}
             {% for line in history.chart.lines %}
-                {% for x, y, title in line.markers %}
-                <circle class="dot" cx="{{ x }}" cy="{{ y }}" r="2.4"><title>{{ title }}</title></circle>
+                {% for x, y, title, job_id in line.markers %}
+                <a href="/report/{{ job_id|urlencode }}/{{ history.scope_id|urlencode }}"><circle class="hit" cx="{{ x }}" cy="{{ y }}" r="7"></circle><circle class="dot" cx="{{ x }}" cy="{{ y }}" r="2.4"></circle><title>{{ title }} — open the report</title></a>
                 {% endfor %}
             {% endfor %}
             </svg>
@@ -116,15 +124,16 @@
             <h2>Scans</h2>
             <div class="table-wrap">
             <table class="data-table scans-table">
-                <thead><tr><th>Scan</th>{% for pillar in history.pillars %}<th class="num">{{ pillar }}</th>{% endfor %}<th class="num" title="Action Required · Investigation Recommended · Compliant · Errors">Checks</th><th>Changes since the scan before</th><th>Report</th></tr></thead>
+                <thead><tr><th>Scan</th>{% for pillar in history.pillars %}<th class="num">{{ pillar }}</th>{% endfor %}<th class="num" title="Action Required · Investigation Recommended · Compliant · Errors">Checks</th><th>Report</th><th>Changes since the scan before</th></tr></thead>
                 <tbody>
                 {% for entry in history.entries %}
                     <tr>
-                        <td class="scan-when"><time>{{ entry.generated_at }}</time><br><span class="who">{{ entry.requested_by or "requester unknown" }} · v{{ entry.release or "?" }}{% if entry.total_projects is not none %} · {{ "{:,}".format(entry.total_projects) }} project{{ '' if entry.total_projects == 1 else 's' }}{% endif %}</span></td>
+                        <td class="scan-when"><time><a href="/report/{{ entry.job_id|urlencode }}/{{ history.scope_id|urlencode }}" title="Open this scan's report">{{ entry.generated_at }}</a></time><br><span class="who">{{ entry.requested_by or "requester unknown" }} · v{{ entry.release or "?" }}{% if entry.total_projects is not none %} · {{ "{:,}".format(entry.total_projects) }} project{{ '' if entry.total_projects == 1 else 's' }}{% endif %}</span></td>
                     {% for pillar in history.pillars %}
                         <td class="num">{% if entry.scores[pillar] is not none %}<span class="score">{{ entry.score_text(pillar) }}</span>{% else %}<span class="score-none">{{ entry.score_text(pillar) }}</span>{% endif %}</td>
                     {% endfor %}
                         <td class="num counts"><span class="dot dot-action-required"></span> {{ entry.action_count }} <span class="dot dot-investigation"></span> {{ entry.investigation_count }} <span class="dot dot-compliant"></span> {{ entry.compliant_count }} <span class="dot dot-error"></span> {{ entry.error_count }}</td>
+                        <td class="report"><a href="/report/{{ entry.job_id|urlencode }}/{{ history.scope_id|urlencode }}">Open report</a> · <a href="/report/{{ entry.job_id|urlencode }}/{{ history.scope_id|urlencode }}/csv">CSV</a></td>
                         <td class="prose">
                         {% if entry.first %}<ul class="flips"><li class="first">First scan on record</li></ul>
                         {% elif not entry.flips %}<ul class="flips"><li class="first">No status changes</li></ul>
@@ -133,7 +142,6 @@
                             {% if entry.more_flips %}<details class="cell-more"><summary>{{ entry.more_flips }} more</summary><ul class="flips">{% for flip in entry.flips[3:] %}<li>{{ flip }}</li>{% endfor %}</ul></details>{% endif %}
                         {% endif %}
                         </td>
-                        <td class="nowrap"><a href="/report/{{ entry.job_id|urlencode }}/{{ history.scope_id|urlencode }}">Open report</a></td>
                     </tr>
                 {% endfor %}
                 </tbody>

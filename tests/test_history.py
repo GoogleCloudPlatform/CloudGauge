@@ -88,9 +88,10 @@ def test_the_chart_draws_one_monochrome_line_per_pillar_oldest_left():
     # Three lines end at 100 %: their labels are spread 13 units apart instead of being drawn over each other.
     assert [(line.pillar, line.last_y, line.label_y) for line in chart.lines] == [
         ('Stability', 12.0, 12.0), ('Security', 102.0, 102.0), ('Operations', 12.0, 25.0), ('Efficiency', 12.0, 38.0)]
-    # The right padding holds the longest label; one dot per assessed scan carries a tooltip without any script.
-    assert lines['Stability'].markers == ((36.0, 12.0, '2026-10-06 06:00 UTC · Stability 100%'), (316.0, 192.0, '2026-10-13 06:00 UTC · Stability 0%'),
-                                          (596.0, 12.0, '2026-10-20 06:00 UTC · Stability 100%'))
+    # The right padding holds the longest label; one dot per assessed scan carries a tooltip without any script and, since v20,
+    # the job it links to.
+    assert lines['Stability'].markers == ((36.0, 12.0, '2026-10-06 06:00 UTC · Stability 100%', 'job-1'), (316.0, 192.0, '2026-10-13 06:00 UTC · Stability 0%', 'job-2'),
+                                          (596.0, 12.0, '2026-10-20 06:00 UTC · Stability 100%', 'job-3'))
     assert len(lines['Operations'].markers) == 2
     assert chart.ticks == ((192.0, '0'), (147.0, '25'), (102.0, '50'), (57.0, '75'), (12.0, '100'))
     assert chart.labels == ((36.0, '2026-10-06'), (316.0, '2026-10-13'), (596.0, '2026-10-20'))
@@ -137,7 +138,16 @@ def test_the_history_page_lists_the_scans_newest_first_with_links_to_their_repor
     page = client.get(f'/history/{SCOPE}/{SCOPE_ID}').get_data(as_text=True)
     assert '<title>Scan history: Organization 123456789</title>' in page and '<h1>Scan history</h1>' in page
     assert '3 scans, 2026-10-06 to 2026-10-20' in page and '<h2>Scores over time</h2>' in page and '<polyline class="line"' in page
-    assert re.findall(r'href="/report/(job-\d)/123456789"', page) == ['job-3', 'job-2', 'job-1']
+    # v20: the scan's date, the Report cell and the chart's dots all open the report (the Report cell sits before the wide
+    # prose column, so it is in view without scrolling); the newest report is one click from the page head.
+    head, table = page.split('<h2>Scores over time</h2>')[0], page.split('<table class="data-table scans-table">')[1]
+    assert '<a class="btn btn-outline" href="/report/job-3/123456789">Open latest report</a>' in head
+    assert re.findall(r'<time><a href="/report/(job-\d)/123456789" title="Open this scan.s report">', table) == ['job-3', 'job-2', 'job-1']
+    assert re.findall(r'<td class="report"><a href="/report/(job-\d)/123456789">Open report</a> · <a href="/report/\1/123456789/csv">CSV</a></td>', table) == ['job-3', 'job-2', 'job-1']
+    assert re.search(r'<th[^>]*>Checks</th><th>Report</th><th>Changes since the scan before</th>', page)
+    chart = page.split('<h2>Scores over time</h2>')[1].split('</svg>')[0]
+    assert re.findall(r'<a href="/report/(job-\d)/123456789"><circle class="hit"', chart)[:3] == ['job-1', 'job-2', 'job-3']  # oldest first, per pillar
+    assert '— open the report</title></a>' in chart
     assert 'schedule: weekly-org · v17 · 4 projects' in page and 'requester unknown · v16.1' in page
     assert 'First scan on record' in page and 'Public GCS Buckets: Compliant → Action Required' in page and '<summary>1 more</summary>' in page
     assert '<span class="score">50%</span>' in page and '<span class="score-none">Not assessed</span>' in page
