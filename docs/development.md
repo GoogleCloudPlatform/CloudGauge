@@ -6,7 +6,7 @@ In this page: [Local Development & Testing](#local-development--testing) · [Cus
 
 ## Local Development & Testing
 
-Requires Python 3.11.
+Requires Python 3.11 (the image's interpreter) or 3.13 (the other one CI runs the suite on).
 
 ```
 python3 -m venv .venv && source .venv/bin/activate
@@ -21,7 +21,7 @@ export PROJECT_ID=... LOCATION=... TASK_QUEUE=... RESULTS_BUCKET=... SERVICE_ACC
 python run.py
 ```
 
-Scans are always executed through Cloud Tasks, which must reach a public worker URL. To start scans from a local instance, set `WORKER_URL` to a deployed CloudGauge service.
+Scans are always executed through Cloud Tasks, which must reach the worker's URL from Google Cloud. To start scans from a local instance, set `WORKER_URL` to a deployed CloudGauge worker service (Cloud Tasks reaches it through `--ingress internal`); the task carries the service account's OIDC token, so your account needs `roles/iam.serviceAccountUser` on that account, as the services themselves have.
 
 **Run the tests.** The suite uses in-memory fakes for GCS, Cloud Tasks, and the Google APIs, so it needs no credentials or network access.
 
@@ -32,9 +32,9 @@ pytest tests/test_smoke.py     # quick pre-deploy smoke tests
 ruff check --select E9,F63,F7,F82,F401,F811 app tests tools cloudgauge.py run.py
 ```
 
-**Continuous integration.** `.github/workflows/ci.yml` runs the same lint and suite on Python 3.11 (the image) and 3.13, `terraform fmt -check` / `init -backend=false` / `validate` on `terraform/`, and the container build below with the suite inside it, on every pull request and every push to `main`. The four jobs — `tests (3.11)`, `tests (3.13)`, `terraform`, `docker` — are the required status checks of `main`.
+**Continuous integration.** `.github/workflows/ci.yml` runs the same lint and suite on Python 3.11 (the image) and 3.13, `terraform fmt -check` / `init -backend=false` / `validate` on `terraform/`, and the container build below with the suite inside it — then serves the image and requests its UI — on every pull request and every push to `main`. The four jobs — `tests (3.11)`, `tests (3.13)`, `terraform`, `docker` — are the required status checks of `main`.
 
-**Test the container.** This is what the `test` step in `cloudbuild.yaml` runs:
+**Test the container.** These are the `build`, `build-tests` and `test` steps of `cloudbuild.yaml` (and of CI's `docker` job):
 
 ```
 docker build -t cloudgauge .
@@ -42,7 +42,7 @@ DOCKER_BUILDKIT=1 docker build -f Dockerfile.test --build-arg APP_IMAGE=cloudgau
 docker run --rm cloudgauge-test
 ```
 
-**Cut a release.** The release number is written in one file, `VERSION` at the repository root (v20): `app/config.py` reads it and the image copies it. A release is one pull request that bumps it, bumps the same number in `terraform/versions.tf`'s `module_name` (a `provider_meta` block takes constants only, so it cannot read the file), and adds the release's `## vX — …` section at the top of `RELEASE_NOTES.md`; `tests/test_packaging.py` and `tests/test_terraform.py` check that the three agree, because the report's footer shows that version and every scan summary records it (it is how a scan tells a check new to the release from one that had nothing to check). Once it is merged, the tag publishes the release: `git fetch origin main && git tag -a v20.0.0 origin/main -m "v20.0.0" && git push origin v20.0.0` — `.github/workflows/release.yml` checks that the tag names that commit's `VERSION` and that the commit is on `main`, takes the release's section of the notes as the body (`tools/release_notes.py`) and creates the GitHub Release, a pre-release when the tag carries a suffix (`v20.0.0-rc.1`). Nothing is built by the release: every deployment method builds the image in the deployer's project from the tagged source. Nothing at runtime reads the release notes — the app image leaves out every `.md` file — and a checkout without them skips that check rather than failing. Pull-request titles are [Conventional Commits](https://www.conventionalcommits.org/) (`feat:`, `fix:`, `docs:`, `ci:`, `build:`, `chore:`; `feat!:` for a change to the stability surface): the squash commit carries the title, so `git log main` reads as a changelog between two tags.
+**Cut a release.** The release number is written in one file, `VERSION` at the repository root (v20): `app/config.py` reads it and the image copies it. A release is one pull request that bumps it, bumps the same number in `terraform/versions.tf`'s `module_name` (a `provider_meta` block takes constants only, so it cannot read the file), and adds the release's `## vX — …` section at the top of `RELEASE_NOTES.md`; `tests/test_packaging.py` and `tests/test_terraform.py` check that the three agree, because the report's footer shows that version and every scan summary records it (it is how a scan tells a check new to the release from one that had nothing to check). Once it is merged, the tag publishes the release: `git fetch origin main && git tag -a v20.0.0 origin/main -m "v20.0.0" && git push origin v20.0.0` — `.github/workflows/release.yml` checks that the tag names that commit's `VERSION` and that the commit is on `main`, takes the release's section of the notes as the body (`tools/release_notes.py`) and creates the GitHub Release, a pre-release when the tag carries a suffix (`v20.0.0-rc.1`). Nothing is built by the release: every deployment method builds the image in the deployer's project from the tagged source. Nothing at runtime reads the release notes — the app image leaves out every `.md` file — and a checkout without them skips that check rather than failing. Pull-request titles are [Conventional Commits](https://www.conventionalcommits.org/) (`feat:`, `fix:`, `docs:`, `ci:`, `build:`, `refactor:`, `test:`, `chore:`; `feat!:` for a change to the stability surface): the squash commit carries the title, so `git log main` reads as a changelog between two tags.
 
 ## Customising the policy table
 

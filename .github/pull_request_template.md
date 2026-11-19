@@ -2,7 +2,7 @@
 Title: a Conventional Commit line — it becomes the squash commit and the changelog entry.
   feat: … | fix: … | docs: … | ci: … | build: … | refactor: … | test: … | chore: …
   A breaking change to the stability surface (env vars, Terraform variables, roles/APIs, the BigQuery schema,
-  CSV columns, check names) is `feat!:` and says what breaks.
+  CSV columns, check names, HTTP routes) is `feat!:` and says what breaks.
 -->
 
 ## What and why
@@ -21,4 +21,4 @@ Title: a Conventional Commit line — it becomes the squash commit and the chang
 
 ## Stability surface
 
-<!-- "unchanged", or what changed in env vars, Terraform variables, roles/APIs, the BigQuery schema, CSV columns, check names. -->
+<!-- "unchanged", or what changed in env vars, Terraform variables, roles/APIs, the BigQuery schema, CSV columns, check names, HTTP routes. -->

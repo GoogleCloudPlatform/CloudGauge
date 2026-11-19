@@ -153,6 +153,6 @@ def test_a_scheduled_scan_that_cannot_be_queued_is_a_503_for_cloud_scheduler(tes
                                    'answer': 'retried for 0 s: 503 Stream removed'}
     assert gcp.tasks.tasks == [] and 'schedules/project/web-prod.json' not in gcp.bucket.objects
     assert "scheduled scan 'weekly' of project web-prod could not be queued" in caplog.text
-    # Cloud Scheduler's retry of the job finds the scope free.
+    # The job's next run (the deployments create it without retries) finds the scope free.
     gcp.tasks.create_task_errors = []
     assert http.post('/scheduled-scan', json={'scope': 'project', 'scope_id': 'web-prod', 'name': 'weekly'}).status_code == 202

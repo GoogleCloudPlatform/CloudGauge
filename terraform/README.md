@@ -11,11 +11,11 @@ cd terraform
 cp terraform.tfvars.example terraform.tfvars   # project_id, operators, …
 terraform init
 terraform apply                                 # 1. the foundation: APIs, account, roles, bucket, queue, dataset
-$(terraform output -raw build_command)          # 2. the image, built and tested by Cloud Build as the account (run from the repository root)
-terraform apply -var image_tag=$(git rev-parse --short HEAD)   # 3. the two services, IAP, access, schedules
+cd .. && eval "$(terraform -chdir=terraform output -raw build_command)"   # 2. the image, built and tested by Cloud Build as the account (from the repository root)
+terraform -chdir=terraform apply -var image_tag=$(git rev-parse --short HEAD)   # 3. the two services, IAP, access, schedules
 ```
 
-`terraform output next_step` says what comes next at each point. Put `image_tag` in `terraform.tfvars` once it is known, and a release is `terraform apply` with the new tag after the same build command.
+`terraform output next_step` says what comes next at each point (`build_command` holds a `$(git rev-parse --short HEAD)` for the tag, which is why it is run through `eval` and from the repository root, where `cloudbuild.yaml` is). Put `image_tag` in `terraform.tfvars` once it is known, and a release is `terraform apply` with the new tag after the same build command.
 
 Credentials: Application Default Credentials (`gcloud auth application-default login`) of an account that can create the resources in the project — and grant roles on the organization if `organization_id` is set. For shared state add a backend, e.g. in `backend.tf`:
 
@@ -32,7 +32,7 @@ terraform {
 
 | | |
 |---|---|
-| APIs | the 25 APIs `tools/deploy.sh` enables (never disabled on destroy) |
+| APIs | the 27 APIs `tools/deploy.sh` enables (never disabled on destroy) |
 | Service account | `cloudgauge-sa` with `roles/aiplatform.user`, `roles/cloudtasks.admin`, `roles/cloudbuild.builds.builder` (and `roles/bigquery.jobUser` with the export or the billing export) on the project, Service Account User on itself |
 | Bucket | `cloudgauge-reports-<project>` in the region, uniform access, public access prevented; the account is Object Admin |
 | Queue | the Cloud Tasks queue, with the limits the services expect (`scan_max_concurrent_shards`, `task_max_attempts`, 30 s–10 min back-off) |
