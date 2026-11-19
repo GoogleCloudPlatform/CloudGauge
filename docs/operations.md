@@ -25,7 +25,7 @@ Do the **Common Prerequisites** once, then deploy with **Method 1** (the script;
    * A Google Cloud Project with billing enabled.  
    * [gcloud CLI](https://cloud.google.com/sdk/install) installed, current (`gcloud components update` — `--iap` is a recent flag) and authenticated (`gcloud auth login`).  
    * An account that is **Owner** of that project: the setup enables APIs, creates the service account and grants its project roles, creates the bucket, runs Cloud Build, deploys to Cloud Run and sets the IAP policy (`roles/iap.admin`, part of Owner). The organization-level roles in step 2 additionally need someone who can grant roles on the organization.
-   * Run the following two commands to enable all necessary APIs (`tools/deploy.sh` does this too). Two, because gcloud enables at most 20 APIs per command — first what CloudGauge runs on, then what it reads:
+   * Run the following commands to enable all necessary APIs (`tools/deploy.sh` does this too). Three, because gcloud enables at most 20 APIs per command — first what CloudGauge runs on, then what it reads, then what the releases since v17 added:
 
    ```
    gcloud services enable \
@@ -162,9 +162,10 @@ Do the **Common Prerequisites** once, then deploy with **Method 1** (the script;
 ```
 3. **Create GCS Bucket** (`tools/deploy.sh` creates it in the services' region, with uniform bucket-level access, if it is missing):
 ```
+export REGION="asia-south1"    # the region the services will be deployed in
 export BUCKET_NAME="cloudgauge-reports-${PROJECT_ID}"
 
-gsutil mb -p ${PROJECT_ID} gs://${BUCKET_NAME}
+gcloud storage buckets create gs://${BUCKET_NAME} --project=${PROJECT_ID} --location=${REGION} --uniform-bucket-level-access
 
 gcloud storage buckets add-iam-policy-binding gs://${BUCKET_NAME} --member="serviceAccount:${SA_EMAIL}" --role="roles/storage.objectAdmin"
 ```
@@ -211,7 +212,7 @@ It ends with the URL to open. Both services are told `WORKER_URL` = Cloud Run's 
 | `BIGQUERY_DATASET` | – | Export every finished scan to this BigQuery dataset (v17): the script creates it in `REGION` if missing, grants the service account WRITER on it and `roles/bigquery.jobUser` on the project, and sets the variable on both services ([History and analytics](history-and-export.md#history-and-analytics)). |
 | `BILLING_EXPORT` | – | The BigQuery dataset the billing account exports to, `<project>.<dataset>` (v18.8, [Spend](history-and-export.md#spend)): the script grants the service account READER on it when it is in `PROJECT_ID` (the dataset's owner does otherwise) and `roles/bigquery.jobUser` on the project, and sets the variable on both services. `SPEND_ANOMALY_FLOOR` (a number) rides along. |
 | `SCHEDULES` | – | Scheduled scans (v17), semicolon-separated `NAME=SCOPE/SCOPE_ID@CRON` with the cron in UTC: `"weekly-org=organization/123456789012@30 0 * * 1"`. One Cloud Scheduler job per entry, created or updated, posting to the worker's `/scheduled-scan` as the service account. |
-| `SKIP_SETUP=1`, `SKIP_BUILD=1` | – | Skip step 1 (updating a deployment that works); skip step 2 and deploy `IMAGE:TAG` as it is. |
+| `SKIP_SETUP=1`, `SKIP_BUILD=1` | – | Skip step 1 and the grants of steps 6 and Spend (updating a deployment that works; the variables are still set on the services); skip step 2 and deploy `IMAGE:TAG` as it is. |
 | `PROGRAMMATIC_ACCESS=1` | – | Also lets the service account through IAP and lets your gcloud account sign tokens for it, so `tools/iap_token.py` works ([Who can use it](security.md#who-can-use-it)). |
 | `DRY_RUN=1` | – | Prints the gcloud commands instead of running them. |
 
@@ -264,7 +265,7 @@ Then grant access ([Who can use it](security.md#who-can-use-it); in the console,
 
 ### Method 3: Deploy with Terraform
 
-The deployment of Method 1, declared in [`terraform/`](../terraform/) *(v17.2)*: the 25 APIs, `cloudgauge-sa` with its project roles and its self-binding, the bucket, the Cloud Tasks queue (with the limits the services expect), the worker (internal ingress, invoked by the account only), the web service (IAP enabled, IAP's service agent as invoker, each operator granted `roles/iap.httpsResourceAccessor`), and — when asked — the BigQuery export dataset, the Cloud Scheduler jobs and the organization-level roles of the prerequisites, custom role included. Terraform builds no image, and the build runs as the account Terraform creates, so a first deployment is two applies around one build:
+The deployment of Method 1, declared in [`terraform/`](../terraform/) *(v17.2)*: the 27 APIs, `cloudgauge-sa` with its project roles and its self-binding, the bucket, the Cloud Tasks queue (with the limits the services expect), the worker (internal ingress, invoked by the account only), the web service (IAP enabled, IAP's service agent as invoker, each operator granted `roles/iap.httpsResourceAccessor`), and — when asked — the BigQuery export dataset, the READER grant on the billing export dataset (v18.8), the Cloud Scheduler jobs and the organization-level roles of the prerequisites, custom role included. Terraform builds no image, and the build runs as the account Terraform creates, so a first deployment is two applies around one build:
 
 ```
 git clone https://github.com/GoogleCloudPlatform/CloudGauge
@@ -272,11 +273,11 @@ cd CloudGauge/terraform
 cp terraform.tfvars.example terraform.tfvars        # project_id, operators, …
 terraform init
 terraform apply                                      # 1. the foundation: APIs, account, roles, bucket, queue, dataset
-cd .. && $(terraform -chdir=terraform output -raw build_command)   # 2. the image, built and tested by Cloud Build as the account
+cd .. && eval "$(terraform -chdir=terraform output -raw build_command)"   # 2. the image, built and tested by Cloud Build as the account
 terraform -chdir=terraform apply -var image_tag=$(git rev-parse --short HEAD)   # 3. the services, IAP, access, schedules
 ```
 
-`terraform output next_step` says what comes next at each point, and `web_url` is the page to open. Credentials are Application Default Credentials (`gcloud auth application-default login`) of an account that can create the resources in the project — and grant roles on the organization if `organization_id` is set. Put `image_tag` in `terraform.tfvars` once it is known; a release is the same build command followed by `terraform apply` with the new tag.
+`terraform output next_step` says what comes next at each point, and `web_url` is the page to open (`build_command` holds a `$(git rev-parse --short HEAD)` for the tag, which is why it is run through `eval`; `$(terraform output …)` alone would hand gcloud the words of that substitution). Credentials are Application Default Credentials (`gcloud auth application-default login`) of an account that can create the resources in the project — and grant roles on the organization if `organization_id` is set. Put `image_tag` in `terraform.tfvars` once it is known; a release is the same build command followed by `terraform apply` with the new tag.
 
 | Variable | Default | Meaning |
 |---|---|---|
@@ -285,7 +286,7 @@ terraform -chdir=terraform apply -var image_tag=$(git rev-parse --short HEAD)   
 | `image_tag` | – | The tag to deploy. Empty: the foundation only (first apply). |
 | `operators` | `[]` | Who may sign in: `user:`, `group:`, `domain:` principals. |
 | `organization_id` | – | Set it to grant the organization-level roles (prerequisites step 2, 1 and 1b) and create the `CloudGaugeAdvisoryViewer` role (`advisory_role_id`). If that role already exists, `terraform import` it or choose another ID. |
-| `bigquery_dataset`, `cost_allocation_labels`, `trusted_domains`, `schedules`, `extra_env` | – | As in Method 1; `schedules` is a map of name → `{ scope, scope_id, cron }`, cron in UTC. |
+| `bigquery_dataset`, `cost_allocation_labels`, `trusted_domains`, `billing_export`, `spend_anomaly_floor`, `schedules`, `extra_env` | – | As in Method 1, typed: the two label and domain lists are `list(string)`, `extra_env` a `map(string)`, `schedules` a map of name → `{ scope, scope_id, cron }`, cron in UTC. |
 | `scan_max_concurrent_shards`, `task_max_attempts` | `25`, `3` | The queue's limits and the services' `SCAN_MAX_CONCURRENT_SHARDS` / `TASK_MAX_ATTEMPTS`, kept equal. |
 | `programmatic_access_principals` | `[]` | What `PROGRAMMATIC_ACCESS=1` does: the account through IAP, and these principals allowed to mint its tokens (`tools/iap_token.py`). |
 | `deletion_protection`, `force_destroy` | `true`, `false` | A `terraform destroy` refuses the services and keeps the bucket and dataset until both are flipped. |
@@ -386,13 +387,14 @@ Reports are written to `synthetic-reports/` (or `--output-dir`). Add `--quiet` t
 
 With `--shard-size`, the harness runs the job the way the deployed service runs a large scope: the dispatcher plans the shards, an in-process queue plays Cloud Tasks (named tasks created once, `--concurrency` deliveries at a time, retries up to `--max-attempts`), every shard runs its checks under `--shard-budget-seconds`, the last one triggers the aggregation, and the sweeper finds the job complete. The summary adds the dispatch time, the median and longest shard, retries, the aggregation time, and the report's coverage line. The reports of a sharded and a single-task run of the same organization contain the same checks, statuses and rows.
 
-**2. Deployed, end to end.** Deploy the normal image as a *separate* Cloud Run service (or a no-traffic tagged revision) with `CLOUDGAUGE_ENV=synthetic` and `SYNTHETIC_PROJECTS=<n>`, plus the usual required variables. Cloud Run, Cloud Tasks and the results bucket are real, so request timeouts, task deadlines and retries, memory limits and status polling behave exactly as they would for a real organization of that size, while no Google Cloud API other than the Cloud Run Admin API (worker URL discovery) is called. The scope picker lists the generated organization, folders and projects. Every page and report carries a **SYNTHETIC LOAD TEST** banner, and the mode cannot be switched on by accident: it needs both the profile *and* `SYNTHETIC_PROJECTS`, and the production profile ignores all `SYNTHETIC_*` variables.
+**2. Deployed, end to end.** Deploy the normal image as a *separate* Cloud Run service (or a no-traffic tagged revision) with `CLOUDGAUGE_ENV=synthetic` and `SYNTHETIC_PROJECTS=<n>`, plus the usual required variables. Cloud Run, Cloud Tasks and the results bucket are real, so request timeouts, task deadlines and retries, memory limits and status polling behave exactly as they would for a real organization of that size, while no Google Cloud data-plane API is called at all (only the Cloud Run Admin API, to discover the service's own URL, if `WORKER_URL` is left out — which needs `roles/run.viewer` on the service; the deterministic URL below avoids that). The scope picker lists the generated organization, folders and projects. Every page and report carries a **SYNTHETIC LOAD TEST** banner, and the mode cannot be switched on by accident: it needs both the profile *and* `SYNTHETIC_PROJECTS`, and the production profile ignores all `SYNTHETIC_*` variables.
 
 ```
 gcloud run deploy cloudgauge-loadtest --region ${REGION} --image ${IMAGE}:${TAG} \
   --service-account ${SERVICE_ACCOUNT_EMAIL} --memory 2Gi --timeout 3600 --concurrency 4 \
   --set-env-vars PROJECT_ID=${PROJECT_ID},LOCATION=${REGION},TASK_QUEUE=cloudgauge-loadtest-queue,\
 RESULTS_BUCKET=${RESULTS_BUCKET},SERVICE_ACCOUNT_EMAIL=${SERVICE_ACCOUNT_EMAIL},\
+WORKER_URL=https://cloudgauge-loadtest-${PROJECT_NUMBER}.${REGION}.run.app,\
 CLOUDGAUGE_ENV=synthetic,SYNTHETIC_PROJECTS=1000
 ```
 
@@ -445,18 +447,15 @@ If the status page is stuck for a long time, the background worker is likely fai
 
 #### Memory Limit Exceeded
 
-* **Error Message**: You might see an error in the Cloud Run logs that says: “`Memory limit of 512 MiB exceeded …”`  
-* **Cause**: The scan process is using more memory than the default amount allocated to the Cloud Run service.  
-* **Solution**: You need to increase the memory allocated to your service.  
-  * **Via Console**:  
-    1. Click **"Edit & Deploy New Revision"** on your Cloud Run service page.  
-    2. Under the "General" tab, find **"Memory allocation"** and increase it (e.g., to `2 GiB`).  
-    3. Click **Deploy**.  
-  * **Via gcloud CLI**:
+* **Error Message**: The worker's Cloud Run logs say “`Memory limit of 2048 MiB exceeded …`” (or `512 MiB`, Cloud Run's default, on a service deployed without `--memory`), and the shard or scan that was running is retried or ends as error rows.  
+* **Cause**: Scans run on the worker (`cloudgauge-worker`), which `tools/deploy.sh` deploys with `--memory=2Gi` and Terraform with `memory = "2Gi"`; the web service's 1 GiB serves the pages only. What a worker instance holds is the shards it is running — up to `SCAN_SHARD_SIZE` projects (default 20) per request, `--concurrency 4` requests per instance — and, once per large scan, the aggregation that merges every shard's results into the report; a scope of unusually large projects, or a service deployed by hand with less memory, can exceed it.  
+* **Solution**: Give the worker more memory, or make its shards smaller — `EXTRA_ENV=SCAN_SHARD_SIZE=10` for `tools/deploy.sh`, `extra_env = { SCAN_SHARD_SIZE = "10" }` for Terraform ([Configuration Reference](stability.md#configuration-reference)) — which survives every redeploy.  
+  * **Via Console**: on the `cloudgauge-worker` service, **Edit & Deploy New Revision** → **General** → **Memory allocation** (e.g., `4 GiB`) → **Deploy**.  
+  * **Via gcloud CLI** (note that `tools/deploy.sh` sets `--memory=2Gi` again on its next run, and a Terraform apply sets `terraform/services.tf`'s value — change it there on a Terraform deployment):
 
 ```
-gcloud run services update cloudgauge-service \
-  --memory=2Gi \
+gcloud run services update cloudgauge-worker \
+  --memory=4Gi \
   --region=<your-region>
 ```
     
@@ -488,10 +487,10 @@ gcloud run services update cloudgauge-service \
 
 * **Symptom**: The report loads, but the Gemini executive summary or remediation suggestions return an error.  
 * **Cause**: The service account lacks `roles/aiplatform.user`, the Vertex AI API (`aiplatform.googleapis.com`) is not enabled, or the selected model isn't available to your project or location.  
-* **Solution**: Verify the role and API from the **Common Prerequisites**. If a specific model is the problem, pin one that is available with `GEMINI_MODEL` (and, if needed, `VERTEX_LOCATION`):
+* **Solution**: Verify the role and API from the **Common Prerequisites**. If a specific model is the problem, pin one that is available with `GEMINI_MODEL` (and, if needed, `VERTEX_LOCATION`) on the web service, which makes these calls — `EXTRA_ENV=GEMINI_MODEL=<model-id>` for `tools/deploy.sh`, `extra_env` for Terraform (whose next apply would otherwise remove a variable set by hand), or directly:
 
 ```
-gcloud run services update cloudgauge-service \
+gcloud run services update cloudgauge \
   --update-env-vars GEMINI_MODEL=<model-id> \
   --region=<your-region>
 ```
@@ -502,12 +501,12 @@ gcloud run services update cloudgauge-service \
 
 * **Error Message**: The logs show an HTTP `504` status code or a message like "The request has been terminated because it has reached its deadline."  
 * **Cause**: A request is taking longer than the configured request timeout on the Cloud Run service. A scope of up to `SCAN_SHARD_SIZE` projects runs in one `/run-scan` request, so that request is as long as the whole scan; a larger scope runs as shards, and each `/scan-shard` request is bounded by the task's dispatch deadline (`TASK_DISPATCH_DEADLINE_SECONDS`, 30 minutes at most) and stops starting new checks after `SHARD_TIME_BUDGET_SECONDS` (default 20 minutes), so it should never reach a 1-hour request timeout — if a shard does time out, see [A Large Scan Reports "Partially Scanned" or Error Rows](#a-large-scan-reports-partially-scanned-or-error-rows).  
-* **Solution**: The deployment instructions recommend a timeout of `3600` seconds (1 hour). Verify this was set correctly.  
-  * **Via Console**: Go to **"Edit & Deploy New Revision"** and check the **"Request timeout"** value under the "General" tab.  
-  * **Via gcloud CLI**: You can update the service with the correct timeout using:
+* **Solution**: The deployment gives the worker a request timeout of `3600` seconds (1 hour) — `tools/deploy.sh`'s `--timeout=3600`, Terraform's `timeout = "3600s"`; the web service's `600` covers the pages and the on-demand Gemini calls only. Verify the worker's value.  
+  * **Via Console**: on the `cloudgauge-worker` service, go to **"Edit & Deploy New Revision"** and check the **"Request timeout"** value under the "General" tab.  
+  * **Via gcloud CLI**: You can update the worker with the correct timeout using:
 
 ```
-gcloud run services update cloudgauge-service \
+gcloud run services update cloudgauge-worker \
   --timeout=3600 \
   --region=<your-region>
 ```
@@ -517,7 +516,7 @@ gcloud run services update cloudgauge-service \
 
 * **Symptom**: The status page of a scan with more than `SCAN_SHARD_SIZE` projects shows *"Scanned X of Y projects · organization-level checks: in progress · some checks could not run (listed as errors in the report)"*, and the report's **Coverage** line is amber: some projects are *partially scanned* or *not scanned*, and checks list rows such as *"Not checked for 20 projects (proj-a, proj-b, ...): the scan failed after 3 attempts. Last error: ..."*, *"Check did not finish within the time budget of 1200 seconds for 20 projects (...)"*, or *"... the scan did not finish; the results are missing from this report."*.
 * **Cause**: The scan ran as a sharded scan (see [Scaling to Large Organizations](architecture.md#scaling-to-large-organizations)) and a shard hit an error on every attempt, ran out of its time budget, or its task vanished (for example the instance ran out of memory, or the Cloud Run request timeout is below the 30-minute task deadline). *"Did not finish"* rows mean the job reached its time limit with shards still queued or running (the log says `Sweep N: K shards still not finished after X h, the job's time limit of Y h`): the queue was slower than planned, paused, or `SCAN_TIME_LIMIT_SECONDS` is set too low for the organization. The report is delivered anyway, with the affected checks as error rows, instead of failing the whole scan.
-* **Solution**: The row's text names the affected projects and the error. In the Cloud Run logs, filter on `[<job-id>]` to find the shard those projects belonged to (`Dispatched ... in N shards`, `Shard shard-012 failed on attempt 3: ...`). Typical fixes: raise the Cloud Run request timeout to `3600` and memory to `2Gi`, set `--concurrency=4`, lower `SCAN_MAX_CONCURRENT_SHARDS` if the errors are API quota errors (`429`), raise `SHARD_TIME_BUDGET_SECONDS` (up to `1800`) if checks time out, or, for *did not finish* rows, raise `SCAN_MAX_CONCURRENT_SHARDS` so the scan fits its time limit (see [Sizing for your organization](architecture.md#sizing-for-your-organization)). Re-run the scan afterwards.
+* **Solution**: The row's text names the affected projects and the error. In the Cloud Run logs, filter on `[<job-id>]` to find the shard those projects belonged to (`Dispatched ... in N shards`, `Shard shard-012 failed on attempt 3: ...`). Typical fixes: give the worker (`cloudgauge-worker`) the deployment's request timeout of `3600`, memory of `2Gi` and `--concurrency=4` if it was deployed by hand with less, lower `SCAN_MAX_CONCURRENT_SHARDS` if the errors are API quota errors (`429`), raise `SHARD_TIME_BUDGET_SECONDS` (up to `1800`) if checks time out, or, for *did not finish* rows, raise `SCAN_MAX_CONCURRENT_SHARDS` so the scan fits its time limit (see [Sizing for your organization](architecture.md#sizing-for-your-organization)). Re-run the scan afterwards.
 ---
 
 #### Builds Fail in a VPC Service Controls Environment
@@ -551,16 +550,19 @@ The recommended solution is to use a **dedicated Compute Engine VM as a secure N
    * Allow **ingress** traffic from the private pool's IP range to the NAT gateway VM.  
    * Allow **egress** traffic from the NAT gateway VM to the internet (0.0.0.0/0).
     
-  **3\. Run Your Build Using the Private Pool:** Modify your `gcloud builds submit` command to include the `--worker-pool` flag, pointing it to your newly created private pool.
+  **3\. Run Your Build Using the Private Pool:** Run the build `tools/deploy.sh` would run (step 2: `cloudbuild.yaml`, as `cloudgauge-sa`) with the `--worker-pool` flag added, then let the script deploy that image with `SKIP_BUILD=1`:
 
 ```
-gcloud builds submit . \
-  --tag "gcr.io/[PROJECT_ID]/[SERVICE_NAME]" \
+export PROJECT_ID="my-project" REGION="asia-south1" TAG=$(git rev-parse --short HEAD)
+gcloud builds submit . --config cloudbuild.yaml --substitutions=_IMAGE=gcr.io/${PROJECT_ID}/cloudgauge,_TAG=${TAG} \
+  --service-account=projects/${PROJECT_ID}/serviceAccounts/cloudgauge-sa@${PROJECT_ID}.iam.gserviceaccount.com \
   --region=[REGION] \
   --worker-pool=projects/[PROJECT_ID]/locations/[REGION]/workerPools/[POOL_NAME]
+
+SKIP_BUILD=1 tools/deploy.sh      # deploys gcr.io/${PROJECT_ID}/cloudgauge:${TAG} as it is
 ```
 
-This command now directs Cloud Build to use a worker from your internal pool. The worker's traffic is routed through your secure NAT Gateway VM, allowing it to fetch external dependencies while remaining fully compliant with your VPC SC perimeter.
+This directs Cloud Build to use a worker from your internal pool. The worker's traffic is routed through your secure NAT Gateway VM, allowing it to fetch external dependencies while remaining fully compliant with your VPC SC perimeter. On a Terraform deployment ([Method 3](#method-3-deploy-with-terraform)) add the same two flags to the `build_command` output, then apply with the tag.
 
 ---
 
@@ -587,21 +589,23 @@ gcloud artifacts repositories create cloudgauge-repo \
 *You only need to run this command once to set up the repository.*
 
 
-**Step 2: Update Your Build and Push Commands**
+**Step 2: Point the deployment at the repository**
 
-Next, you must change the image path in your build and push commands from gcr.io/... to the new Artifact Registry path. The new format is \[REGION\]-docker.pkg.dev/\[PROJECT\_ID\]/\[REPO\_NAME\]/\[IMAGE\_NAME\].
+Next, change the image path from `gcr.io/...` (the default, `gcr.io/[PROJECT_ID]/cloudgauge`) to the new Artifact Registry path. The format is \[REGION\]-docker.pkg.dev/\[PROJECT\_ID\]/\[REPO\_NAME\]/\[IMAGE\_NAME\].
 
 #### Option A: Using Cloud Build
 
-If you're using Cloud Build, update the \--tag flag in your gcloud builds submit command:
+`tools/deploy.sh` builds and deploys whatever `IMAGE` names (it passes it to `cloudbuild.yaml` as `_IMAGE`), so set it on every run — the cleanup script's `IMAGE` must then be the same path:
 
 ```
-gcloud builds submit . --tag "asia-south1-docker.pkg.dev/[PROJECT_ID]/cloudgauge-repo/[SERVICE_NAME]"
+IMAGE="asia-south1-docker.pkg.dev/[PROJECT_ID]/cloudgauge-repo/cloudgauge" PROJECT_ID="[PROJECT_ID]" REGION="asia-south1" tools/deploy.sh
 ```
+
+With Terraform ([Method 3](#method-3-deploy-with-terraform)) set `image = "asia-south1-docker.pkg.dev/[PROJECT_ID]/cloudgauge-repo/cloudgauge"` in `terraform.tfvars`; the `build_command` output picks it up. A build run by hand takes the same path in `--substitutions=_IMAGE=...`.
 
 #### Option B: Pushing a Local Image
 
-If you are building your image locally, update your docker tag and docker push commands:
+If you are building your image locally (this skips the test suite `cloudbuild.yaml` runs), update your docker tag and docker push commands, then deploy the pushed image with `SKIP_BUILD=1 IMAGE=asia-south1-docker.pkg.dev/[PROJECT_ID]/cloudgauge-repo/cloudgauge-image TAG=latest tools/deploy.sh` (`latest` is the tag an untagged push gets; or `image` / `image_tag` in Terraform):
 
 \# 1\. Build the image 
 ```
@@ -713,7 +717,7 @@ done
 # The custom role itself, now that nothing is bound to it
 gcloud iam roles delete CloudGaugeAdvisoryViewer --organization=${ORG_ID} --quiet
 
-# Project-level roles (on the project CloudGauge was deployed in): Vertex AI, Cloud Tasks, the build identity (v17.2),
+# Project-level roles (on the project CloudGauge was deployed in): Vertex AI, Cloud Tasks, the build identity (v16),
 # the export's and the spend records' BigQuery Job User (v17, v18.8) — the last one is absent when neither was configured
 for ROLE in roles/aiplatform.user roles/cloudtasks.admin roles/cloudbuild.builds.builder roles/bigquery.jobUser; do
   gcloud projects remove-iam-policy-binding ${PROJECT_ID} --member="serviceAccount:${SA_EMAIL}" --role="${ROLE}" --quiet

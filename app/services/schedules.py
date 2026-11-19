@@ -33,8 +33,9 @@ stale (the sweeper finishes dead jobs well before).
 
 When Cloud Tasks will not take the task — after ``app.services.tasks.ENQUEUE_RETRY``
 (v20) — nothing was started and nothing is noted: ``POST /scan`` answers **503** with
-a page that says so, ``/scheduled-scan`` 503 with the same words (Cloud Scheduler
-retries the job as configured), both with ``Retry-After``.
+a page that says so, ``/scheduled-scan`` 503 with the same words (the job records a
+failed run — the deployments create it without retries — and the next scheduled run is
+the next attempt), both with ``Retry-After``.
 """
 import logging
 import re
@@ -171,7 +172,7 @@ def start_scheduled_scan(services, data, now=None):
         lock = e.lock
         return {"error": f"A scan of {scope} {scope_id} is still running (job {lock['job_id']}, started {lock.get('started_at')}); "
                          f"nothing was started.", "job_id": lock["job_id"], "schedule": name}, 409
-    except GoogleAPIError as e:  # v20: Cloud Tasks did not take the task within the retry; Cloud Scheduler retries the job
+    except GoogleAPIError as e:  # v20: Cloud Tasks did not take the task within the retry; the job's next run is the next attempt
         answer = not_queued_answer(e)
         logging.error(f"The scheduled scan '{name}' of {scope} {scope_id} could not be queued on {services.settings.task_queue}: {answer}")
         return {"error": NOT_QUEUED_MESSAGE, "schedule": name, "queue": services.settings.task_queue, "answer": answer}, 503

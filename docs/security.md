@@ -36,7 +36,7 @@ The token is good for an hour and for that URL only (a canary tag URL needs its 
 
 ## A public deployment (discouraged)
 
-Releases before v16 ran one public service, and that still works: `CLOUDGAUGE_ROLE=all` (the default) serves the pages, the API and the worker endpoints together, and the service discovers its own URL. Anyone with the URL can start scans against your organization and read every report, so prefer the two services above. If you need it anyway:
+Releases before v16 ran one public service, and that still works: `CLOUDGAUGE_ROLE=all` (the default) serves the pages, the API and the worker endpoints together, and the service is told its own URL (`WORKER_URL`) or discovers it at startup. Anyone with the URL can start scans against your organization and read every report, so prefer the two services above. If you need it anyway:
 
 ```
 export REGION="asia-south1" SERVICE_NAME="cloudgauge" QUEUE_NAME="cloudgauge-scan-queue" BUCKET_NAME="cloudgauge-reports-${PROJECT_ID}"
@@ -45,15 +45,17 @@ export REGION="asia-south1" SERVICE_NAME="cloudgauge" QUEUE_NAME="cloudgauge-sca
 gcloud builds submit . --config cloudbuild.yaml --substitutions=_IMAGE=gcr.io/${PROJECT_ID}/${SERVICE_NAME},_TAG=latest \
   --service-account=projects/${PROJECT_ID}/serviceAccounts/${SA_EMAIL}
 
-# One service, public
+# One service, public. WORKER_URL is its own URL — Cloud Run's deterministic one, known before the service
+# exists — so nothing is looked up at startup. (Without it the service discovers its URL through the Cloud Run
+# Admin API, which needs roles/run.viewer on itself before its first start.)
+PROJECT_NUMBER=$(gcloud projects describe ${PROJECT_ID} --format='value(projectNumber)')
 gcloud run deploy ${SERVICE_NAME} --region ${REGION} --image gcr.io/${PROJECT_ID}/${SERVICE_NAME}:latest \
   --service-account ${SA_EMAIL} --allow-unauthenticated \
   --timeout=3600 --concurrency=4 --memory=2Gi \
-  --set-env-vars=PROJECT_ID=${PROJECT_ID},LOCATION=${REGION},TASK_QUEUE=${QUEUE_NAME},RESULTS_BUCKET=${BUCKET_NAME},SERVICE_ACCOUNT_EMAIL=${SA_EMAIL}
+  --set-env-vars=PROJECT_ID=${PROJECT_ID},LOCATION=${REGION},TASK_QUEUE=${QUEUE_NAME},RESULTS_BUCKET=${BUCKET_NAME},SERVICE_ACCOUNT_EMAIL=${SA_EMAIL},WORKER_URL=https://${SERVICE_NAME}-${PROJECT_NUMBER}.${REGION}.run.app
 
-# Cloud Tasks invokes it, and it looks up its own URL at startup
+# Cloud Tasks invokes it as the service account
 gcloud run services add-iam-policy-binding ${SERVICE_NAME} --region ${REGION} --member="serviceAccount:${SA_EMAIL}" --role="roles/run.invoker"
-gcloud run services add-iam-policy-binding ${SERVICE_NAME} --region ${REGION} --member="serviceAccount:${SA_EMAIL}" --role="roles/run.viewer"
 ```
 
 Where the **Domain Restricted Sharing** organization policy (`iam.allowedPolicyMemberDomains`) forbids `allUsers`, `--allow-unauthenticated` fails; `--no-invoker-iam-check` in its place makes the service public by skipping the invoker check altogether. Behind neither IAP nor IAM the pages show no name and scans record none. To move such a deployment to the two services later, run `tools/deploy.sh` with its names: it adds the worker and turns the service into the web service.
@@ -67,7 +69,7 @@ Whatever the deployment, the application checks its own requests (v18.6.1):
 * **Every identifier is validated** before it reaches a bucket key, a task body or an API call: `scope` is `organization`, `folder` or `project`; `scope_id` an organization or folder number, or a project ID; `job_id` the UUID `POST /scan` minted. A malformed one is a **400** — on the pages, the API and the worker endpoints alike — and the results store refuses to build an object key from anything but a plain key segment, so a value can never steer an object under another job's prefix.
 * **The POST routes are same-origin only** (`POST /scan`, `/api/get-summary`, `/api/get-suggestions`, `/api/get-insights`): Identity-Aware Proxy says who is in the browser, not which page sent the request, so a form on another site could otherwise start a scan as the operator. Browsers label every request with `Sec-Fetch-Site`; it must read `same-origin` or `none`, else the `Origin` (then the `Referer`) must name this service — a cross-site request gets **403**. A request with none of those headers (`curl`, a script) has no victim's browser behind it and is allowed.
 * **A scope scans once at a time**, whoever asks: `POST /scan` while the scope's previous scan is still running answers **409** with a page naming that scan and linking its status page (JSON for a client that asks for it); nothing new is started. Scheduled scans have followed the same rule since v17. A scan counts as running while its status file says so; one that has not started within 10 minutes no longer blocks its scope.
-* **A scan that Cloud Tasks will not take is said so, not a 500** (v20): every `create_task` retries a transient answer — `UNAVAILABLE` (a `Stream removed` reached a person once), `DEADLINE_EXCEEDED`, `INTERNAL` — with exponential backoff for up to 30 seconds; the scan task is named after its job (`scan-<job id>`), so the retry after a lost answer meets *already exists* and never starts a scan twice. What still fails is a **503** page — *Scan not queued*, naming the queue and the answer, with a **Try again** button and `Retry-After: 60` (JSON for a client that asks for it); nothing was started and nothing was noted, so the next attempt is a fresh start. `/scheduled-scan` answers the same 503 and Cloud Scheduler retries the job as configured.
+* **A scan that Cloud Tasks will not take is said so, not a 500** (v20): every `create_task` retries a transient answer — `UNAVAILABLE` (a `Stream removed` reached a person once), `DEADLINE_EXCEEDED`, `INTERNAL` — with exponential backoff for up to 30 seconds; the scan task is named after its job (`scan-<job id>`), so the retry after a lost answer meets *already exists* and never starts a scan twice. What still fails is a **503** page — *Scan not queued*, naming the queue and the answer, with a **Try again** button and `Retry-After: 60` (JSON for a client that asks for it); nothing was started and nothing was noted, so the next attempt is a fresh start. `/scheduled-scan` answers the same 503; Cloud Scheduler records a failed run and, since the jobs `tools/deploy.sh` and Terraform create do not retry (`--max-retry-attempts=0`), the next scheduled run is the next attempt.
 * **The suggestions batch is bounded**: `/api/get-suggestions` takes at most 20 findings per request (the report sends 5), each with at most 20,000 characters of text; no request body may exceed 1 MiB (**413**).
 * **The worker endpoints verify their caller**: Cloud Run's IAM check is what keeps everyone but the service account out of the worker service, and Cloud Run hands the `Authorization` header on to the container, so the worker verifies the token too — Google's signature, the service account's `email`, an audience among `WORKER_AUDIENCE`, the worker's URL and the request's URL, the expiry — and answers **401** otherwise. This is defence in depth behind IAM in the two-service deployment and the only guard in the public one. `WORKER_TOKEN_CHECK=off` switches it off (if a front in your path rewrites the token); it runs in the `production` and `synthetic` profiles only.
 
