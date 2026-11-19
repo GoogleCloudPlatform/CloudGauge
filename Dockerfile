@@ -1,5 +1,5 @@
 # Step 1: Use an official, slim Python base image for a smaller footprint
-FROM python:3.11-slim
+FROM python:3.15-slim
 
 # Step 2: Set environment variables
 # Prevents Python from writing pyc files to disc
