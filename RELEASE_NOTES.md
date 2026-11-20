@@ -103,6 +103,18 @@ built, tested, released and documented, and what a deployer may rely on.
   writes, and the pinned check plan. A guard test forbids a reference to the
   frozen modules from growing back.
 
+### Fixed
+
+- **`tools/deploy.sh` updates an existing scheduled scan.** The second run of a
+  deployment with `SCHEDULES` — the documented upgrade, the same command again —
+  stopped at step 7 with `unrecognized arguments: --headers`: `gcloud scheduler
+  jobs update http` spells that flag `--update-headers`, and the script used
+  the `create` spelling for both verbs. Present since the schedules of v17; met
+  on the second deployment that carried `SCHEDULES`. The services were already
+  deployed when it stopped, so nothing was half-done — the jobs simply kept
+  their earlier definition. Fixed after rc.2 was cut; a test holds the verb
+  and the flag together.
+
 ### Tests
 
 - 1,347 tests. New: the enqueue retry and the 503 (14), the release tooling and

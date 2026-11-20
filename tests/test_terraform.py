@@ -240,6 +240,19 @@ def test_the_scheduler_job_is_the_scripts(tf, script):
     assert '"organization", "folder", "project"' in hcl_block(tf['variables.tf'], 'variable "schedules"')
 
 
+def test_the_scheduler_job_update_spells_the_headers_flag_as_update_takes_it(script):
+    """v20: ``gcloud scheduler jobs update http`` has no ``--headers`` (``--update-headers`` is its name there), so the second
+    run of a deployment with SCHEDULES — the documented upgrade, the same command again — stopped at step 7 with
+    *unrecognized arguments*. The verb and the flag are chosen together, and the command carries the variable."""
+    lines = script.splitlines()
+    assert any(line.strip() == 'verb="create"; headers_flag="--headers"' for line in lines)
+    update_line = next(line for line in lines if 'then verb="update"' in line)
+    assert 'headers_flag="--update-headers"' in update_line and 'scheduler jobs describe "$name"' in update_line
+    command = re.search(r'scheduler jobs "\$verb" http .*?>/dev/null', joined_lines(script), re.S).group(0)
+    assert '"${headers_flag}=Content-Type=application/json"' in command
+    assert '--headers=' not in command and '--update-headers=' not in command
+
+
 # --- the folder itself ----------------------------------------------------------------------------
 
 def test_the_provider_module_name_is_the_release(tf):

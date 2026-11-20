@@ -372,11 +372,12 @@ if [[ ${#SCHEDULE_NAMES[@]} -gt 0 ]]; then
   for i in "${!SCHEDULE_NAMES[@]}"; do
     name="${SCHEDULE_NAMES[$i]}"; scope="${SCHEDULE_SCOPES[$i]}"; scope_id="${SCHEDULE_IDS[$i]}"; cron="${SCHEDULE_CRONS[$i]}"
     note "${name}: ${scope} ${scope_id} at '${cron}' UTC"
-    verb="create"
-    if [[ "$DRY_RUN" != 1 ]] && gcloud --project "$PROJECT_ID" scheduler jobs describe "$name" --location="$REGION" >/dev/null 2>&1; then verb="update"; fi
+    # A job that exists is updated: the same flags, except that update spells --headers as --update-headers (v20).
+    verb="create"; headers_flag="--headers"
+    if [[ "$DRY_RUN" != 1 ]] && gcloud --project "$PROJECT_ID" scheduler jobs describe "$name" --location="$REGION" >/dev/null 2>&1; then verb="update"; headers_flag="--update-headers"; fi
     # The job calls the worker as the service account (its OIDC token, audience the worker's URL), like Cloud Tasks does.
     g scheduler jobs "$verb" http "$name" --location="$REGION" --schedule="$cron" --time-zone="Etc/UTC" \
-      --uri="${WORKER_URL}/scheduled-scan" --http-method=POST --headers="Content-Type=application/json" \
+      --uri="${WORKER_URL}/scheduled-scan" --http-method=POST "${headers_flag}=Content-Type=application/json" \
       --message-body="{\"scope\":\"${scope}\",\"scope_id\":\"${scope_id}\",\"name\":\"${name}\"}" \
       --oidc-service-account-email="$SA_EMAIL" --oidc-token-audience="$WORKER_URL" --attempt-deadline=120s --max-retry-attempts=0 >/dev/null
   done
