@@ -20,6 +20,6 @@ terraform {
   # block takes constants only, so the number is written here as well — release-please bumps it with the file (the
   # annotation) and the test suite holds the two equal.
   provider_meta "google" {
-    module_name = "cloud-solutions/cloudgauge-deploy-v20.0.0-rc.1" # x-release-please-version
+    module_name = "cloud-solutions/cloudgauge-deploy-v20.0.0-rc.2" # x-release-please-version
   }
 }
