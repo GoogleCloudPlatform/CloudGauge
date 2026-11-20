@@ -8,10 +8,10 @@ the test suite running inside the image, a zero-traffic canary revision scanned
 against a real organization, promotion, and a production scan compared fact for
 fact with the previous version's report.
 
-Versions are the image tags (`v5` … `v20.0.0-rc.1`); the commit is the one that shipped. From v20 the
+Versions are the image tags (`v5` … `v20.0.0-rc.2`); the commit is the one that shipped. From v20 the
 versions are also git tags, and a tag publishes the GitHub Release (docs/development.md › Cut a release).
 
-## v20.0.0-rc.1 — The GA candidate
+## v20.0.0-rc.2 — The GA candidate
 
 The release that moves the modular CloudGauge onto `main`: the application that
 has been the shipped one since v5 replaces the 2025 single-file original as the
@@ -72,6 +72,11 @@ built, tested, released and documented, and what a deployer may rely on.
 
 ### Changed
 
+- **rc.2** (20 Nov, after a day of rc.1 on the scheduled scans): the *Organization Policy Exceptions*
+  note about the policies set below that weaken no guardrail names them — the constraint (or how
+  many), the resource (or how many), *set — weakens nothing*, each policy on its resource in the
+  Detail — where rc.1 showed an empty constraint and a bare count, which read like a finding with a
+  hole in it; the Organization Policies table's Below column leaves the note out.
 - **The documentation was scrubbed claim by claim against the code** (~515
   claims, 45 corrected): the Troubleshooting entries name the worker
   (`cloudgauge-worker`, 2 GiB; `SCAN_SHARD_SIZE` is the lever that survives a
