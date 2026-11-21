@@ -115,6 +115,28 @@ built, tested, released and documented, and what a deployer may rely on.
   their earlier definition. Fixed after rc.2 was cut; a test holds the verb
   and the flag together.
 
+### Verified at scale
+
+- **500 and 1,000 synthetic projects through the deployed sharded path** (the
+  release image as a separate Cloud Run service with the worker's settings, a
+  Cloud Tasks queue at 25 concurrent dispatches, 150 ms simulated latency, 2% of
+  projects denying every API): **500 projects in 11 min 11 s** (26 tasks in two
+  waves, project shards 5.0–5.8 min, the scope shard 8.2 min, merge 18 s) and
+  **1,000 projects in 17 min 30 s** (51 tasks in three waves, the scope shard
+  16.7 min, merge 35 s); every project covered, no shard error, memory under
+  17% of 2 GiB. One shard of the 1,000-project run was delivered twice by Cloud
+  Tasks while its first attempt still ran; the second attempt cleaned up and
+  rewrote the shard, and the report came out identical, row for row (57,451),
+  to the in-process run of the same organization. The in-process harness at
+  the same sizes: 178 API calls per project, at most ~385 in flight, the merge
+  of 10,000 projects' shards in a minute. The reports are about ten times
+  the size the first synthetic runs measured (22 MB HTML and 22 MB CSV for
+  1,000 projects) — the v17–v19.3 checks — and the sizing table says so now,
+  as it says that the scope shard, the one task that holds the
+  organization-level checks, grows with the organization (8 minutes at 500
+  projects, 17 at 1,000) and is the first thing to size past a couple of
+  thousand projects.
+
 ### Tests
 
 - 1,347 tests. New: the enqueue retry and the 503 (14), the release tooling and
