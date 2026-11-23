@@ -189,7 +189,10 @@ def test_has_list_permission_and_error_kinds():
 
 # --- the check end to end ---
 
-def test_check_support_cases_writes_both_records(gcp):
+def test_check_support_cases_writes_both_records(gcp, monkeypatch):
+    # The fixture's ages are relative to NOW (17 Nov): the check's clock is pinned to it, or case 1001 — a P1 three days old
+    # then — crosses the seven-day expectation on the sixth day after and the hygiene rows change under the test.
+    monkeypatch.setattr(support, 'utcnow', lambda: NOW)
     install(gcp, api := FakeSupport({f'organizations/{ORG}': FIXTURE}))
     s = Sink()
     check_support_cases('organization', ORG, JOB, sink=s)
