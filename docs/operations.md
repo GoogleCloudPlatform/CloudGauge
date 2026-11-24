@@ -1,6 +1,6 @@
 # Deployment and operations
 
-What a deployer runs: the prerequisites and the three deployment methods, the zero-downtime upgrade, how to use the pages, the synthetic load test, troubleshooting and the cleanup script. Who may sign in and what every request is checked for: [security.md](security.md); every variable, role and name as a contract: [stability.md](stability.md).
+What a deployer runs: the prerequisites and the three deployment methods, the zero-downtime upgrade, how to use the pages, the synthetic load test, troubleshooting and the cleanup script. Who may sign in and what every request is checked for: [security.md](security.md); every variable, role and name a deployment may depend on: [stability.md](stability.md).
 
 In this page: [Deployment Instructions](#deployment-instructions) — [Common Prerequisites](#common-prerequisites-required-for-all-methods), [Method 1: `tools/deploy.sh`](#method-1-deploy-with-toolsdeploysh-recommended), [Method 2: the Console](#method-2-deploy-from-the-console), [Method 3: Terraform](#method-3-deploy-with-terraform) · [Updating an Existing Deployment (Zero-Downtime)](#updating-an-existing-deployment-zero-downtime) · [How to Use](#how-to-use) · [Load Testing with a Synthetic Organization](#load-testing-with-a-synthetic-organization) · [Troubleshooting](#troubleshooting) · [Cleanup Script](#cleanup-script)
 
