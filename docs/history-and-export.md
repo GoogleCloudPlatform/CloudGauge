@@ -1,6 +1,6 @@
 # History and analytics
 
-Scheduled scans, the history page and the BigQuery export of every scan — and the spend records, which read the billing export. The export's schema as a contract: [stability.md › BigQuery export schema](stability.md#bigquery-export-schema).
+Scheduled scans, the history page and the BigQuery export of every scan — and the spend records, which read the billing export. The export's schema, as something a dashboard may depend on: [stability.md › BigQuery export schema](stability.md#bigquery-export-schema).
 
 In this page: [Scheduled scans](#scheduled-scans) · [The history page](#the-history-page) · [The BigQuery export](#the-bigquery-export) · [Spend](#spend)
 

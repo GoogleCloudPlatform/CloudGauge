@@ -1,6 +1,6 @@
 # Architecture
 
-How a scan runs — the two Cloud Run services, Cloud Tasks, the sharded path a large scope takes, the results bucket — what the report does with the result, and the layout of the repository. Deploying it: [operations.md](operations.md); the sizes, variables and names as a contract: [stability.md](stability.md).
+How a scan runs — the two Cloud Run services, Cloud Tasks, the sharded path a large scope takes, the results bucket — what the report does with the result, and the layout of the repository. Deploying it: [operations.md](operations.md); the sizes, variables and names a deployment may depend on: [stability.md](stability.md).
 
 In this page: [Architecture Diagram](#architecture-diagram) · [Scaling to Large Organizations](#scaling-to-large-organizations) (and [Sizing for your organization](#sizing-for-your-organization)) · [Reports for Large Organizations](#reports-for-large-organizations) · [The Pages](#the-pages) · [Project Structure](#project-structure)
 
