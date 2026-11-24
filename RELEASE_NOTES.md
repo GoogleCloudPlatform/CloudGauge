@@ -8,20 +8,25 @@ the test suite running inside the image, a zero-traffic canary revision scanned
 against a real organization, promotion, and a production scan compared fact for
 fact with the previous version's report.
 
-Versions are the image tags (`v5` … `v20.0.0-rc.2`); the commit is the one that shipped. From v20 the
+Versions are the image tags (`v5` … `v20.0.0`); the commit is the one that shipped. From v20 the
 versions are also git tags, and a tag publishes the GitHub Release (docs/development.md › Cut a release).
 
-## v20.0.0-rc.2 — The GA candidate
+## v20.0.0 — General availability
 
 The release that moves the modular CloudGauge onto `main`: the application that
 has been the shipped one since v5 replaces the 2025 single-file original as the
-repository's default branch, with a release candidate soaked on the scheduled
-scans before `v20.0.0` is tagged. No new check — the check plan is the v19.3
-plan, pinned by the tests at 77 functions for an organization and 74 for a
-folder or a project — no new role, no new API. What changed is around the
+repository's default branch. Two release candidates went before it — `rc.1`
+(19 November, the cutover itself) and `rc.2` (20 November, with the
+Organization Policy Exceptions note naming its policies) — and the candidate
+ran unattended on the daily scheduled scans of a real organization and a
+sandbox project for five days, ten scheduled scans and four end-to-end scans
+without an Error record, before this tag. No new check — the check plan is the
+v19.3 plan, pinned by the tests at 77 functions for an organization and 74 for
+a folder or a project — no new role, no new API. What changed is around the
 application: how a scan that Cloud Tasks will not take is reported, how the
 report prints, how the history page reaches a report, how the repository is
-built, tested, released and documented, and what a deployer may rely on.
+built, tested, released and documented, what a deployer may rely on, and what
+the sharded scan was measured to do at 500 and 1,000 projects.
 
 ### Added
 
@@ -150,8 +155,13 @@ built, tested, released and documented, and what a deployer may rely on.
 Nothing to enable or grant. The scan task is named now, which changes nothing
 a deployment can see. A deployment made from this tag runs the v19.3 checks;
 the Changes card has nothing new to flag. The image tag is the git tag from
-here on (`TAG=v20.0.0-rc.1 tools/deploy.sh`, `?ref=v20.0.0-rc.1` for Terraform)
-and the short hash still works.
+here on (`TAG=v20.0.0 tools/deploy.sh`, `?ref=v20.0.0` for Terraform) and the
+short hash still works. A deployment that carries `SCHEDULES` upgrades with the
+same command (the `--update-headers` fix above); one that runs the
+pre-v18.1 image fetched its policy table from the `beta` branch, which this
+release retires — upgrade it. The `beta` and `dev` branches are archived as
+tags (`archive/beta`, `archive/dev`); every earlier release, `v17.0.0` to
+`v19.3.0`, is a tag and a GitHub pre-release on its commit.
 
 ## v19.3 — Finish what the report points at
 
