@@ -36,6 +36,7 @@
         .status-card { width: 100%; max-width: 448px; padding: 32px; }
         .notice { width: 100%; max-width: 448px; }
         .brand { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; margin-bottom: 28px; font-size: 13px; font-weight: 600; letter-spacing: -0.01em; color: var(--ink); }
+        .brand-lockup { align-items: center; }
         .signed-in { font-weight: 400; letter-spacing: 0; font-size: 12px; color: var(--muted); overflow-wrap: anywhere; text-align: right; }
         .status-card h1 { font-size: 22px; margin-bottom: 6px; }
         .scope-line { margin-bottom: 20px; font-family: var(--font-mono); font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
@@ -52,7 +53,7 @@
 <body class="dotgrid">
     {% if banner %}<div role="note" class="notice notice-amber">{{ banner }}</div>{% endif %}
     <main class="card status-card">
-        <div class="brand">CloudGauge{% if current_user %}<span class="signed-in">Signed in as {{ current_user }}</span>{% endif %}</div>
+        <div class="brand brand-lockup">{{ logo.lockup(32) }}{% if current_user %}<span class="signed-in">Signed in as {{ current_user }}</span>{% endif %}</div>
         <h1>Scan not queued</h1>
         <p class="scope-line">{{ scope }} {{ scope_id }}</p>
         <p class="lede">Cloud Tasks did not take the scan task, so nothing was started. This is usually momentary: try again in a minute. If it keeps happening, the queue's region or the service account's <code>cloudtasks.enqueuer</code> role is the place to look.</p>

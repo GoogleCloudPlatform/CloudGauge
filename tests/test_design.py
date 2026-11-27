@@ -336,7 +336,7 @@ def test_setup_and_status_pages_are_one_centred_card_on_a_dot_grid(pages):
 # ---- The logo on the pages (v20.0.1): app/templates/_logo.html inlines the mark and the wordmark, pinned to the asset files ----
 
 TILE_COLOURS = ['#E8EAED', '#E8EAED', '#1E8E3E', '#E8EAED', '#F9AB00', '#1A73E8', '#EA4335', '#4285F4', '#1A73E8']  # row-major
-MARK_SIZES = {'status': ['32'], 'report': ['24', '36']}  # the brand row; the sidebar brand and the report title
+MARK_SIZES = {'status': ['32'], 'index': ['32'], 'history': ['32'], 'running': ['32'], 'report': ['24', '36']}  # the brand rows (v20.0.2: every page); the sidebar brand and the report title
 MARK = re.compile(r'<svg class="cg-mark" viewBox="0 0 144 144" width="(\d+)" height="(\d+)" aria-hidden="true" focusable="false">(.*?)</svg>', re.S)
 WORDMARK = re.compile(r'<svg class="cg-wordmark" viewBox="194 48 456 64" width="([\d.]+)" height="([\d.]+)" style="margin-left:([\d.]+)px" '
                       r'role="img" aria-label="CloudGauge" focusable="false">(.*?)</svg>', re.S)
@@ -405,7 +405,8 @@ def test_the_status_page_assembles_the_logo_as_the_scan_advances(pages):
     assert 'if (mark) mark.setProgress(data.progress);' in STATUS_PAGE and 'setInterval(() => { if (mark) mark.move(); }, 700)' in STATUS_PAGE
     assert 'if (mark) mark.setProgress(100);' in STATUS_PAGE and len(re.findall(r'^\s+mark = null;', STATUS_PAGE, re.M)) == 2  # settled on complete and on failed
     assert rule(STATUS_PAGE, '.cg-mark rect')['transition'].startswith('transform ') and rule(STATUS_PAGE, '.cg-mark rect.wrap')['transition'] == 'none'
-    assert rule(STATUS_PAGE, '.brand-lockup')['align-items'] == 'center'
+    for source in (STATUS_PAGE, INDEX_PAGE, HISTORY_PAGE):  # v20.0.2: the lockup is the brand row of every page
+        assert rule(source, '.brand-lockup')['align-items'] == 'center'
     for unchanged in ('<span id="progress-bar" class="progress-bar"></span>', '<span id="progress-text" class="progress-text">0%</span>',
                       '<p id="status-message" class="status-message">Starting…</p>', "progressBar.style.width = data.progress + '%'"):
         assert unchanged in STATUS_PAGE
