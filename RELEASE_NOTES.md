@@ -8,8 +8,34 @@ the test suite running inside the image, a zero-traffic canary revision scanned
 against a real organization, promotion, and a production scan compared fact for
 fact with the previous version's report.
 
-Versions are the image tags (`v5` … `v20.0.0`); the commit is the one that shipped. From v20 the
+Versions are the image tags (`v5` … `v20.0.1`); the commit is the one that shipped. From v20 the
 versions are also git tags, and a tag publishes the GitHub Release (docs/development.md › Cut a release).
+
+## v20.0.1 — The logo on the pages
+
+A cosmetic release: the CloudGauge mark — the nine tiles of the logo refreshed in
+November 2026 (`assets/cloudgauge_icon.svg`) — and the wordmark come onto the pages.
+No change to the checks, the worker, the API, the roles or the stability surface.
+
+### Changed
+
+- **The scan status page.** The brand row is the mark beside the wordmark, and while
+  the scan runs the mark's tiles slide like the rows and columns of a puzzle cube; each
+  tile locks into its place in the logo as the progress the page polls grows, the red
+  tile first and the greys last, so that at 100 % the logo is whole and stays through
+  *Scan complete*. The 4 px progress bar, the percentage and the current-task line are
+  unchanged. Under `prefers-reduced-motion` nothing slides: the tiles that have locked
+  are shown and the rest stay faint.
+- **The report.** The mark and the wordmark in the sidebar and as the report's title.
+- **Every page** carries the mark as its favicon — inline, as a data URL, so a stored
+  report stays self-contained.
+
+### Tests
+
+- One template, `app/templates/_logo.html`, holds the SVG; `tests/test_design.py` pins
+  its tiles, tile for tile, to `assets/cloudgauge_icon.svg` and its wordmark to
+  `assets/cloudgauge_logo.svg`, checks that every page's favicon decodes to the icon,
+  and that the status page's bar, percentage and task line are what they were.
 
 ## v20.0.0 — General availability
 

@@ -18,7 +18,7 @@
 /* Shell: a fixed sidebar and one page at a time in the main column. */
 body { display: flex; min-height: 100vh; }
 .sidebar { position: fixed; top: 0; left: 0; bottom: 0; width: 240px; display: flex; flex-direction: column; padding: 20px 12px 16px; background: var(--surface); border-right: 1px solid var(--hairline); overflow-y: auto; }
-.sidebar-brand { padding: 2px 12px 22px; font-size: 15px; font-weight: 600; letter-spacing: -0.01em; color: var(--ink); }
+.sidebar-brand { display: flex; align-items: center; padding: 2px 12px 22px; color: var(--ink); }
 .sidebar .nav-link { display: flex; align-items: center; gap: 10px; margin: 1px 0; padding: 7px 10px 7px 12px; border-left: 2px solid transparent; border-radius: var(--radius-control); color: var(--body); font-size: 13px; text-decoration: none; }
 .sidebar .nav-link:hover { background: var(--canvas); }
 .sidebar .nav-link.active { background: var(--zinc-100); border-left-color: var(--ink); color: var(--ink); font-weight: 500; }
@@ -32,7 +32,7 @@ body { display: flex; min-height: 100vh; }
 
 /* Header: the title, a monospace definition list, and the CSV button. */
 .report-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 20px; }
-.report-header h1 { margin-bottom: 10px; }
+.report-header h1 { display: flex; align-items: center; gap: 7px; margin-bottom: 10px; }
 .header-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; flex-shrink: 0; }
 .report-meta { display: grid; grid-template-columns: max-content 1fr; gap: 3px 14px; margin: 0; font-family: var(--font-mono); font-size: 12px; color: var(--muted); }
 .report-meta dd { margin: 0; overflow-wrap: anywhere; }

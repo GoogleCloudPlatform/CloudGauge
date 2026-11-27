@@ -64,6 +64,11 @@ code, kbd, pre, .mono { font-family: var(--font-mono); font-variant-numeric: tab
 .notice-rose { background: var(--rose-50); border-color: var(--rose-200); color: var(--rose-700); }
 .dotgrid { background-color: var(--canvas); background-image: radial-gradient(circle, var(--zinc-300) 1px, transparent 1px); background-size: 24px 24px; }
 
+/* The brand (v20.0.1): the mark, the logo's nine tiles, beside the wordmark; both inline SVG from _logo.html, which holds the colours. */
+.cg-lockup { display: inline-flex; align-items: center; color: var(--ink); }
+.cg-mark, .cg-wordmark { display: block; flex: none; }
+.cg-wordmark { overflow: visible; }
+
 /* Buttons: one black primary, outlined secondaries, link-styled tertiaries. */
 .btn { display: inline-flex; align-items: center; justify-content: center; gap: 8px; padding: 9px 14px; border: 1px solid transparent; border-radius: var(--radius-control);
        font: 500 14px/1.2 var(--font-sans); color: var(--body); background: var(--surface); text-decoration: none; cursor: pointer; white-space: nowrap; }
