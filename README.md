@@ -1,8 +1,12 @@
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="./assets/cloudgauge_logo_dark.svg">
+  <source media="(prefers-color-scheme: light)" srcset="./assets/cloudgauge_logo.svg">
+  <img alt="CloudGauge" src="./assets/cloudgauge_logo.png" width="340">
+</picture>
+
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![CI](https://github.com/GoogleCloudPlatform/CloudGauge/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/GoogleCloudPlatform/CloudGauge/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/GoogleCloudPlatform/CloudGauge?sort=semver)](https://github.com/GoogleCloudPlatform/CloudGauge/releases)
-
-# **CloudGauge**
 
 **Note:** This is not an officially supported Google product. This project is not eligible for the [Google Open Source Software Vulnerability Rewards Program](https://bughunters.google.com/open-source-security).
 
