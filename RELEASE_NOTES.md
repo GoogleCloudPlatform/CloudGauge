@@ -35,7 +35,10 @@ No change to the checks, the worker, the API, the roles or the stability surface
 - One template, `app/templates/_logo.html`, holds the SVG; `tests/test_design.py` pins
   its tiles, tile for tile, to `assets/cloudgauge_icon.svg` and its wordmark to
   `assets/cloudgauge_logo.svg`, checks that every page's favicon decodes to the icon,
-  and that the status page's bar, percentage and task line are what they were.
+  and that the status page's bar, percentage and task line are what they were. The test
+  image carries those two files (`Dockerfile.test`), so the suite that `cloudbuild.yaml`
+  runs inside the image reads them too; `tests/test_packaging.py` holds every file under
+  `assets/` that a test reads to that.
 
 ## v20.0.0 — General availability
 

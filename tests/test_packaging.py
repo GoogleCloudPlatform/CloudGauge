@@ -296,6 +296,26 @@ def test_build_contexts():
     assert ' RELEASE_NOTES.md ./' in (ROOT / 'Dockerfile.test').read_text() and 'RELEASE_NOTES' not in (ROOT / 'Dockerfile').read_text()
 
 
+def test_every_asset_a_test_reads_reaches_the_test_image():
+    """A test that reads a file under assets/ (test_design.py pins the inlined logo to the icon and logo files, v20.0.1)
+    needs that file copied into the test image and let through its build context, or the suite that runs inside the
+    image fails at collection — as the first Cloud Build of the v20.0.1 tag did. The application image stays as it is:
+    only the two data files ship (v18.1), and the templates hold the logo's SVG themselves."""
+    referenced = set()
+    for test in (ROOT / 'tests').glob('*.py'):
+        if test.name == 'test_packaging.py':
+            continue  # this file names the patterns, not files it reads
+        source = test.read_text(encoding='utf-8')
+        referenced |= set(re.findall(r"ASSETS / '([^']+)'", source)) | set(re.findall(r"\bassets/([\w.-]+\.\w+)", source))
+    assert {'cloudgauge_icon.svg', 'cloudgauge_logo.svg'} <= referenced
+    copied = ' '.join(line for name in ('Dockerfile', 'Dockerfile.test') for line in (ROOT / name).read_text().splitlines() if line.startswith('COPY '))
+    test_context, app_context = ignore_patterns('Dockerfile.test.dockerignore'), ignore_patterns('.dockerignore')
+    for name in sorted(referenced):
+        assert f'assets/{name}' in copied, name  # into the application image (the data files) or the test image (the logo)
+        assert f'!assets/{name}' in test_context, name
+    assert {line for line in app_context if line.startswith('!assets/')} == {'!assets/gcp_best_practices.csv', '!assets/cloud_armor_rulesets.json'}
+
+
 def test_app_needs_neither_vertexai_nor_aiplatform():
     """With both made unimportable, every module imports and the app builds."""
     code = '''
