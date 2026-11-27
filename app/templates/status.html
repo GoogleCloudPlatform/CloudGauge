@@ -18,13 +18,18 @@
   three states built by the script. In progress: a 4px progress bar and the
   current task, polled from /api/status every 3 seconds. Complete: the
   check-circle, the report and CSV buttons. Failed: the x-circle and the error.
+  Every state opens with the brand row: the mark beside the wordmark (_logo.html).
+  While the scan runs the mark's tiles slide like the rows and columns of a
+  puzzle cube and lock into the logo as the progress grows (v20.0.1).
 #}
+{% import "_logo.html" as logo -%}
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Scan in progress</title>
+    {{ logo.favicon() }}
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
@@ -35,6 +40,9 @@
         .notice { width: 100%; max-width: 448px; }
         .brand { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; margin-bottom: 28px; font-size: 13px; font-weight: 600; letter-spacing: -0.01em; color: var(--ink); }
         .signed-in { font-weight: 400; letter-spacing: 0; font-size: 12px; color: var(--muted); overflow-wrap: anywhere; text-align: right; }
+        .brand-lockup { align-items: center; }
+        .cg-mark rect { transition: transform 0.32s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.2s ease; }
+        .cg-mark rect.wrap { transition: none; }
         .status-card h1 { font-size: 22px; margin-bottom: 6px; }
         .scope-line { margin-bottom: 20px; font-family: var(--font-mono); font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
         .lede { margin-bottom: 20px; color: var(--muted); }
@@ -64,8 +72,13 @@
         const scope = "{{ scope }}";
         const signed_in_as = {{ (current_user or '')|tojson }};  // the verified IAP identity; '' when not behind IAP
         const card = document.getElementById('status-card');
+        const LOCKUP = {{ logo.lockup(32)|tojson }};  // the mark beside the wordmark (_logo.html): the brand row of every state
+        const LOCK_ORDER = [6, 7, 8, 5, 4, 2, 0, 1, 3];  // the gauge sweep: red, light blue, blue, blue, amber, green, then the greys
+        const CELL = 46;  // the icon's grid pitch in its own units: tiles of 36, 10 between
+        const REDUCED_MOTION = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
         const CHECK_CIRCLE = '<svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="m9 12 2 2 4-4"/></svg>';
         const X_CIRCLE = '<svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="m15 9-6 6"/><path d="m9 9 6 6"/></svg>';
+        let mark = null;  // the moving mark while the scan runs; null once the card shows a settled one
 
         function escapeHtml(text) {
             return String(text).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -73,7 +86,59 @@
 
         function brandHtml() {
             const who = signed_in_as ? `<span class="signed-in">Signed in as ${escapeHtml(signed_in_as)}</span>` : '';
-            return `<div class="brand">CloudGauge${who}</div>`;
+            return `<div class="brand brand-lockup">${LOCKUP}${who}</div>`;
+        }
+
+        // While the scan runs, the mark's nine tiles slide like the rows and columns of a puzzle cube, and each tile
+        // locks into its place in the logo as the poll's progress grows (LOCK_ORDER), so 100% is the logo. A tile is a
+        // <rect> moved by a CSS transform in the icon's units; the tile that leaves one edge enters at the other.
+        // Under prefers-reduced-motion nothing slides: the tiles that have locked are shown, the rest faint.
+        function animatedMark() {
+            const tiles = Array.from(card.querySelectorAll('.cg-mark rect'));
+            if (tiles.length !== 9) return null;
+            const cellOf = [0, 1, 2, 3, 4, 5, 6, 7, 8];  // tile -> the cell it occupies; tile n is at home in cell n
+            let locked = 0;
+            const isLocked = tile => LOCK_ORDER.indexOf(tile) < locked;
+            const tileAt = cell => cellOf.indexOf(cell);
+            const random = list => list[Math.floor(Math.random() * list.length)];
+            function place(tile, cell, wraps) {
+                const el = tiles[tile];
+                const shift = `translate(${(cell % 3 - tile % 3) * CELL}px, ${(Math.floor(cell / 3) - Math.floor(tile / 3)) * CELL}px)`;
+                if (!wraps) { el.style.transform = shift; return; }
+                el.classList.add('wrap'); el.style.opacity = 0; el.style.transform = shift;  // jump across, then fade in
+                requestAnimationFrame(() => requestAnimationFrame(() => { el.classList.remove('wrap'); el.style.opacity = 1; }));
+            }
+            function move() {
+                if (locked >= 9 || REDUCED_MOTION) return;
+                const lines = [];
+                for (let k = 0; k < 3; k++) lines.push([3 * k, 3 * k + 1, 3 * k + 2], [k, k + 3, k + 6]);
+                const free = lines.filter(line => line.every(cell => !isLocked(tileAt(cell))));
+                if (free.length) {  // slide a row or column whose tiles are all loose, by one, wrapping
+                    const line = random(free), direction = Math.random() < 0.5 ? 1 : -1;
+                    line.map(tileAt).forEach((tile, k) => {
+                        const to = line[(k + direction + 3) % 3];
+                        cellOf[tile] = to;
+                        place(tile, to, direction === 1 ? k === 2 : k === 0);
+                    });
+                } else {  // no such line left: swap two loose tiles
+                    const loose = cellOf.map((_, tile) => tile).filter(tile => !isLocked(tile));
+                    if (loose.length < 2) return;
+                    const a = random(loose), b = random(loose.filter(tile => tile !== a));
+                    [cellOf[a], cellOf[b]] = [cellOf[b], cellOf[a]];
+                    place(a, cellOf[a]); place(b, cellOf[b]);
+                }
+            }
+            function setProgress(percent) {
+                locked = Math.min(9, Math.floor(percent / 100 * 9 + 1e-9));
+                for (const tile of LOCK_ORDER.slice(0, locked)) {  // a locked tile goes home; whatever sat there takes its old cell
+                    if (cellOf[tile] === tile) continue;
+                    const other = tileAt(tile), was = cellOf[tile];
+                    cellOf[tile] = tile; place(tile, tile);
+                    if (other >= 0) { cellOf[other] = was; place(other, was); }
+                }
+                if (REDUCED_MOTION) tiles.forEach((el, tile) => { el.style.opacity = isLocked(tile) ? 1 : 0.3; });
+            }
+            return { move, setProgress };
         }
 
         // --- UI Update Functions  ---
@@ -91,14 +156,17 @@
                 <p id="status-message" class="status-message">Starting…</p>
                 <p class="job-line">Job ${escapeHtml(job_id)}</p>
             `;
+            mark = animatedMark();
         }
 
         function showReadyUI() {
             document.title = "Report ready";
+            mark = null;  // the brand row's mark is the logo, settled
             const report_url = `/report/${job_id}/${scope_id}`;
             const csv_url = `/report/${job_id}/${scope_id}/csv`;  // v16.1: the service's own route, behind the same sign-in as the pages
             const history_url = `/history/${scope}/${scope_id}`;  // v17: the scope's scans over time
             card.innerHTML = `
+                ${brandHtml()}
                 <div class="state-icon ok">${CHECK_CIRCLE}</div>
                 <h1>Scan complete</h1>
                 <p class="scope-line">${escapeHtml(scope)} ${escapeHtml(scope_id)}</p>
@@ -114,7 +182,9 @@
 
         function showErrorUI(message) {
             document.title = "Scan failed";
+            mark = null;
             card.innerHTML = `
+                ${brandHtml()}
                 <div class="state-icon failed">${X_CIRCLE}</div>
                 <h1>Scan failed</h1>
                 <p class="scope-line">${escapeHtml(scope)} ${escapeHtml(scope_id)}</p>
@@ -153,10 +223,12 @@
                 if (progressBar) progressBar.style.width = data.progress + '%';
                 if (progressText) progressText.textContent = Math.round(data.progress) + '%';
                 if (statusMessage) statusMessage.textContent = data.current_task;
+                if (mark) mark.setProgress(data.progress);
 
                 // Check the final status
                 if (data.status === 'completed') {
                     clearInterval(statusInterval); // Stop polling
+                    if (mark) mark.setProgress(100);  // the logo, whole, for the half second before the card changes
                     setTimeout(showReadyUI, 500); // Short delay to show 100%
                 } else if (data.status === 'error') {
                     clearInterval(statusInterval); // Stop polling
@@ -169,6 +241,7 @@
         }
 
         const statusInterval = setInterval(checkStatus, 3000); // Check every 3 seconds
+        const markMoves = setInterval(() => { if (mark) mark.move(); }, 700);  // the puzzle moves, between polls
         checkStatus(); // Initial check on page load
     </script>
 </body>

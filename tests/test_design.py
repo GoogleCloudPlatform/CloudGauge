@@ -28,9 +28,11 @@ later). The tests read the rules from the stylesheets and check the rendered
 pages: the report as the worker writes it, the index and status pages as the
 app serves them.
 """
+import json
 import pathlib
 import re
 from html import unescape
+from urllib.parse import unquote
 
 import pytest
 
@@ -44,6 +46,9 @@ REPORT_STYLES = (TEMPLATES / 'report' / '_styles.css').read_text(encoding='utf-8
 STATUS_PAGE = (TEMPLATES / 'status.html').read_text(encoding='utf-8')
 INDEX_PAGE = (TEMPLATES / 'index.html').read_text(encoding='utf-8')
 HISTORY_PAGE = (TEMPLATES / 'history.html').read_text(encoding='utf-8')
+ASSETS = TEMPLATES.parent.parent / 'assets'
+ICON_SVG = (ASSETS / 'cloudgauge_icon.svg').read_text(encoding='utf-8')  # the mark: nine tiles
+LOGO_SVG = (ASSETS / 'cloudgauge_logo.svg').read_text(encoding='utf-8')  # the mark beside the wordmark
 
 # Tailwind's palette, by the names the brief uses.
 ZINC_50, ZINC_200, ZINC_900, WHITE = '#fafafa', '#e4e4e7', '#18181b', '#ffffff'
@@ -88,6 +93,8 @@ def render(results):
 
 def ui_copy(page):
     """The fixed headings and button labels of a page (the labels its script sets included), not the data shown."""
+    page = re.sub(r'<svg class="cg-mark"[^>]*>.*?</svg>', '', page, flags=re.S)  # the brand (v20.0.1) reads as its accessible name
+    page = re.sub(r'<svg class="cg-wordmark"[^>]*>.*?</svg>', 'CloudGauge', page, flags=re.S)
     copy = re.findall(r'<h[12][^>]*>([^<{]+)</h[12]>', page)  # the status page's headings are in its script's template literals
     for heading, attribution in re.findall(r'<h2>([^<{]+)<span class="attribution">([^<]+)</span></h2>', page):
         copy += [heading, attribution]  # "AI analysis" with its "Powered by Gemini"
@@ -324,3 +331,81 @@ def test_setup_and_status_pages_are_one_centred_card_on_a_dot_grid(pages):
     assert rule(DESIGN, '.field label')['font-weight'] == '500' and rule(DESIGN, '.select')['border'] == '1px solid var(--control-border)'
     assert rule(STATUS_PAGE, '.progress-bar')['background'] == 'var(--ink)' and rule(STATUS_PAGE, '.progress-bar-container')['height'] == '4px'
     assert (rule(STATUS_PAGE, '.state-icon.ok')['color'], rule(STATUS_PAGE, '.state-icon.failed')['color']) == ('var(--emerald-600)', 'var(--rose-700)')
+
+
+# ---- The logo on the pages (v20.0.1): app/templates/_logo.html inlines the mark and the wordmark, pinned to the asset files ----
+
+TILE_COLOURS = ['#E8EAED', '#E8EAED', '#1E8E3E', '#E8EAED', '#F9AB00', '#1A73E8', '#EA4335', '#4285F4', '#1A73E8']  # row-major
+MARK_SIZES = {'status': ['32'], 'report': ['24', '36']}  # the brand row; the sidebar brand and the report title
+MARK = re.compile(r'<svg class="cg-mark" viewBox="0 0 144 144" width="(\d+)" height="(\d+)" aria-hidden="true" focusable="false">(.*?)</svg>', re.S)
+WORDMARK = re.compile(r'<svg class="cg-wordmark" viewBox="194 48 456 64" width="([\d.]+)" height="([\d.]+)" style="margin-left:([\d.]+)px" '
+                      r'role="img" aria-label="CloudGauge" focusable="false">(.*?)</svg>', re.S)
+
+
+def svg_rects(svg):
+    return [dict(re.findall(r'([\w-]+)="([^"]*)"', attributes)) for attributes in re.findall(r'<rect\b([^>]*)/>', svg)]
+
+
+def with_script_markup(page):
+    """The page plus the markup its script holds as JSON: the status page's brand row, built for each of its states."""
+    return page + ''.join(json.loads(literal) for literal in re.findall(r'const LOCKUP = ("(?:[^"\\]|\\.)*");', page))
+
+
+def test_the_mark_is_the_icon_tile_for_tile(pages):
+    """Nine <rect>s in the icon's order (the status page's script moves them by index) with the icon's geometry and colours,
+    as SVG attributes: the stylesheets keep to the tokens (test_colours_are_palette_tokens_never_raw_red_or_green)."""
+    icon = svg_rects(ICON_SVG)
+    assert len(icon) == 9 and [tile['fill'] for tile in icon] == TILE_COLOURS
+    assert [(tile['x'], tile['y']) for tile in icon] == [(str(8 + 46 * (n % 3)), str(8 + 46 * (n // 3))) for n in range(9)]  # CELL = 46
+    for name, page in pages.items():
+        marks = MARK.findall(with_script_markup(page))
+        assert [width for width, _, _ in marks] == MARK_SIZES.get(name, []), name
+        for width, height, tiles in marks:
+            assert width == height and svg_rects(tiles) == icon, name
+
+
+def test_the_wordmark_is_the_logo_outline(pages):
+    """Beside every mark, the logo file's wordmark: its two glyph outlines, the arc of the G and the G's blue bar, sized
+    from the mark in the logo's proportions (gap 50, cap height 64, width 456 of the mark's 144) and reading as its name."""
+    outlines = [re.sub(r'\s+', ' ', d).strip() for d in re.findall(r'<path\s+d="([^"]+)"\s+id="text(?:9|10)"', LOGO_SVG)]
+    assert len(outlines) == 2 and re.search(r'<rect\s+x="436.5"\s+y="75.5"\s+width="29"\s+height="9"\s+rx="1.8"\s+fill="#1A73E8"', LOGO_SVG)
+    for name, page in pages.items():
+        page = with_script_markup(page)
+        wordmarks, marks = WORDMARK.findall(page), MARK.findall(page)
+        assert len(wordmarks) == len(marks), name
+        for (width, height, gap, inner), (size, _, _) in zip(wordmarks, marks):
+            size = int(size)
+            assert (float(width), float(height), float(gap)) == (round(456 * size / 144, 1), round(64 * size / 144, 1), round(50 * size / 144, 1)), name
+            assert re.findall(r'<path fill="currentColor" d="([^"]+)"', inner) == outlines, name
+            assert 'stroke="currentColor" stroke-width="9.0"' in inner and '<rect x="436.5" y="75.5" width="29" height="9" rx="1.8" fill="#1A73E8"/>' in inner, name
+    assert '<div class="sidebar-brand"><svg class="cg-mark"' in pages['report'] and 'CloudGauge report' in ui_copy(pages['report'])
+    lockup = rule(DESIGN, '.cg-lockup')
+    assert (lockup['display'], lockup['align-items'], lockup['color']) == ('inline-flex', 'center', 'var(--ink)')
+    assert rule(DESIGN, '.cg-wordmark')['overflow'] == 'visible'  # the descender of the g lies below the cap-height viewBox
+    assert rule(REPORT_STYLES, '.sidebar-brand')['display'] == 'flex' and rule(REPORT_STYLES, '.report-header h1')['display'] == 'flex'
+
+
+def test_every_page_carries_the_mark_as_its_favicon(pages):
+    icon = svg_rects(ICON_SVG)
+    for name, page in pages.items():
+        icons = re.findall(r'<link rel="icon" type="image/svg\+xml" href="data:image/svg\+xml,([^"]+)">', page)
+        assert len(icons) == 1, name  # inline, so a stored report stays self-contained
+        svg = unquote(icons[0])
+        assert svg.startswith('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 144 144">') and svg_rects(svg) == icon, name
+
+
+def test_the_status_page_assembles_the_logo_as_the_scan_advances(pages):
+    """The brand row of the status page is the lockup, in every state. While the scan runs the mark's tiles slide like
+    the rows and columns of a puzzle cube and lock home in the gauge's order as the poll's progress grows, so 100% is
+    the logo; the bar, the percentage and the task line are what they were; under prefers-reduced-motion nothing slides."""
+    assert pages['status'].count('const LOCKUP = ') == 1 and STATUS_PAGE.count('return `<div class="brand brand-lockup">${LOCKUP}${who}</div>`;') == 1
+    assert STATUS_PAGE.count('${brandHtml()}') == 3  # in progress, complete, failed
+    assert 'const LOCK_ORDER = [6, 7, 8, 5, 4, 2, 0, 1, 3];' in STATUS_PAGE  # red, light blue, blue, blue, amber, green, then the greys
+    assert 'const CELL = 46;' in STATUS_PAGE and "window.matchMedia('(prefers-reduced-motion: reduce)').matches" in STATUS_PAGE
+    assert 'if (mark) mark.setProgress(data.progress);' in STATUS_PAGE and 'setInterval(() => { if (mark) mark.move(); }, 700)' in STATUS_PAGE
+    assert 'if (mark) mark.setProgress(100);' in STATUS_PAGE and len(re.findall(r'^\s+mark = null;', STATUS_PAGE, re.M)) == 2  # settled on complete and on failed
+    assert rule(STATUS_PAGE, '.cg-mark rect')['transition'].startswith('transform ') and rule(STATUS_PAGE, '.cg-mark rect.wrap')['transition'] == 'none'
+    assert rule(STATUS_PAGE, '.brand-lockup')['align-items'] == 'center'
+    for unchanged in ('<span id="progress-bar" class="progress-bar"></span>', '<span id="progress-text" class="progress-text">0%</span>',
+                      '<p id="status-message" class="status-message">Starting…</p>', "progressBar.style.width = data.progress + '%'"):
+        assert unchanged in STATUS_PAGE
