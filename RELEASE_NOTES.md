@@ -8,8 +8,39 @@ the test suite running inside the image, a zero-traffic canary revision scanned
 against a real organization, promotion, and a production scan compared fact for
 fact with the previous version's report.
 
-Versions are the image tags (`v5` … `v20.0.1`); the commit is the one that shipped. From v20 the
+Versions are the image tags (`v5` … `v20.0.2`); the commit is the one that shipped. From v20 the
 versions are also git tags, and a tag publishes the GitHub Release (docs/development.md › Cut a release).
+
+## v20.0.2 — The lockup on every page; the dependencies of November
+
+A maintenance release: the mark and the wordmark reach the pages that still spelled
+the name in text, and the month's dependency updates come in. No change to the
+checks, the roles, the API or the stability surface.
+
+### Changed
+
+- **The brand row of every page is the lockup.** The setup page, the history page and
+  the *scan already running* and *scan not queued* pages join the status page and the
+  report (v20.0.1): the mark at 32 px beside the wordmark, *Signed in as* on the right.
+  Static everywhere but the status page, where the tiles move while a scan runs.
+
+### Dependencies
+
+- The November group (Dependabot #20): `google-genai` 2.25.0 → **3.3.0** — the Gemini
+  client's next major; the two features that call it, the executive summary and *Draft
+  fixes*, were exercised on the canary with it — `gunicorn` 26.2.0 → 27.0.1, `google-auth`
+  2.59.0 → 2.62.2, `google-api-python-client` 2.200.0 → 2.202.0, `google-auth-httplib2`
+  0.4.2 → 0.4.4, `google-cloud-asset` 4.4.0 → 4.5.0, `google-cloud-os-config` 1.25.0 →
+  1.26.0, `google-cloud-recommender` 2.22.0 → 2.23.0, `google-cloud-storage` 3.15.0 →
+  3.17.1, `google-cloud-tasks` 2.25.0 → 2.26.0, `MarkupSafe` 3.0.3 → 3.0.4; for development,
+  `pytest` 9.1.1 → 9.2.0 and `ruff` 0.16.8 → 0.17.5. The suite ran green under the new pins
+  before the merge, in the repository and inside the image.
+
+### Tests
+
+- `tests/test_design.py` expects the lockup on every rendered page — the brand rows at
+  32 px, the report's sidebar at 24 and its title at 36 — and the `.brand-lockup` rule
+  that centres it on each page that has a brand row.
 
 ## v20.0.1 — The logo on the pages
 
