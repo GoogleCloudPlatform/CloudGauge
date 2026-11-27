@@ -18,6 +18,9 @@ COPY tests ./tests
 COPY tools ./tools
 COPY terraform ./terraform
 COPY docs ./docs
+# The logo the pages inline: test_design.py pins app/templates/_logo.html to these two files (v20.0.1). The
+# application image does not carry them (the templates hold the SVG), so the test image adds them.
+COPY assets/cloudgauge_icon.svg assets/cloudgauge_logo.svg ./assets/
 USER cloudgauge
 
 # Replaces the app image's CMD (setting ENTRYPOINT clears the inherited CMD).
